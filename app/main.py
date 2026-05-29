@@ -4,16 +4,14 @@ from PySide6.QtWidgets import QApplication
 
 from app.presentation.windows.login_window import LoginWindow
 
-from app.infrastructure.logging.logger import logger
+from app.infrastructure.database.database import Database
 
 
 def main():
 
-    logger.info("ETS Application Started")
+    Database.initialize()
 
     app = QApplication(sys.argv)
-
-    app.setApplicationName("ETS Client")
 
     window = LoginWindow()
 
@@ -23,4 +21,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()

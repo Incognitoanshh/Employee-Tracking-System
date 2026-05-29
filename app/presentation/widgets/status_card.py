@@ -19,13 +19,16 @@ class StatusCard(QFrame):
 
         super().__init__()
 
-        self.title = title
+        self.setup_ui(
+            title,
+            value
+        )
 
-        self.value = value
-
-        self.setup_ui()
-
-    def setup_ui(self):
+    def setup_ui(
+        self,
+        title,
+        value
+    ):
 
         self.setFixedHeight(120)
 
@@ -49,7 +52,7 @@ class StatusCard(QFrame):
             Qt.AlignmentFlag.AlignCenter
         )
 
-        title_label = QLabel(self.title)
+        title_label = QLabel(title)
 
         title_font = QFont()
 
@@ -57,7 +60,7 @@ class StatusCard(QFrame):
 
         title_label.setFont(title_font)
 
-        value_label = QLabel(self.value)
+        self.value_label = QLabel(value)
 
         value_font = QFont()
 
@@ -65,12 +68,23 @@ class StatusCard(QFrame):
 
         value_font.setBold(True)
 
-        value_label.setFont(value_font)
+        self.value_label.setFont(
+            value_font
+        )
 
         layout.addWidget(title_label)
 
         layout.addSpacing(10)
 
-        layout.addWidget(value_label)
+        layout.addWidget(
+            self.value_label
+        )
 
         self.setLayout(layout)
+
+    def update_value(
+        self,
+        value
+    ):
+
+        self.value_label.setText(value)

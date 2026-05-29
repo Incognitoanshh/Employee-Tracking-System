@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QFrame
 )
+from app.services.logger_service import LoggerService
 
 from app.presentation.windows.base_window import BaseWindow
 
@@ -186,6 +187,10 @@ class LoginWindow(BaseWindow):
 
         if result["success"]:
 
+            LoggerService.log(
+                f"LOGIN SUCCESS : {username}"
+            )
+
             SessionManager.create_session(
                 employee_id=result[
                     "employee_id"
@@ -197,9 +202,13 @@ class LoginWindow(BaseWindow):
 
             self.dashboard.show()
 
-            self.close()
+            self.hide()
 
         else:
+
+            LoggerService.log(
+                f"LOGIN FAILED : {username}"
+            )
 
             self.status_label.setText(
                 result["message"]
