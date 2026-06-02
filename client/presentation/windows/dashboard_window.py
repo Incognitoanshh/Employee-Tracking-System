@@ -1,8 +1,14 @@
+from copy import error
 from datetime import datetime
+
+import requests
+
 from PySide6.QtWidgets import QLabel, QPushButton, QGridLayout, QHBoxLayout, QVBoxLayout
 
 from client.infrastructure.database.database import Database
+
 from client.application.managers.shift_manager import ShiftManager
+
 from client.application.managers.sync_manager import SyncManager
 
 from client.presentation.windows.logs_window import LogsWindow
@@ -110,6 +116,12 @@ class DashboardWindow(BaseWindow):
 
         internet_card = StatusCard("Internet", "CONNECTED")
 
+        self.employee_count_card = StatusCard("Employees Online", "0")
+
+        self.screenshot_count_card = StatusCard("Screenshots Taken", "0")
+
+        self.log_count_card = StatusCard("Logs Recorded", "0")
+
         cards_layout.addWidget(tracking_card, 0, 0)
 
         cards_layout.addWidget(self.idle_card, 0, 1)
@@ -122,16 +134,21 @@ class DashboardWindow(BaseWindow):
 
         cards_layout.addWidget(internet_card, 1, 2)
 
+        cards_layout.addWidget(self.employee_count_card,2,0)
+
+        cards_layout.addWidget(self.screenshot_count_card,2,1)
+
+        cards_layout.addWidget(self.log_count_card,2,2)
+
         bottom_layout = QHBoxLayout()
 
         logs_button = QPushButton("Open Logs")
+
         logs_button.clicked.connect(self.open_logs_window)
 
         settings_button = QPushButton("Settings")
 
-        settings_button.clicked.connect(
-                self.open_settings_window
-        )
+        settings_button.clicked.connect(self.open_settings_window)
 
         logs_button.setFixedHeight(45)
 
@@ -194,6 +211,8 @@ class DashboardWindow(BaseWindow):
         self.idle_tracker.start()
 
         self.check_pending_sync()
+
+        self.load_dashboard_stats()
 
     def update_screenshot_timer(self, value):
 
@@ -287,3 +306,35 @@ class DashboardWindow(BaseWindow):
         print(
             f"PENDING SCREENSHOTS: {len(pending)}"
         )
+
+
+    def load_dashboard_stats(self):
+
+        try:
+            response = requests.get(
+                "http://localhost:8000/api/dashboard/stats",
+                timeout=5
+            )
+            result = response.json()
+
+            stats = result["data"]
+
+            self.employee_count_card.update_value(
+                str(stats["employees"])
+            )
+
+            self.screenshot_count_card.update_value(
+                str(stats["screenshots"])
+            )
+
+            self.log_count_card.update_value(
+                str(stats["activity_logs"])
+            )
+
+            print("[DASHBOARD STATS LOADED]")
+            print(stats)
+
+        except Exception as error:
+
+            print("[DASHBOARD API ERROR]",error)
+
