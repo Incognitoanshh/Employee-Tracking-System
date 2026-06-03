@@ -1,19 +1,21 @@
 import requests
+import os
+
 from client.infrastructure.database.database import Database
+from client.application.managers.session_manager import SessionManager
 
 
 class SyncManager:
 
     @staticmethod
     def get_pending_screenshots():
-
         connection = Database.connect()
         cursor = connection.cursor()
 
         cursor.execute("""
-            SELECT *
-            FROM screenshots
-            WHERE uploaded = 0
+        SELECT *
+        FROM screenshots
+        WHERE uploaded = 0
         """)
 
         data = cursor.fetchall()
@@ -24,7 +26,6 @@ class SyncManager:
 
     @staticmethod
     def mark_uploaded(screenshot_id):
-
         connection = Database.connect()
         cursor = connection.cursor()
 
@@ -38,14 +39,11 @@ class SyncManager:
         )
 
         connection.commit()
-
         connection.close()
 
     @staticmethod
     def get_pending_logs():
-
         connection = Database.connect()
-
         cursor = connection.cursor()
 
         cursor.execute(
@@ -64,9 +62,7 @@ class SyncManager:
 
     @staticmethod
     def mark_log_uploaded(log_id):
-
         connection = Database.connect()
-
         cursor = connection.cursor()
 
         cursor.execute(
@@ -79,7 +75,6 @@ class SyncManager:
         )
 
         connection.commit()
-
         connection.close()
 
     @staticmethod
@@ -91,29 +86,52 @@ class SyncManager:
 
             try:
 
-                with open(
-                    screenshot["file_path"],
-                    "rb"
-                ) as file:
+                file_path = screenshot["file_path"]
+                screenshot_id = screenshot["id"]
+
+                if not os.path.exists(file_path):
+
+                    print(
+                        f"[SYNC SKIP] File not found: {screenshot_id}"
+                    )
+
+                    SyncManager.mark_uploaded(
+                        screenshot_id
+                    )
+
+                    continue
+
+                with open(file_path, "rb") as file:
 
                     response = requests.post(
+
                         "http://127.0.0.1:8000/api/screenshots/upload",
+
                         files={
                             "screenshot": file
                         },
+
+                        headers={
+                            "Authorization":
+                                f"Bearer {SessionManager.auth_token}"
+                            },
                         timeout=10
                     )
 
-                    if response.status_code == 200:
+                print(
+                    "[SCREENSHOT SYNC]",
+                    response.status_code,
+                    response.text
+                )
 
-                        SyncManager.mark_uploaded(
-                            screenshot["id"]
-                        )
-
-                        print(
-                            "[SYNC SUCCESS]",
-                            screenshot["id"]
-                        )
+                if response.status_code == 200:
+                    SyncManager.mark_uploaded(
+                        screenshot_id
+                    )
+                    print(
+                        "[SYNC SUCCESS]",
+                        screenshot_id
+                    )
 
             except Exception as error:
 
@@ -125,9 +143,7 @@ class SyncManager:
     @staticmethod
     def retry_logs():
 
-        pending_logs = (
-            SyncManager.get_pending_logs()
-        )
+        pending_logs = SyncManager.get_pending_logs()
 
         for log in pending_logs:
 
@@ -138,19 +154,27 @@ class SyncManager:
                     "http://127.0.0.1:8000/api/logs/create",
 
                     json={
+                        "employee_id":
+                            log["employee_id"],
 
-                        "employee_id": log["employee_id"],
+                            "activity":
+                                log["activity"]
+                            },
 
-                        "activity": log["activity"]
-
-                    },
-
+                    headers={
+                        "Authorization":
+                            f"Bearer {SessionManager.auth_token}"
+                        },
                     timeout=5
-
                 )
 
-                if response.status_code == 200:
+                print(
+                    "[LOG SYNC]",
+                    response.status_code,
+                    response.text
+                    )
 
+                if response.status_code == 200:
                     SyncManager.mark_log_uploaded(
                         log["id"]
                     )
@@ -159,10 +183,8 @@ class SyncManager:
                         "[LOG SYNC SUCCESS]",
                         log["id"]
                     )
-
             except Exception as error:
-
                 print(
                     "[LOG SYNC FAILED]",
-                    error
+                    os.error
                 )

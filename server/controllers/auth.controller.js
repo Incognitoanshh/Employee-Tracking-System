@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");  // ← ADD THIS
 
 exports.login = async (req, res) => {
 
@@ -31,8 +32,9 @@ exports.login = async (req, res) => {
 
         const employee = result.rows[0];
 
-        // Plaintext compare (DB mein hash nahi hai)
-        if (password !== employee.password) {
+        // ✅ FIX: bcrypt se compare karo, plaintext nahi
+        const isMatch = await bcrypt.compare(password, employee.password);
+        if (!isMatch) {
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"

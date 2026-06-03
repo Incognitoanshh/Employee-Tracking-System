@@ -1,6 +1,6 @@
 from datetime import datetime
 import requests
-
+from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 
 
@@ -65,8 +65,9 @@ class LoggerService:
                     "activity": message
 
                 },
+                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
 
-                timeout=1
+                timeout=5
 
             )
 

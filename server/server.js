@@ -7,6 +7,7 @@ const pool = require("./config/db");
 const authRoutes = require("./routes/auth.routes");
 const screenshotRoutes = require("./routes/screenshot.routes");
 const logRoutes = require("./routes/log.routes");
+const { verifyToken } = require("./middleware/auth.middleware"); // ✅ FIX: import karo
 
 pool.query("SELECT NOW()")
     .then(result => {
@@ -24,18 +25,14 @@ app.use(cors());
 app.use(express.json());
 
 app.use((req, res, next) => {
-    console.log(
-        "REQUEST RECEIVED:",
-        req.method,
-        req.url
-    );
+    console.log("REQUEST RECEIVED:", req.method, req.url);
     next();
 });
 
-app.use("/api/auth", authRoutes);
-app.use("/api/screenshots", screenshotRoutes);
-app.use("/api/logs",logRoutes);
-app.use("/api/dashboard",dashboardRoutes);
+app.use("/api/auth", authRoutes);                               // login — public rehna chahiye
+app.use("/api/screenshots", verifyToken, screenshotRoutes);    // ✅ FIX: protected
+app.use("/api/logs", verifyToken, logRoutes);                  // ✅ FIX: protected
+app.use("/api/dashboard", verifyToken, dashboardRoutes);       // ✅ FIX: protected
 
 app.get("/", async (req, res) => {
     try {
