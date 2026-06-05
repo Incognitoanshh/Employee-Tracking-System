@@ -1,3 +1,8 @@
+import requests
+from PySide6.QtWidgets import QStyle
+from client.services.logger_service import LoggerService
+from client.application.managers.session_manager import SessionManager
+from client.application.managers.session_log_manager import SessionLogManager
 from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QMenu,
@@ -24,7 +29,9 @@ class SystemTray(QSystemTrayIcon):
         self.parent_window = parent
 
         self.setIcon(
-            self.parent_window.windowIcon()
+            QApplication.style().standardIcon(
+                QStyle.SP_ComputerIcon
+            )   
         )
 
         self.setToolTip(
@@ -86,11 +93,36 @@ class SystemTray(QSystemTrayIcon):
 
         self.parent_window.activateWindow()
 
-    def exit_application(
-        self
-    ):
+    def exit_application(self):
+
+        try:
+
+            requests.post(
+                "http://localhost:8000/api/auth/logout",
+                headers={
+                    "Authorization":
+                        f"Bearer {SessionManager.auth_token}"
+                    },
+                    timeout=5
+            )
+        except Exception as error:
+
+            print("[LOGOUT API FAILED]", error)
+
+        print("[EXIT STARTED]")
+
+        LoggerService.log("LOGOUT")
+
+        print("[SESSION END CALLED]")
+
+        SessionLogManager.end_session()
+
+        print("[SHIFT END CALLED]")
+
         ShiftManager.end_shift()
 
+        SessionManager.clear_session()
+        print("QUITTING APP")
         QApplication.quit()
 
     def show_message(

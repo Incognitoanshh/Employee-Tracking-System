@@ -10,6 +10,9 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QMessageBox,
+    QLineEdit,
+    QComboBox,
+    QHBoxLayout,
 )
 
 from client.presentation.windows.base_window import BaseWindow
@@ -74,6 +77,7 @@ class LogsWindow(BaseWindow):
         self._screenshot_paths = {}
         self._thread = None
         self._worker = None
+        self.all_logs = []
 
         self.setup_ui()
 
@@ -89,6 +93,24 @@ class LogsWindow(BaseWindow):
             margin-bottom: 20px;
             """
         )
+
+        filter_layout = QHBoxLayout()
+
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("🔍 Search logs...")
+
+        self.filter_box = QComboBox()
+        self.filter_box.addItems([
+            "All",
+            "Screenshots",
+            "Idle",
+            "Active",
+            "Login",
+            "Logout"
+        ])
+
+        filter_layout.addWidget(self.search_box)
+        filter_layout.addWidget(self.filter_box)
 
         self.logs_table = QTableWidget()
         self.logs_table.setColumnCount(3)
@@ -149,8 +171,17 @@ class LogsWindow(BaseWindow):
         self.logs_table.cellDoubleClicked.connect(self.open_screenshot)
 
         main_layout.addWidget(title)
+        main_layout.addLayout(filter_layout)
         main_layout.addWidget(self.logs_table)
         self.setLayout(main_layout)
+
+        self.search_box.textChanged.connect(
+            self.apply_filters
+        )
+
+        self.filter_box.currentTextChanged.connect(
+            self.apply_filters
+        )
 
     def load_logs(self):
         # Reset UI immediately
@@ -179,6 +210,7 @@ class LogsWindow(BaseWindow):
     @Slot(list, dict)
     def _on_logs_loaded(self, total_logs, screenshot_paths):
         self._screenshot_paths = screenshot_paths
+        self.all_logs = total_logs
 
         self.logs_table.setUpdatesEnabled(False)
         self.logs_table.blockSignals(True)
@@ -196,6 +228,7 @@ class LogsWindow(BaseWindow):
 
         self.logs_table.blockSignals(False)
         self.logs_table.setUpdatesEnabled(True)
+        self.apply_filters()
 
     @Slot(str)
     def _on_logs_error(self, message):
@@ -233,3 +266,56 @@ class LogsWindow(BaseWindow):
         self.preview_window = ScreenshotPreviewWindow(image_path)
         self.preview_window.show()
 
+    def apply_filters(self):
+
+        search = self.search_box.text().lower()
+        filter_type = self.filter_box.currentText()
+
+        self.logs_table.setRowCount(0)
+
+        filtered = []
+
+        for log in self.all_logs:
+
+            employee = str(log[0])
+            status = str(log[1])
+            timestamp = str(log[2])
+
+            row_text = f"{employee} {status} {timestamp}".lower()
+
+            if search and search not in row_text:
+                continue
+
+            if filter_type == "Screenshots":
+                if "SCREENSHOT" not in status.upper():
+                    continue
+
+            elif filter_type == "Idle":
+                if "IDLE" not in status.upper():
+                    continue
+
+            elif filter_type == "Active":
+                if "ACTIVE" not in status.upper():
+                    continue
+                
+            elif filter_type == "Login":
+                if "LOGIN" not in status.upper():
+                    continue
+
+            elif filter_type == "Logout":
+                if "LOGOUT" not in status.upper():
+                    continue
+
+            filtered.append(log)
+
+        self.logs_table.setRowCount(len(filtered))
+
+        for row, entry in enumerate(filtered):
+
+            for col, value in enumerate(entry[:3]):
+
+                self.logs_table.setItem(
+                    row,
+                    col,
+                    QTableWidgetItem(str(value))
+                )

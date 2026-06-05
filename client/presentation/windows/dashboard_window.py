@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QCursor
-
+from PySide6.QtWidgets import QApplication
+from client.application.managers.session_log_manager import SessionLogManager
 from client.infrastructure.database.database import Database
 from client.application.managers.shift_manager import ShiftManager
 from client.application.managers.sync_manager import SyncManager
@@ -21,6 +22,8 @@ from client.application.managers.session_manager import SessionManager
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
+from client.services.logger_service import LoggerService
+from client.presentation.windows.attendance_window import AttendanceWindow
 
 
 class DashboardWindow(BaseWindow):
@@ -194,8 +197,10 @@ class DashboardWindow(BaseWindow):
 
         logs_button = QPushButton("📋  Activity Logs")
         settings_button = QPushButton("⚙  Settings")
+        logout_button = QPushButton("🚪  Logout")
+        attendance_button = QPushButton("📊 Attendance")
 
-        for btn in [logs_button, settings_button]:
+        for btn in [logs_button,attendance_button,settings_button]:
             btn.setFixedHeight(42)
 
         logs_button.setStyleSheet("""
@@ -226,9 +231,13 @@ class DashboardWindow(BaseWindow):
 
         logs_button.clicked.connect(self.open_logs_window)
         settings_button.clicked.connect(self.open_settings_window)
+        logout_button.clicked.connect(self.logout)
+        attendance_button.clicked.connect(self.open_attendance_window)
 
         bottom_layout.addWidget(logs_button)
         bottom_layout.addWidget(settings_button)
+        bottom_layout.addWidget(logout_button, alignment=Qt.AlignmentFlag.AlignRight)
+        bottom_layout.addWidget(attendance_button, alignment=Qt.AlignmentFlag.AlignRight)
 
         # ── Assemble ─────────────────────────────────────────
         main_layout.addLayout(header_layout)
@@ -315,8 +324,8 @@ class DashboardWindow(BaseWindow):
         self.settings_window.show()
 
     def closeEvent(self, event):
-        ShiftManager.end_shift()
-        print("TRAY CLOSE EVENT CALLED")
+        # ShiftManager.end_shift()
+        print("[MINIMIZED TO TRAY]")
         event.ignore()
         self.hide()
 
@@ -480,3 +489,21 @@ class DashboardWindow(BaseWindow):
             print("[DASHBOARD REFRESHED]")
         except Exception as error:
             print("[REFRESH ERROR]", error)
+
+    def logout(self):
+
+        LoggerService.log("LOGOUT")
+    
+        SessionLogManager.end_session()
+    
+        ShiftManager.end_shift()
+    
+        SessionManager.clear_session()
+    
+        QApplication.quit()
+
+    def open_attendance_window(self):
+
+        self.attendance_window = AttendanceWindow()
+    
+        self.attendance_window.show()

@@ -68,5 +68,16 @@ class Database:
         )
         """)
 
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id TEXT,
+            auth_token TEXT,
+            login_time TEXT,
+            logout_time TEXT,
+            status TEXT
+        )
+    """)
+
         connection.commit()
         connection.close()

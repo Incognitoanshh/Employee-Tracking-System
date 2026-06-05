@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QFrame, QSpacerItem, QSizePolicy
 )
+from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.services.logger_service import LoggerService
 from client.presentation.windows.base_window import BaseWindow
@@ -177,6 +178,7 @@ class LoginWindow(BaseWindow):
                 auth_token=result["token"]
             )
             ShiftManager.start_shift()
+            SessionLogManager.start_session()
             self.dashboard = DashboardWindow()
             self.dashboard.show()
             self.hide()
