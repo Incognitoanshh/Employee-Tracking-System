@@ -7,12 +7,7 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtGui import QPixmap
 import tempfile
-import os
-
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from PySide6.QtCore import Qt
-
 from client.presentation.windows.base_window import BaseWindow
 
 
@@ -76,49 +71,52 @@ class ScreenshotPreviewWindow(BaseWindow):
 
         try:
 
-            key = os.environ.get(
-                "SCREENSHOT_AES_KEY",
-                "2a0d030fe8ae1386b14972e800448c8d"
-            ).encode()
+            # Old screenshots (.png)
+            if self.image_path.endswith(".png"):
 
-            with open(self.image_path, "rb") as file:
-            
-                data = file.read()
+                pixmap = QPixmap(self.image_path)
 
-            nonce = data[:12]
-            ciphertext = data[12:]
-            aesgcm = AESGCM(key)
-            image_bytes = aesgcm.decrypt(
-                nonce,
-                ciphertext,
-                None
+                self.image_label.setPixmap(
+                    pixmap.scaled(
+                        int(1100 * self.scale_factor),
+                        int(650 * self.scale_factor),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                )
+
+                return
+
+            # Encrypted screenshots (.enc)
+            from client.security.crypto_engine import CryptoEngine
+
+            image_bytes = CryptoEngine.load_decrypted(
+                self.image_path
             )
+
             temp_file = tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=".png"
             )
+
             temp_file.write(image_bytes)
             temp_file.close()
+
             pixmap = QPixmap(temp_file.name)
-            width = int(
-                1100 * self.scale_factor
-            )
-            height = int(
-                650 * self.scale_factor
-            )
+
             self.image_label.setPixmap(
-            
                 pixmap.scaled(
-                
-                    width,
-                    height,
+                    int(1100 * self.scale_factor),
+                    int(650 * self.scale_factor),
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
             )
-
         except Exception as error:
-        
+
+            import traceback
+            traceback.print_exc()
+
             print(
                 "[PREVIEW ERROR]",
                 os.error

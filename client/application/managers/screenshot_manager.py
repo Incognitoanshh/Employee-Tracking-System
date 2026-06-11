@@ -1,12 +1,4 @@
-""" 
-ScreenshotManager — Shift-based random screenshot capture
-==========================================================
-Changes (TL requirements):
-    • Fixed interval HATAYA — ab shift ke dauraan N random times pe screenshot leta hai
-    • N = screenshot_count (settings se aata hai, default 3)
-    • Dashboard pe screenshot info show nahi hogi (admin panel mein hogi)
-    • capture_screenshot() same hai — sirf scheduling logic badla
-"""
+
 
 import io
 import os

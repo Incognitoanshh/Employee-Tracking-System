@@ -5,6 +5,7 @@ import requests
 from datetime import date
 
 from PySide6.QtCore    import Qt, QThread, Signal, QDate
+from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 from PySide6.QtGui     import QFont
 from PySide6.QtWidgets import (
     QComboBox, QDateEdit, QFrame, QHBoxLayout,
@@ -63,11 +64,6 @@ class _PostWorker(QThread):
             self.finished.emit(r.json())
         except Exception as e:
             self.error.emit(str(e))
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Config Tab
-# ──────────────────────────────────────────────────────────────────────────────
 
 class _ConfigTab(QWidget):
 
@@ -336,6 +332,7 @@ class _ScreenshotsTab(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.cellDoubleClicked.connect(self._open_preview)
         root.addWidget(self._table)
 
         pag_row = QHBoxLayout()
@@ -375,7 +372,9 @@ class _ScreenshotsTab(QWidget):
         for i, row in enumerate(rows):
             self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
             self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
-            self._table.setItem(i, 2, QTableWidgetItem(row.get("file_name", "")))
+            item = QTableWidgetItem(row.get("file_name", ""))
+            item.setData( Qt.ItemDataRole.UserRole,row.get("file_name", ""))
+            self._table.setItem(i, 2, item)
             self._table.setItem(i, 3, QTableWidgetItem(str(row.get("created_at", ""))))
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
@@ -383,6 +382,21 @@ class _ScreenshotsTab(QWidget):
 
     def _prev_page(self): self._load(self._page - 1)
     def _next_page(self): self._load(self._page + 1)
+    def _open_preview(self, row, column):
+
+        item = self._table.item(row, 2)
+        if not item:
+            return
+        file_name = item.data(
+            Qt.ItemDataRole.UserRole
+        )
+        image_path = (
+            f"server/uploads/screenshots/{file_name}"
+        )
+        self.preview_window = ScreenshotPreviewWindow(
+            image_path
+        )
+        self.preview_window.show()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -480,10 +494,6 @@ class _LogsTab(QWidget):
     def _prev_page(self): self._load(self._page - 1)
     def _next_page(self): self._load(self._page + 1)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Main Window
-# ──────────────────────────────────────────────────────────────────────────────
 
 class AdminConfigPanel(QMainWindow):
 
