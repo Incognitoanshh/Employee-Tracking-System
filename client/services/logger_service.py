@@ -1,7 +1,9 @@
 from datetime import datetime
 import requests
+
 from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
+from client.core.config import API_BASE_URL
 
 
 class LoggerService:
@@ -11,90 +13,52 @@ class LoggerService:
     @staticmethod
     def log(message):
 
-        timestamp = datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Local file log
-        with open(
-            LoggerService.LOG_FILE,
-            "a",
-            encoding="utf-8"
-        ) as file:
+        with open(LoggerService.LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
 
-            file.write(
-                f"[{timestamp}] {message}\n"
+            employee_id = SessionManager.employee_id
+            if not employee_id:
+                return
+
+            connection = Database.connect()
+            cursor     = connection.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO pending_logs (employee_id, activity)
+                VALUES (?, ?)
+                """,
+                (employee_id, message)
             )
 
-        # Save locally in SQLite first
-        connection = Database.connect()
+            log_id = cursor.lastrowid
+            connection.commit()
+            connection.close()
 
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            INSERT INTO pending_logs (
-                employee_id,
-                activity
-            )
-            VALUES (?, ?)
-            """,
-            (
-                "EMP001",
-                message
-            )
-        )
-
-        log_id = cursor.lastrowid
-
-        connection.commit()
-
-        connection.close()
-
-        # Try API upload
-        try:
-
-            response = requests.post(
-
-                "http://127.0.0.1:8000/api/logs/create",
-
-                json={
-
-                    "employee_id": "EMP001",
-
-                    "activity": message
-
-                },
-                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-
-                timeout=5
-
-            )
-
-            if response.status_code == 200:
-
-                connection = Database.connect()
-
-                cursor = connection.cursor()
-
-                cursor.execute(
-                    """
-                    UPDATE pending_logs
-                    SET uploaded = 1
-                    WHERE id = ?
-                    """,
-                    (
-                        log_id,
-                    )
+            # API upload try karo
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/logs/create",   # hardcoded URL bhi fix hua
+                    json={
+                        "employee_id": employee_id,
+                        "activity":    message,
+                    },
+                    headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                    timeout=5,
                 )
 
-                connection.commit()
+                if response.status_code == 200:
+                    conn = Database.connect()
+                    cur  = conn.cursor()
+                    cur.execute(
+                        "UPDATE pending_logs SET uploaded = 1 WHERE id = ?",
+                        (log_id,)
+                    )
+                    conn.commit()
+                    conn.close()
 
-                connection.close()
-
-        except Exception as error:
-
-            print(
-                "[LOG API ERROR]",
-                error
-            )
+            except Exception as error:
+                print("[LOG API ERROR]", error)

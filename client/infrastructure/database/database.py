@@ -72,7 +72,7 @@ class Database:
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employee_id TEXT,
-            auth_token TEXT,
+            auth_token BLOB,
             login_time TEXT,
             logout_time TEXT,
             status TEXT

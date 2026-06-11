@@ -23,7 +23,7 @@ from client.presentation.windows.screenshot_preview_window import (
 
 
 class _LoadLogsWorker(QObject):
-    finished = Signal(list, dict)  # total_logs, screenshot_paths
+    finished = Signal(object, object)  # total_logs, screenshot_paths
     error = Signal(str)
 
     @Slot()
@@ -31,6 +31,8 @@ class _LoadLogsWorker(QObject):
         try:
             idle_logs = LogService.get_idle_logs()
             screenshot_logs = LogService.get_screenshot_logs()
+            print("[SCREENSHOT LOGS]")
+            print(screenshot_logs[:5])
 
             total_logs = []
             screenshot_paths = {}
@@ -62,6 +64,7 @@ class _LoadLogsWorker(QObject):
                 if file_path is not None:
                     screenshot_paths[row] = file_path
 
+            print("[PATH COUNT]", len(screenshot_paths))
             self.finished.emit(total_logs, screenshot_paths)
         except Exception as e:
             self.error.emit(str(e))
@@ -207,9 +210,12 @@ class LogsWindow(BaseWindow):
 
         self._thread.start()
 
-    @Slot(list, dict)
+    @Slot(object, object)
     def _on_logs_loaded(self, total_logs, screenshot_paths):
+        
         self._screenshot_paths = screenshot_paths
+        print("[SCREENSHOT PATHS]")
+        print(screenshot_paths)
         self.all_logs = total_logs
 
         self.logs_table.setUpdatesEnabled(False)
@@ -237,6 +243,8 @@ class LogsWindow(BaseWindow):
         QMessageBox.critical(self, "Logs Error", message)
 
     def open_screenshot(self, row, column):
+        print("[DOUBLE CLICK ROW]", row)
+        print("[PATH FOUND]", self._screenshot_paths.get(row))
         item = self.logs_table.item(row, 1)
         if item is None:
             return
@@ -319,3 +327,5 @@ class LogsWindow(BaseWindow):
                     col,
                     QTableWidgetItem(str(value))
                 )
+
+        print("[FILTERED ROWS]", len(filtered))

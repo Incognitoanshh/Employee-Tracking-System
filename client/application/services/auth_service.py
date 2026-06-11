@@ -1,4 +1,6 @@
 import requests
+from client.core.config import API_BASE_URL
+from client.application.managers.session_manager import SessionManager
 
 
 class AuthService:
@@ -7,28 +9,27 @@ class AuthService:
     def login(username, password):
 
         try:
-
             print("LOGIN START")
 
             response = requests.post(
-                "http://127.0.0.1:8000/api/auth/login",
+                f"{API_BASE_URL}/auth/login",
                 json={
                     "username": username,
-                    "password": password
+                    "password": password,
+                    "device_id": SessionManager.get_device_id()
                 },
                 timeout=5
             )
 
             print("STATUS:", response.status_code)
             print("BODY:", response.text)
+            print("LOGIN RESPONSE =", response.text)
 
             return response.json()
 
         except Exception as error:
-
             print("ERROR:", error)
-
             return {
-                "success": False,
-                "message": str(error)
-            }
+        "success": False,
+        "message": str(error)
+    }

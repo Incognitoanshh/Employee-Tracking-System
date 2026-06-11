@@ -6,6 +6,10 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtGui import QPixmap
+import tempfile
+import os
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from PySide6.QtCore import Qt
 
@@ -70,30 +74,55 @@ class ScreenshotPreviewWindow(BaseWindow):
 
     def load_image(self):
 
-        pixmap = QPixmap(
-            self.image_path
-        )
+        try:
 
-        width = int(
-            1100 * self.scale_factor
-        )
+            key = os.environ.get(
+                "SCREENSHOT_AES_KEY",
+                "2a0d030fe8ae1386b14972e800448c8d"
+            ).encode()
 
-        height = int(
-            650 * self.scale_factor
-        )
+            with open(self.image_path, "rb") as file:
+            
+                data = file.read()
 
-        self.image_label.setPixmap(
-
-            pixmap.scaled(
-
-                width,
-                height,
-
-                Qt.AspectRatioMode.KeepAspectRatio,
-
-                Qt.TransformationMode.SmoothTransformation
+            nonce = data[:12]
+            ciphertext = data[12:]
+            aesgcm = AESGCM(key)
+            image_bytes = aesgcm.decrypt(
+                nonce,
+                ciphertext,
+                None
             )
-        )
+            temp_file = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".png"
+            )
+            temp_file.write(image_bytes)
+            temp_file.close()
+            pixmap = QPixmap(temp_file.name)
+            width = int(
+                1100 * self.scale_factor
+            )
+            height = int(
+                650 * self.scale_factor
+            )
+            self.image_label.setPixmap(
+            
+                pixmap.scaled(
+                
+                    width,
+                    height,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+            )
+
+        except Exception as error:
+        
+            print(
+                "[PREVIEW ERROR]",
+                os.error
+            )
 
     def zoom_in(self):
 

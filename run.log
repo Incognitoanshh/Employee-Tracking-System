@@ -1,0 +1,1 @@
+qt.qpa.fonts: Populating font family aliases took 90 ms. Replace uses of missing font family "Segoe UI" with one that exists to avoid this cost. 

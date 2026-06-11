@@ -1,10 +1,6 @@
 # TODO
 
-- [x] Fix `LogsWindow.load_logs()` logic (remove nested-loop bug, sort once, populate table once)
-
-- [x] Move log fetching/building to background thread (QThread) to prevent UI freeze
-
-- [ ] Limit logs shown (optional, e.g. latest 500) if needed after testing
-
-- [ ] Smoke test: open Activity Logs and double-click screenshot rows
+- [ ] Confirm `zsh: trace trap` cause by disabling `IdleTracker` listeners (pynput mouse/keyboard) in `client/application/managers/idle_tracker.py`.
+- [ ] Re-run `python3 -m client.main` to verify crash disappears.
+- [ ] If crash disappears, implement proper safe idle detection alternative or macOS-permission-friendly pynput handling.
 

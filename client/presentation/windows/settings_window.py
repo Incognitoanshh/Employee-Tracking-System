@@ -1,261 +1,200 @@
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from client.infrastructure.database.database import Database
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QDialog,
+    QFormLayout,
+    QFrame,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
-    QComboBox,
     QWidget,
-    QHBoxLayout
+    QHBoxLayout,
 )
 
-from client.services.logger_service import LoggerService
-from client.presentation.windows.base_window import BaseWindow
-from client.services.settings_service import SettingsService
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(os.getenv("ETS_DATA_DIR", "C:\\ETS"))
+
+DEFAULTS: dict[str, str] = {
+    "server_url": "http://localhost:8000/api",
+    "local_data_folder": str(BASE_DIR),
+    "timezone": "IST",
+    "encryption_algo": "AES-256-GCM",
+}
 
 
-class SettingsWindow(BaseWindow):
+# ---------------------------------------------------------------------------
+# Tiny DB helpers
+# ---------------------------------------------------------------------------
 
-    def __init__(self):
+def _get_config(key: str) -> str:
+    """Read a value from the local config table; fall back to DEFAULTS."""
 
-        super().__init__()
+    try:
+        conn = Database.connect()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row else DEFAULTS.get(key, "")
+    except Exception:
+        return DEFAULTS.get(key, "")
 
-        self.setWindowTitle(
-            "ETS Settings"
+
+class _SectionTitle(QLabel):
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        self.setFont(font)
+
+        self.setStyleSheet(
+            "color: #555555;"
+            "padding-top: 10px;"
+            "padding-bottom: 4px;"
+            "border-bottom: 1px solid #DDDDDD;"
+            "margin-bottom: 4px;"
         )
 
-        self.resize(600, 500)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.setup_ui()
 
-    def setup_ui(self):
-
-        main_layout = QVBoxLayout()
-
-        main_layout.addStretch()
-
-        card = QWidget()
-
-        card.setFixedWidth(420)
-        card.setFixedHeight(520)
-
-        card.setStyleSheet("""
-
-            QWidget {
-                background-color: #151a23;
-                border: 1px solid #242938;
-                border-radius: 16px;
-                padding: 20px;
-            }
-
-        """)
-
-        layout = QVBoxLayout()
-
-        layout.setSpacing(12)
-
-        title = QLabel(
-            "System Settings"
+class _ReadOnlyEdit(QLineEdit):
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setReadOnly(True)
+        self.setStyleSheet(
+            "background: #F5F5F5;"
+            "color: #666666;"
+            "border: 1px solid #DDDDDD;"
+            "border-radius: 4px;"
+            "padding: 4px 8px;"
         )
 
-        title.setStyleSheet("""
 
-            font-size: 28px;
-            font-weight: bold;
-            color: white;
-            margin-bottom: 10px;
+class SettingsWindow(QDialog):
+    """ETS Settings dialog."""
 
-        """)
 
-        self.screenshot_interval = QComboBox()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
 
-        self.screenshot_interval.addItems([
-            "60",
-            "120",
-            "180",
-            "240",
-            "300"
-        ])
+        self.setWindowTitle("ETS Settings")
+        self.setMinimumWidth(520)
+        self.setMaximumWidth(640)
+        self.setSizeGripEnabled(True)
 
-        self.idle_threshold = QComboBox()
+        # self._save_thread: _SaveThread | None = None
 
-        self.idle_threshold.addItems([
-            "15",
-            "30",
-            "60"
-        ])
+        self._build_ui()
+        self._load_values() 
 
-        self.theme_selector = QComboBox()
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(0)
 
-        self.theme_selector.addItems([
-            "Dark",
-            "Light"
-        ])
+        # Scrollable content area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
 
-        combo_style = """
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 12, 0)
+        layout.setSpacing(6)
 
-            QComboBox {
-                background-color: #1e2635;
-                color: white;
-                border: 1px solid #2d3748;
-                border-radius: 10px;
-                padding: 10px;
-                min-height: 20px;
-            }
+        scroll.setWidget(content)
+        root.addWidget(scroll)
 
-        """
+        # ── General ──────────────────────────────────────────────────
 
-        self.screenshot_interval.setStyleSheet(
-            combo_style
+        general_form = QFormLayout()
+        general_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        general_form.setHorizontalSpacing(16)
+        general_form.setVerticalSpacing(8)
+        layout.addLayout(general_form)
+
+        self._edit_tz = _ReadOnlyEdit("IST (fixed)")
+        general_form.addRow("Timezone:", self._edit_tz)
+
+        folder_row = QHBoxLayout()
+        folder_row.setSpacing(8)
+
+        self._edit_folder = _ReadOnlyEdit()
+        self._edit_folder.setMinimumWidth(220)
+
+        self._btn_browse = QPushButton("Browse…")
+        self._btn_browse.setFixedWidth(80)
+        self._btn_browse.setEnabled(False)
+
+        folder_row.addWidget(self._edit_folder)
+        folder_row.addWidget(self._btn_browse)
+        general_form.addRow("Local data folder:", folder_row)
+
+        # ── Security ────────────────────────────────────────────────
+        layout.addSpacing(8)
+        layout.addWidget(_SectionTitle("Security"))
+
+        security_form = QFormLayout()
+        security_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        security_form.setHorizontalSpacing(16)
+        security_form.setVerticalSpacing(8)
+        layout.addLayout(security_form)
+
+        self._edit_enc = _ReadOnlyEdit("AES-256-GCM (Enabled)")
+        security_form.addRow("Encryption:", self._edit_enc)
+
+        self._edit_server = QLineEdit()
+        self._edit_server.setReadOnly(True)
+        self._edit_server.setPlaceholderText("https://ets.example.com")
+        self._edit_server.setStyleSheet(
+            "border: 1px solid #DDDDDD; border-radius: 4px; padding: 4px 8px;"
+        )
+        security_form.addRow("Server URL:", self._edit_server)
+        layout.addStretch(1)
+
+        root.addSpacing(12)
+
+        self._btn_close = QPushButton("Close")
+        self._btn_close.setFixedHeight(32)
+
+        self._btn_close.clicked.connect(self.close)
+
+        root.addWidget(self._btn_close)
+
+
+    def _load_values(self) -> None:
+
+        self._edit_folder.setText(
+            _get_config("local_data_folder")
+            or DEFAULTS["local_data_folder"]
+        )
+        self._edit_server.setText(
+            _get_config("server_url")
+            or DEFAULTS["server_url"]
         )
 
-        self.idle_threshold.setStyleSheet(
-            combo_style
-        )
+if __name__ == "__main__":
+    import sys
 
-        self.theme_selector.setStyleSheet(
-            combo_style
-        )
+    from PySide6.QtWidgets import QApplication
 
-        save_button = QPushButton(
-            "Save Settings"
-        )
+    app = QApplication(sys.argv)
+    win = SettingsWindow()
+    win.show()
+    sys.exit(app.exec())
 
-        save_button.setFixedHeight(50)
-
-        save_button.setStyleSheet("""
-
-            QPushButton {
-                background-color: #2563eb;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                font-weight: bold;
-            }
-
-            QPushButton:hover {
-                background-color: #1d4ed8;
-            }
-
-        """)
-
-        save_button.clicked.connect(
-            self.save_settings
-        )
-
-        layout.addWidget(title)
-
-        screenshot_label = QLabel("Screenshot Interval")
-        screenshot_label.setStyleSheet("""
-        color: white;
-        font-size: 14px;
-        font-weight: 600;
-        """)
-
-        idle_label = QLabel("Idle Threshold")
-        idle_label.setStyleSheet("""
-        color: white;
-        font-size: 14px;
-        font-weight: 600;
-        """)
-
-        theme_label = QLabel("Theme")
-        theme_label.setStyleSheet("""
-        color: white;
-        font-size: 14px;
-        font-weight: 600;
-        """)
-
-        layout.addWidget(screenshot_label)
-        layout.addWidget(self.screenshot_interval)
-
-        layout.addWidget(idle_label)
-        layout.addWidget(self.idle_threshold)
-
-        layout.addWidget(theme_label)
-        layout.addWidget(self.theme_selector)
-
-        layout.addSpacing(20)
-
-        layout.addWidget(
-            save_button
-        )
-
-        card.setLayout(layout)
-
-        center_layout = QHBoxLayout()
-
-        center_layout.addStretch()
-        center_layout.addWidget(card)
-        center_layout.addStretch()
-
-        main_layout.addLayout(
-            center_layout
-        )
-
-        main_layout.addStretch()
-
-        self.setLayout(main_layout)
-
-        self.load_settings()
-
-    def save_settings(self):
-
-        SettingsService.save_setting(
-            "screenshot_interval",
-            self.screenshot_interval.currentText()
-        )
-
-        SettingsService.save_setting(
-            "idle_threshold",
-            self.idle_threshold.currentText()
-        )
-
-        SettingsService.save_setting(
-            "theme",
-            self.theme_selector.currentText()
-        )
-
-        LoggerService.log(
-            f"SETTINGS UPDATED : "
-            f"Screenshot={self.screenshot_interval.currentText()}s, "
-            f"Idle={self.idle_threshold.currentText()}s, "
-            f"Theme={self.theme_selector.currentText()}"
-        )
-
-        from PySide6.QtWidgets import QMessageBox
-
-        QMessageBox.information(
-            self,
-            "Theme Updated",
-            "Restart ETS to apply theme."
-        )
-
-        self.close()
-
-    def load_settings(self):
-
-        screenshot_interval = SettingsService.get_setting(
-            "screenshot_interval",
-            "300"
-        )
-
-        idle_threshold = SettingsService.get_setting(
-            "idle_threshold",
-            "15"
-        )
-
-        theme = SettingsService.get_setting(
-            "theme",
-            "Dark"
-        )
-
-        self.screenshot_interval.setCurrentText(
-            screenshot_interval
-        )
-
-        self.idle_threshold.setCurrentText(
-            idle_threshold
-        )
-
-        self.theme_selector.setCurrentText(
-            theme
-        )

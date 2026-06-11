@@ -2,6 +2,7 @@ from datetime import datetime
 
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
+from client.security.crypto_engine import CryptoEngine
 
 
 class SessionLogManager:
@@ -10,80 +11,67 @@ class SessionLogManager:
     def start_session():
 
         conn = Database.connect()
-        cur = conn.cursor()
+        cur  = conn.cursor()
 
         # Purani ACTIVE sessions close karo
         cur.execute(
             """
             UPDATE sessions
-            SET
-            logout_time = ?,
-            status = ?
-            WHERE employee_id = ?
-            AND status = 'ACTIVE'
+            SET logout_time = ?, status = ?
+            WHERE employee_id = ? AND status = 'ACTIVE'
             """,
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "FORCE_CLOSED",
-                SessionManager.employee_id
+                SessionManager.employee_id,
             )
         )
 
-        # Nayi session create karo
+        # BUG 4 FIX: CryptoEngine() instance nahi, static method use karo
+        encrypted_token = CryptoEngine.encrypt_token(SessionManager.auth_token)
+
         cur.execute(
             """
-            INSERT INTO sessions (
-                employee_id,
-                auth_token,
-                login_time,
-                status
-            )
+            INSERT INTO sessions (employee_id, auth_token, login_time, status)
             VALUES (?, ?, ?, ?)
             """,
             (
                 SessionManager.employee_id,
-                SessionManager.auth_token,
+                encrypted_token,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ACTIVE"
+                "ACTIVE",
             )
         )
 
         conn.commit()
         conn.close()
-
         print("[SESSION STARTED]")
 
     @staticmethod
     def end_session():
 
         conn = Database.connect()
-        cur = conn.cursor()
+        cur  = conn.cursor()
 
         print("[SESSION END STARTED]")
 
         cur.execute(
             """
             UPDATE sessions
-            SET
-            logout_time = ?,
-            status = ?
+            SET logout_time = ?, status = ?
             WHERE id = (
-                SELECT id
-                FROM sessions
+                SELECT id FROM sessions
                 WHERE status = 'ACTIVE'
-                ORDER BY id DESC
-                LIMIT 1
+                ORDER BY id DESC LIMIT 1
             )
             """,
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "LOGGED_OUT"
+                "LOGGED_OUT",
             )
         )
 
         print("[ROWS UPDATED]", cur.rowcount)
-
         conn.commit()
         conn.close()
-
         print("[SESSION ENDED]")

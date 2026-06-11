@@ -49,6 +49,12 @@ exports.login = async (req, res) => {
             process.env.JWT_SECRET,
             { expiresIn: "8h" }
         );
+        console.log("LOGIN RESPONSE:", {
+            success: true,
+            employee_id: employee.employee_id,
+            role: employee.role,
+            token: "TOKEN_HIDDEN"
+        });
 
         return res.status(200).json({
             success: true,
