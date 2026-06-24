@@ -177,9 +177,9 @@ class ConfigSyncManager:
                     str(value)
                 )
 
-                shift = config.get("shift")
+        shift = config.get("shift")
 
-            if shift:
+        if shift:
                 SettingsService.save_setting(
                     "shift_start_ist",
                     shift.get("start_ist", "")
