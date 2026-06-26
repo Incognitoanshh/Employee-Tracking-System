@@ -86,10 +86,10 @@ class ScreenshotManager:
         cursor = connection.cursor()
         cursor.execute(
             """
-            INSERT INTO screenshots (id, employee_id, file_path, timestamp)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO screenshots (employee_id, file_name, created_at)
+            VALUES ($1, $2, NOW())  # ✅ PostgreSQL syntax
             """,
-            (screenshot_id, SessionManager.employee_id, enc_filepath, timestamp),
+            (SessionManager.employee_id, f"{screenshot_id}.png"),
         )
         connection.commit()
         connection.close()

@@ -47,26 +47,58 @@ class _LoadLogsWorker(QObject):
                 ])
 
             # Screenshot logs: (employee_id, file_path, timestamp)
+            # for log in screenshot_logs:
+            #     total_logs.append([
+            #         log[0],  # employee_id
+            #         "📸 SCREENSHOT SAVED",
+            #         log[2],  # timestamp
+            #         log[1],  # file_path
+            #     ])
+            
             for log in screenshot_logs:
+                screenshot_id = log[0]
+                employee_id = log[1]
+                file_path = log[2]
+                timestamp = log[3]
+
                 total_logs.append([
-                    log[0],  # employee_id
+                    employee_id,
                     "📸 SCREENSHOT SAVED",
-                    log[2],  # timestamp
-                    log[1],  # file_path
+                    timestamp,
+                    None,
                 ])
 
             # Sort once
             total_logs.sort(key=lambda x: x[2], reverse=True)
 
             # Map screenshot file paths by *row* after sorting
-            for row, entry in enumerate(total_logs):
-                file_path = entry[3]
-                if file_path is not None:
-                    screenshot_paths[row] = file_path
+        #     for row, entry in enumerate(total_logs):
+        #         file_path = entry[3]
+        #         if file_path is not None:
+        #             screenshot_paths[row] = file_path
 
-            print("[PATH COUNT]", len(screenshot_paths))
-            self.finished.emit(total_logs, screenshot_paths)
+        #     print("[PATH COUNT]", len(screenshot_paths))
+        #     self.finished.emit(total_logs, screenshot_paths)
+        # except Exception as e:
+        #     self.error.emit(str(e))
+        
+            for row, entry in enumerate(total_logs):
+                if "SCREENSHOT" in entry[1]:
+                    for log in screenshot_logs:
+                        if log[3] == entry[2]:  # Match by timestamp
+                            screenshot_paths[row] = {
+                                'screenshot_id': log[0],
+                                'employee_id': log[1],
+                                'filename': os.path.basename(log[2]),
+                                'timestamp': log[3]
+                            }
+                            break
+                        
+                        print("[SCREENSHOT DATA COUNT]", len(screenshot_paths))
+                        self.finished.emit(total_logs, screenshot_paths)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.error.emit(str(e))
 
 
@@ -241,38 +273,74 @@ class LogsWindow(BaseWindow):
         self.logs_table.blockSignals(False)
         self.logs_table.setUpdatesEnabled(True)
         QMessageBox.critical(self, "Logs Error", message)
-
+        
     def open_screenshot(self, row, column):
         print("[DOUBLE CLICK ROW]", row)
-        print("[PATH FOUND]", self._screenshot_paths.get(row))
+        print("[SCREENSHOT DATA]", self._screenshot_data.get(row))
         item = self.logs_table.item(row, 1)
         if item is None:
             return
-
+    
         log_type = item.text()
         if "SCREENSHOT" not in log_type:
             return
-
-        image_path = self._screenshot_paths.get(row)
-
-        if not image_path:
+    
+        screenshot_info = self._screenshot_data.get(row)
+    
+        if not screenshot_info:
             QMessageBox.warning(
                 self,
                 "Not Found",
-                "Screenshot path not available.",
+                "Screenshot data not available.",
             )
             return
-
-        if not os.path.exists(image_path):
-            QMessageBox.warning(
-                self,
-                "File Not Found",
-                f"Screenshot file nahi mili:\n{image_path}",
-            )
-            return
-
-        self.preview_window = ScreenshotPreviewWindow(image_path)
+    
+        screenshot_id = screenshot_info['screenshot_id']
+        employee_id = screenshot_info['employee_id']
+        timestamp = screenshot_info['timestamp']
+        filename = screenshot_info['filename']
+    
+        print(f"[OPENING PREVIEW] ID={screenshot_id}, EMP={employee_id}, FILE={filename}")
+    
+        self.preview_window = ScreenshotPreviewWindow(
+            screenshot_id=screenshot_id,
+            employee_id=employee_id,
+            timestamp=timestamp,
+            filename=filename
+        )
         self.preview_window.show()
+
+    # def open_screenshot(self, row, column):
+    #     print("[DOUBLE CLICK ROW]", row)
+    #     print("[PATH FOUND]", self._screenshot_paths.get(row))
+    #     item = self.logs_table.item(row, 1)
+    #     if item is None:
+    #         return
+
+    #     log_type = item.text()
+    #     if "SCREENSHOT" not in log_type:
+    #         return
+
+    #     image_path = self._screenshot_paths.get(row)
+
+    #     if not image_path:
+    #         QMessageBox.warning(
+    #             self,
+    #             "Not Found",
+    #             "Screenshot path not available.",
+    #         )
+    #         return
+
+    #     if not os.path.exists(image_path):
+    #         QMessageBox.warning(
+    #             self,
+    #             "File Not Found",
+    #             f"Screenshot file nahi mili:\n{image_path}",
+    #         )
+    #         return
+
+    #     self.preview_window = ScreenshotPreviewWindow(image_path)
+    #     self.preview_window.show()
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():

@@ -25,16 +25,19 @@ class _DownloadWorker(QThread):
 
     def run(self):
         try:
+            
+            print(f"[DOWNLOAD WORKER] Fetching screenshot_id={self.screenshot_id}")
             response = requests.get(
                 f"{API_BASE_URL}/screenshots/download/{self.screenshot_id}",
-                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                headers={"Authorization": f"Bearer {SessionManager.auth_token},Size={len(response.content)}"},
                 timeout=30
             )
             if response.status_code == 200:
                 self.finished.emit(response.content)
             else:
-                self.error.emit(f"HTTP {response.status_code}")
+                self.error.emit(f"HTTP {response.status_code}:{response.text[:100]}")
         except Exception as e:
+            print(f"[DOWNLOAD WORKER ERROR] {e}")
             self.error.emit(str(e))
 
 
