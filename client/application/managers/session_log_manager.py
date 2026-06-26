@@ -1,75 +1,59 @@
 from datetime import datetime
-
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
-from client.security.crypto_engine import CryptoEngine
+from client.services.logger_service import LoggerService
 
 
 class SessionLogManager:
 
     @staticmethod
     def start_session():
+            try:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        conn = Database.connect()
-        cur  = conn.cursor()
+                with Database.get_connection() as conn:
+                    # Purani sessions close karo — current session_id chhod ke
+                    conn.cursor().execute(
+                        """
+                        UPDATE sessions
+                        SET logout_time = ?, status = 'FORCE_CLOSED'
+                        WHERE employee_id = ?
+                        AND status = 'ACTIVE'
+                        AND id != ?
+                        """,
+                        (
+                            now,
+                            SessionManager.employee_id,
+                            SessionManager.session_id or -1,
+                        ),
+                    )
 
-        # Close any existing ACTIVE sessions for this employee
-        cur.execute(
-            """
-            UPDATE sessions
-            SET logout_time = ?, status = ?
-            WHERE employee_id = ? AND status = 'ACTIVE'
-            """,
-            (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "FORCE_CLOSED",
-                SessionManager.employee_id,
-            )
-        )
+                LoggerService.log(
+                    f"SessionLogManager: session started "
+                    f"id={SessionManager.session_id}"
+                )
 
-        # BUG 4 FIX: CryptoEngine() instance nahi, static method use karo
-        encrypted_token = CryptoEngine.encrypt_token(SessionManager.auth_token)
-
-        cur.execute(
-            """
-            INSERT INTO sessions (employee_id, auth_token, login_time, status)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                SessionManager.employee_id,
-                encrypted_token,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ACTIVE",
-            )
-        )
-
-        conn.commit()
-        conn.close()
-        print("[SESSION STARTED]")
+            except Exception as e:
+                LoggerService.log_error(f"SessionLogManager.start_session error: {e}")
 
     @staticmethod
     def end_session():
+        """Active session close karo — logout/force logout pe call karo."""
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        conn = Database.connect()
-        cur  = conn.cursor()
+            with Database.get_connection() as conn:
+                conn.cursor().execute(
+                    """
+                    UPDATE sessions
+                    SET logout_time = ?, status = 'LOGGED_OUT'
+                    WHERE id = ?
+                    AND status = 'ACTIVE'
+                    """,
+                    (now, SessionManager.session_id),
+                )
 
-        print("[SESSION END STARTED]")
+            LoggerService.log("SessionLogManager: session ended")
 
-        # FIX: Filter by employee_id to close the correct session
-        cur.execute(
-            """
-            UPDATE sessions
-            SET logout_time = ?, status = ?
-            WHERE employee_id = ? AND status = 'ACTIVE'
-            """,
-            (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "LOGGED_OUT",
-                SessionManager.employee_id,
-            )
-        )
-
-        print("[ROWS UPDATED]", cur.rowcount)
-        conn.commit()
-        conn.close()
-        print("[SESSION ENDED]")
+        except Exception as e:
+            LoggerService.log_error(f"SessionLogManager.end_session error: {e}")

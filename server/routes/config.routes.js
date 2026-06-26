@@ -1,11 +1,9 @@
-
-const express    = require("express");
-const router     = express.Router();
+const express          = require("express");
+const router           = express.Router();
 const configController = require("../controllers/config.controller");
 
-router.post(
-    "/sync",
-    configController.syncConfig
-);
+// verifyToken server.js mein already lagaya hai
+// Dobara nahi lagana
+router.post("/sync", configController.syncConfig);
 
 module.exports = router;

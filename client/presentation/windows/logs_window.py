@@ -1,71 +1,82 @@
 import os
-
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-
-    QLabel,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QHeaderView,
-    QAbstractItemView,
-    QMessageBox,
-    QLineEdit,
-    QComboBox,
-    QHBoxLayout,
+    QLabel, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QHeaderView, QAbstractItemView,
+    QMessageBox, QLineEdit, QComboBox, QHBoxLayout,
 )
 
 from client.presentation.windows.base_window import BaseWindow
-from client.services.log_service import LogService
+from client.infrastructure.database.database import Database
 from client.presentation.windows.screenshot_preview_window import (
     ScreenshotPreviewWindow,
 )
 
 
 class _LoadLogsWorker(QObject):
-    finished = Signal(object, object)  # total_logs, screenshot_paths
-    error = Signal(str)
+    finished = Signal(list)
+    error    = Signal(str)
 
     @Slot()
     def run(self):
         try:
-            idle_logs = LogService.get_idle_logs()
-            screenshot_logs = LogService.get_screenshot_logs()
-            print("[SCREENSHOT LOGS]")
-            print(screenshot_logs[:5])
+            rows = []
 
-            total_logs = []
-            screenshot_paths = {}
+            with Database.get_connection() as conn:
+                cursor = conn.cursor()
 
-            # Idle logs: (employee_id, status, timestamp)
-            for log in idle_logs:
-                total_logs.append([
-                    log[0],  # employee_id
-                    log[1],  # status
-                    log[2],  # timestamp
-                    None,    # file_path
-                ])
+                cursor.execute(
+                    """
+                    SELECT employee_id, idle_start, idle_end, duration_seconds
+                    FROM idle_logs
+                    ORDER BY idle_start DESC
+                    LIMIT 500
+                    """
+                )
+                for log in cursor.fetchall():
+                    rows.append({
+                        "employee_id": log["employee_id"],
+                        "status":      "IDLE",
+                        "timestamp":   log["idle_start"],
+                        "file_path":   None,
+                    })
 
-            # Screenshot logs: (employee_id, file_path, timestamp)
-            for log in screenshot_logs:
-                total_logs.append([
-                    log[0],  # employee_id
-                    "📸 SCREENSHOT SAVED",
-                    log[2],  # timestamp
-                    log[1],  # file_path
-                ])
+                cursor.execute(
+                    """
+                    SELECT employee_id, file_path, timestamp
+                    FROM screenshots
+                    ORDER BY timestamp DESC
+                    LIMIT 500
+                    """
+                )
+                for log in cursor.fetchall():
+                    rows.append({
+                        "employee_id": log["employee_id"],
+                        "status":      "📸 SCREENSHOT SAVED",
+                        "timestamp":   log["timestamp"],
+                        "file_path":   log["file_path"],
+                    })
 
-            # Sort once
-            total_logs.sort(key=lambda x: x[2], reverse=True)
+                cursor.execute(
+                    """
+                    SELECT source, message, timestamp
+                    FROM app_logs
+                    ORDER BY id DESC
+                    LIMIT 200
+                    """
+                )
+                for log in cursor.fetchall():
+                    rows.append({
+                        "employee_id": log["source"],
+                        "status":      log["message"],
+                        "timestamp":   log["timestamp"],
+                        "file_path":   None,
+                    })
 
-            # Map screenshot file paths by *row* after sorting
-            for row, entry in enumerate(total_logs):
-                file_path = entry[3]
-                if file_path is not None:
-                    screenshot_paths[row] = file_path
+            rows.sort(key=lambda x: x["timestamp"] or "", reverse=True)
+            self.finished.emit(rows)
 
-            print("[PATH COUNT]", len(screenshot_paths))
-            self.finished.emit(total_logs, screenshot_paths)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -73,14 +84,12 @@ class _LoadLogsWorker(QObject):
 class LogsWindow(BaseWindow):
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("ETS Logs")
         self.resize(1000, 650)
 
-        self._screenshot_paths = {}
-        self._thread = None
-        self._worker = None
-        self.all_logs = []
+        self._all_logs  = []
+        self._thread    = None
+        self._worker    = None
 
         self.setup_ui()
 
@@ -89,43 +98,24 @@ class LogsWindow(BaseWindow):
 
         title = QLabel("Employee Activity Logs")
         title.setStyleSheet(
-            """
-            font-size: 32px;
-            font-weight: bold;
-            color: white;
-            margin-bottom: 20px;
-            """
+            "font-size: 28px; font-weight: bold; color: white; margin-bottom: 16px;"
         )
 
         filter_layout = QHBoxLayout()
-
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("🔍 Search logs...")
-
         self.filter_box = QComboBox()
         self.filter_box.addItems([
-            "All",
-            "Screenshots",
-            "Idle",
-            "Active",
-            "Login",
-            "Logout"
+            "All", "Screenshots", "Idle", "Active", "Login", "Logout"
         ])
-
         filter_layout.addWidget(self.search_box)
         filter_layout.addWidget(self.filter_box)
 
         self.logs_table = QTableWidget()
         self.logs_table.setColumnCount(3)
-
-        self.logs_table.setHorizontalHeaderLabels(
-            [
-                "Employee ID",
-                "Status / Screenshot",
-                "Timestamp",
-            ]
-        )
-
+        self.logs_table.setHorizontalHeaderLabels([
+            "Employee ID", "Status / Event", "Timestamp"
+        ])
         self.logs_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
@@ -133,43 +123,24 @@ class LogsWindow(BaseWindow):
         self.logs_table.setAlternatingRowColors(True)
         self.logs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.logs_table.setShowGrid(False)
-
-        self.logs_table.setStyleSheet(
-            """
+        self.logs_table.setStyleSheet("""
             QTableWidget {
-                background-color: rgba(17, 24, 39, 0.85);
+                background-color: rgba(17,24,39,0.85);
                 border: 1px solid #2b3448;
                 border-radius: 16px;
                 color: white;
-                gridline-color: transparent;
                 padding: 8px;
             }
-
             QHeaderView::section {
-                background-color: rgba(30, 41, 59, 0.95);
-                color: white;
-                border: none;
-                padding: 14px;
-                font-size: 14px;
-                font-weight: bold;
-                border-top-left-radius: 16px;
-                border-top-right-radius: 16px;
+                background-color: rgba(30,41,59,0.95);
+                color: white; border: none;
+                padding: 14px; font-size: 14px; font-weight: bold;
             }
-
-            QTableWidget::item {
-                padding: 12px;
-                border-radius: 10px;
-            }
-
+            QTableWidget::item { padding: 12px; border-radius: 10px; }
             QTableWidget::item:selected {
-                background-color: #2563eb;
-                color: white;
+                background-color: #2563eb; color: white;
             }
-            """
-        )
-
-
-        self.load_logs()
+        """)
 
         self.logs_table.cellDoubleClicked.connect(self.open_screenshot)
 
@@ -178,23 +149,16 @@ class LogsWindow(BaseWindow):
         main_layout.addWidget(self.logs_table)
         self.setLayout(main_layout)
 
-        self.search_box.textChanged.connect(
-            self.apply_filters
-        )
+        self.search_box.textChanged.connect(self.apply_filters)
+        self.filter_box.currentTextChanged.connect(self.apply_filters)
 
-        self.filter_box.currentTextChanged.connect(
-            self.apply_filters
-        )
+        self.load_logs()
 
     def load_logs(self):
-        # Reset UI immediately
         self.logs_table.setRowCount(0)
         self.logs_table.setUpdatesEnabled(False)
         self.logs_table.blockSignals(True)
 
-        self._screenshot_paths = {}
-
-        # Background load to prevent UI freeze
         self._thread = QThread()
         self._worker = _LoadLogsWorker()
         self._worker.moveToThread(self._thread)
@@ -202,76 +166,89 @@ class LogsWindow(BaseWindow):
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_logs_loaded)
         self._worker.error.connect(self._on_logs_error)
-
-        # Cleanup
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
 
         self._thread.start()
 
-    @Slot(object, object)
-    def _on_logs_loaded(self, total_logs, screenshot_paths):
-        
-        self._screenshot_paths = screenshot_paths
-        print("[SCREENSHOT PATHS]")
-        print(screenshot_paths)
-        self.all_logs = total_logs
-
-        self.logs_table.setUpdatesEnabled(False)
-        self.logs_table.blockSignals(True)
-
-        self.logs_table.setRowCount(len(total_logs))
-
-        for row, entry in enumerate(total_logs):
-            # entry: [employee_id, status_or_screenshot, timestamp, file_path]
-            for column, value in enumerate(entry[:3]):
-                self.logs_table.setItem(
-                    row,
-                    column,
-                    QTableWidgetItem(str(value)),
-                )
-
+    @Slot(list)
+    def _on_logs_loaded(self, logs: list):
+        self._all_logs = logs
         self.logs_table.blockSignals(False)
         self.logs_table.setUpdatesEnabled(True)
         self.apply_filters()
 
     @Slot(str)
-    def _on_logs_error(self, message):
+    def _on_logs_error(self, message: str):
         self.logs_table.blockSignals(False)
         self.logs_table.setUpdatesEnabled(True)
         QMessageBox.critical(self, "Logs Error", message)
 
-    def open_screenshot(self, row, column):
-        print("[DOUBLE CLICK ROW]", row)
-        print("[PATH FOUND]", self._screenshot_paths.get(row))
+    def apply_filters(self):
+        search      = self.search_box.text().lower()
+        filter_type = self.filter_box.currentText()
+
+        filtered = []
+        for log in self._all_logs:
+            status = str(log["status"]).upper()
+            row_text = (
+                f"{log['employee_id']} {status} {log['timestamp']}"
+            ).lower()
+
+            if search and search not in row_text:
+                continue
+            if filter_type == "Screenshots" and "SCREENSHOT" not in status:
+                continue
+            if filter_type == "Idle"        and "IDLE"       not in status:
+                continue
+            if filter_type == "Active"      and "ACTIVE"     not in status:
+                continue
+            if filter_type == "Login"       and "LOGIN"      not in status:
+                continue
+            if filter_type == "Logout"      and "LOGOUT"     not in status:
+                continue
+
+            filtered.append(log)
+
+        self.logs_table.setUpdatesEnabled(False)
+        self.logs_table.blockSignals(True)
+        self.logs_table.setRowCount(len(filtered))
+
+        for row, log in enumerate(filtered):
+            self.logs_table.setItem(
+                row, 0, QTableWidgetItem(str(log["employee_id"] or ""))
+            )
+            self.logs_table.setItem(
+                row, 1, QTableWidgetItem(str(log["status"] or ""))
+            )
+            self.logs_table.setItem(
+                row, 2, QTableWidgetItem(str(log["timestamp"] or ""))
+            )
+            item = self.logs_table.item(row, 1)
+            if item and log["file_path"]:
+                item.setData(Qt.UserRole, log["file_path"])
+
+        self.logs_table.blockSignals(False)
+        self.logs_table.setUpdatesEnabled(True)
+
+    def open_screenshot(self, row: int, _col: int):
         item = self.logs_table.item(row, 1)
-        if item is None:
+        if not item or "SCREENSHOT" not in item.text().upper():
             return
 
-        log_type = item.text()
-        if "SCREENSHOT" not in log_type:
+        file_path = item.data(Qt.UserRole)
+        if not file_path:
+            QMessageBox.warning(self, "Not Found", "Screenshot path not available.")
             return
-
-        image_path = self._screenshot_paths.get(row)
-
-        if not image_path:
+        if not os.path.exists(file_path):
             QMessageBox.warning(
-                self,
-                "Not Found",
-                "Screenshot path not available.",
+                self, "File Not Found",
+                f"Screenshot file nahi mili:\n{file_path}"
             )
             return
 
-        if not os.path.exists(image_path):
-            QMessageBox.warning(
-                self,
-                "File Not Found",
-                f"Screenshot file nahi mili:\n{image_path}",
-            )
-            return
-
-        self.preview_window = ScreenshotPreviewWindow(image_path)
+        self.preview_window = ScreenshotPreviewWindow(file_path)
         self.preview_window.show()
 
     def closeEvent(self, event):
@@ -279,59 +256,3 @@ class LogsWindow(BaseWindow):
             self._thread.quit()
             self._thread.wait(1000)
         event.accept()
-
-    def apply_filters(self):
-
-        search = self.search_box.text().lower()
-        filter_type = self.filter_box.currentText()
-
-        self.logs_table.setRowCount(0)
-
-        filtered = []
-
-        for log in self.all_logs:
-
-            employee = str(log[0])
-            status = str(log[1])
-            timestamp = str(log[2])
-
-            row_text = f"{employee} {status} {timestamp}".lower()
-
-            if search and search not in row_text:
-                continue
-
-            if filter_type == "Screenshots":
-                if "SCREENSHOT" not in status.upper():
-                    continue
-
-            elif filter_type == "Idle":
-                if "IDLE" not in status.upper():
-                    continue
-
-            elif filter_type == "Active":
-                if "ACTIVE" not in status.upper():
-                    continue
-                
-            elif filter_type == "Login":
-                if "LOGIN" not in status.upper():
-                    continue
-
-            elif filter_type == "Logout":
-                if "LOGOUT" not in status.upper():
-                    continue
-
-            filtered.append(log)
-
-        self.logs_table.setRowCount(len(filtered))
-
-        for row, entry in enumerate(filtered):
-
-            for col, value in enumerate(entry[:3]):
-
-                self.logs_table.setItem(
-                    row,
-                    col,
-                    QTableWidgetItem(str(value))
-                )
-
-        print("[FILTERED ROWS]", len(filtered))

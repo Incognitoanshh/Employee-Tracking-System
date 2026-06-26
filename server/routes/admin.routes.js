@@ -1,27 +1,21 @@
 const express        = require("express");
 const router         = express.Router();
-const { adminOnly }  = require("../middleware/admin.middleware");
-const adminCtrl      = require("../controllers/admin.controller");
+const adminController = require("../controllers/admin.controller");
+const { requireAdmin } = require("../middleware/admin.middleware");
 
-// Sab routes admin-only hain
-router.use(adminOnly);
+// Saare admin routes pe requireAdmin lagao
+router.get(    "/employees",                requireAdmin, adminController.getEmployees);
+router.post(   "/employees",                requireAdmin, adminController.createEmployee);
+router.delete( "/employees/:employee_id",   requireAdmin, adminController.deleteEmployee);
 
-// Employees
-router.get("/employees",  adminCtrl.getEmployees);
-router.post("/employees", adminCtrl.createEmployee);
-router.delete("/employees/:employee_id", adminCtrl.deleteEmployee);
+router.get(    "/config/:employee_id",      requireAdmin, adminController.getConfig);
+router.post(   "/config",                   requireAdmin, adminController.saveConfig);
 
-// Config
-router.get("/config/:employee_id", adminCtrl.getConfig);   // GET config for one employee or "global"
-router.post("/config",             adminCtrl.saveConfig);   // Save/update config
-router.post("/force-logout",       adminCtrl.forceLogout);  // Force logout employee
-router.post("/toggle-verbose-logging", adminCtrl.toggleVerboseLogging);  // Quick per-employee verbose toggle
+router.post(   "/force-logout",             requireAdmin, adminController.forceLogout);
+router.post(   "/toggle-verbose-logging",   requireAdmin, adminController.toggleVerboseLogging);
 
-// Employee details (modal data)
-router.get("/employee/:employee_id", adminCtrl.getEmployeeDetails);
-
-// Screenshots + Logs (with filters)
-router.get("/screenshots",         adminCtrl.getScreenshots);
-router.get("/logs",                adminCtrl.getLogs);
+router.get(    "/screenshots",              requireAdmin, adminController.getScreenshots);
+router.get(    "/logs",                     requireAdmin, adminController.getLogs);
+router.get(    "/employee/:employee_id",    requireAdmin, adminController.getEmployeeDetails);
 
 module.exports = router;

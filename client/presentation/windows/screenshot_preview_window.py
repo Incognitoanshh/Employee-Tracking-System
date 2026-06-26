@@ -1,144 +1,78 @@
-from PySide6.QtWidgets import (
-    QLabel,
-    QVBoxLayout,
-    QHBoxLayout,
-    QPushButton,
-    QWidget,
-)
+from __future__ import annotations
+import os
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QHBoxLayout, QPushButton
 from PySide6.QtGui import QPixmap
-from PySide6.QtCore import Qt, QThread, Signal
-import tempfile
-import requests
+from PySide6.QtCore import Qt
+
 from client.presentation.windows.base_window import BaseWindow
-from client.core.config import API_BASE_URL
-from client.application.managers.session_manager import SessionManager
 from client.security.crypto_engine import CryptoEngine
 
 
-class _DownloadWorker(QThread):
-    finished = Signal(object)  # image bytes or error
-    error = Signal(str)
-
-    def __init__(self, screenshot_id):
-        super().__init__()
-        self.screenshot_id = screenshot_id
-
-    def run(self):
-        try:
-            response = requests.get(
-                f"{API_BASE_URL}/screenshots/download/{self.screenshot_id}",
-                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=30
-            )
-            if response.status_code == 200:
-                self.finished.emit(response.content)
-            else:
-                self.error.emit(f"HTTP {response.status_code}")
-        except Exception as e:
-            self.error.emit(str(e))
-
-
 class ScreenshotPreviewWindow(BaseWindow):
-
-    def __init__(self, screenshot_id: str, employee_id: str, timestamp: str, filename: str):
+    def __init__(
+        self,
+        file_path: str = None,
+        *,
+        screenshot_id: str = None,
+        employee_id: str = None,
+        timestamp: str = None,
+        filename: str = None,
+    ):
         super().__init__()
-
+        # Support both callers: file_path (logs) or screenshot_id (admin)
+        self.file_path = file_path
         self.screenshot_id = screenshot_id
         self.employee_id = employee_id
         self.timestamp = timestamp
         self.filename = filename
-        self.scale_factor = 1.0
 
-        self.setWindowTitle(f"Screenshot - {employee_id}")
-        self.resize(1300, 800)
-
-        self.setup_ui()
+        title = f"Screenshot Preview - {employee_id or filename or 'Preview'}"
+        self.setWindowTitle(title)
+        self.resize(1200, 800)
+        self._setup_ui()
         self._load_image()
 
-    def setup_ui(self):
+    def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # Metadata bar
-        meta_layout = QHBoxLayout()
-        meta_layout.addWidget(QLabel(f"Employee: <b>{self.employee_id}</b>"))
-        meta_layout.addWidget(QLabel(f"Time: <b>{self.timestamp}</b>"))
-        meta_layout.addWidget(QLabel(f"File: <b>{self.filename}</b>"))
-        meta_layout.addStretch()
-        layout.addLayout(meta_layout)
-
-        # Zoom controls
-        controls = QHBoxLayout()
-        zoom_in = QPushButton("➕ Zoom In")
-        zoom_out = QPushButton("➖ Zoom Out")
-        zoom_in.clicked.connect(self.zoom_in)
-        zoom_out.clicked.connect(self.zoom_out)
-        controls.addWidget(zoom_in)
-        controls.addWidget(zoom_out)
-        controls.addStretch()
-
-        close_btn = QPushButton("✕ Close")
-        close_btn.clicked.connect(self.close)
-        controls.addWidget(close_btn)
-        layout.addLayout(controls)
-
-        # Image
-        self.image_label = QLabel("Loading...")
+        self.image_label = QLabel("Loading preview...")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setStyleSheet("background: #1e1e1e; color: #888;")
+        self.image_label.setStyleSheet("background: #1e1e1e; color: #888; padding: 20px;")
         layout.addWidget(self.image_label)
 
+        btn_layout = QHBoxLayout()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
     def _load_image(self):
-        self._worker = _DownloadWorker(self.screenshot_id)
-        self._worker.finished.connect(self._on_image_loaded)
-        self._worker.error.connect(self._on_error)
-        self._worker.start()
-
-    def _on_image_loaded(self, image_bytes):
         try:
-            # Decrypt .enc bytes
-            if self.filename.endswith(".enc"):
-                print(f"[PREVIEW] Decrypting {len(image_bytes)} encrypted bytes")
-                image_bytes = CryptoEngine.decrypt_bytes(image_bytes)
-                print(f"[PREVIEW] Decrypted to {len(image_bytes)} bytes")
+            file_path = self.file_path
 
-            temp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            temp.write(image_bytes)
-            temp.close()
+            # Admin case: construct file_path from filename if not provided
+            if not file_path and self.filename:
+                file_path = os.path.join(
+                    os.path.dirname(__file__),
+                    "..", "..", "..", "storage", "screenshots", self.filename
+                )
+                file_path = os.path.normpath(file_path)
 
-            pixmap = QPixmap(temp.name)
+            if not file_path or not os.path.exists(file_path):
+                self.image_label.setText("File not found")
+                return
+
+            image_bytes = CryptoEngine.load_decrypted(file_path)
+            pixmap = QPixmap()
+            pixmap.loadFromData(image_bytes)
+
             if pixmap.isNull():
-                self._on_error(f"Invalid image: pixmap is null, {len(image_bytes)} bytes")
+                self.image_label.setText("Invalid image data")
                 return
 
             self.image_label.setPixmap(
-                pixmap.scaled(
-                    int(1100 * self.scale_factor),
-                    int(650 * self.scale_factor),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
+                pixmap.scaled(1100, 650, Qt.AspectRatioMode.KeepAspectRatio)
             )
-            self.image_label.setStyleSheet("background: #000;")
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self._on_error(str(e))
-
-    def _on_error(self, error_msg):
-        self.image_label.setText(f"Failed to load image: {error_msg}")
-        self.image_label.setStyleSheet("background: #2a1a1a; color: #f44; padding: 20px;")
-
-    def closeEvent(self, event):
-        if hasattr(self, '_worker') and self._worker and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait(1000)
-        event.accept()
-
-    def zoom_in(self):
-        self.scale_factor += 0.2
-        self._load_image()
-
-    def zoom_out(self):
-        if self.scale_factor > 0.4:
-            self.scale_factor -= 0.2
-            self._load_image()
+            self.image_label.setText(f"Failed to load: {str(e)}")

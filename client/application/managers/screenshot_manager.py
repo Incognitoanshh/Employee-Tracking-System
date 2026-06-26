@@ -1,5 +1,3 @@
-
-
 import io
 import os
 import random
@@ -7,7 +5,6 @@ from datetime import datetime, timedelta
 import uuid
 
 import pyautogui
-import requests
 
 from client.application.managers.session_manager import SessionManager
 from client.application.managers.sync_manager import SyncManager
@@ -15,7 +12,6 @@ from client.infrastructure.database.database import Database
 from client.security.crypto_engine import CryptoEngine
 from client.services.logger_service import LoggerService
 from client.services.settings_service import SettingsService
-from client.core.config import API_BASE_URL
 
 
 class ScreenshotManager:
@@ -25,19 +21,13 @@ class ScreenshotManager:
     def generate_random_schedule(
         cls, shift_start: datetime, shift_end: datetime
     ) -> list[datetime]:
-        """Shift ke andar N random timestamps generate karo.
-
-        - count      = screenshot_count (settings se)
-        - min_gap    = screenshot_min_minutes (settings se)
-        - max_gap    = screenshot_max_minutes (settings se)
-
-        Note: min_gap respect karta hai (too-close timestamps avoid).
-        """
-        count = int(SettingsService.get_setting("screenshot_count", "3"))
+        count   = int(SettingsService.get_setting("screenshot_count", "3"))
         min_gap = int(SettingsService.get_setting("screenshot_min_minutes", "3")) * 60
-        # max_gap currently used only as a descriptive bound; actual distribution uses uniform offsets
-        _max_gap = int(SettingsService.get_setting("screenshot_max_minutes", "10")) * 60
+        max_gap = int(SettingsService.get_setting("screenshot_max_minutes", "10")) * 60
 
+        # Guard: agar settings galat hain
+        if min_gap >= max_gap:
+            max_gap = min_gap + 60  # minimum 1 minute buffer
         shift_duration = (shift_end - shift_start).total_seconds()
         if shift_duration <= 0 or count <= 0:
             LoggerService.log(
@@ -45,38 +35,20 @@ class ScreenshotManager:
             )
             return []
 
-        # Buffer: pehle 5 min aur aakhri 5 min chhod do
-        buffer = 300  # 5 minutes
-        available = shift_duration - 2 * buffer
-
-        if available <= 0:
-            # Shift bahut choti hai — ek middle mein le lo
-            return [shift_start + (shift_end - shift_start) / 2]
-
+        if shift_duration < 600:  # 10 min se choti shift
+            mid = shift_start + (shift_end - shift_start) / 2
+            return [mid]
         timestamps: list[datetime] = []
-        attempts = 0
+        current = shift_start + timedelta(minutes=2)  # buffer start
 
-        current = shift_start + timedelta(minutes=2)
-
-        while (
-            current < shift_end
-            and len(timestamps) < count
-        ):
-
-            gap = random.randint(
-                min_gap,
-                _max_gap
-            )
-
+        while current < shift_end and len(timestamps) < count:
+            gap = random.randint(min_gap, max_gap)
             current += timedelta(seconds=gap)
-
-            if current < shift_end:
+            if current < shift_end - timedelta(minutes=2):  # buffer end
                 timestamps.append(current)
-
         timestamps.sort()
-
         LoggerService.log(
-            f"ScreenshotManager: {len(timestamps)} screenshots scheduled for shift "
+            f"ScreenshotManager: {len(timestamps)} screenshots scheduled "
             f"{shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')}"
         )
         return timestamps
@@ -86,55 +58,49 @@ class ScreenshotManager:
         os.makedirs(cls.STORAGE_PATH, exist_ok=True)
 
         screenshot_id = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        filename = f"{screenshot_id}.enc"
-        filepath = os.path.join(cls.STORAGE_PATH, filename)
+        timestamp     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        filename      = f"{screenshot_id}.enc"
+        filepath      = os.path.join(cls.STORAGE_PATH, filename)
 
+        # Capture + Encrypt
         screenshot = pyautogui.screenshot()
         buf = io.BytesIO()
         screenshot.save(buf, format="PNG")
         png_bytes = buf.getvalue()
-
         CryptoEngine.save_encrypted(png_bytes, filepath)
 
-        print(f"[SCREENSHOT ENCRYPTED & SAVED] {filepath}")
-        LoggerService.log(f"SCREENSHOT CAPTURED : {filepath}")
+        LoggerService.log(f"SCREENSHOT CAPTURED: {filepath}")
 
+        # DB insert — try/finally se connection guaranteed close hoga
         connection = Database.connect()
-        cursor = connection.cursor()
-        cursor.execute(
-            """
-            INSERT INTO screenshots (id, employee_id, file_path, timestamp)
-            VALUES (?, ?, ?, ?)
-            """,
-            (screenshot_id, SessionManager.employee_id, filepath, timestamp),
-        )
-        connection.commit()
-        connection.close()
-
-        # Upload try karo
         try:
-            with open(filepath, "rb") as file:
-                response = requests.post(
-                    f"{API_BASE_URL}/screenshots/upload",
-                    files={"screenshot": file},
-                    headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                    timeout=10,
-                )
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO screenshots
+                (id, employee_id, session_id, file_path, timestamp, upload_status)
+                VALUES (?, ?, ?, ?, ?, 'PENDING')
+                """,
+                (
+                    screenshot_id,
+                    SessionManager.employee_id,
+                    SessionManager.session_id,   # session_id add kiya
+                    filepath,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        except Exception as e:
+            LoggerService.log(f"SCREENSHOT DB ERROR: {e}")
+            raise
+        finally:
+            connection.close()  # Always close
 
-                print(
-                    "[UPLOAD RESPONSE]",
-                    response.status_code,
-                    response.text,
-                )
-                if response.status_code == 200:
-                    SyncManager.mark_uploaded(screenshot_id)
-        except Exception as error:
-            print("[UPLOAD ERROR - will retry later]", error)
+            # Upload SyncManager pe chhod do — yahan direct call nahi
+        SyncManager.queue_screenshot(screenshot_id)
 
         return {
-            "id": screenshot_id,
-            "path": filepath,
+            "id":        screenshot_id,
+            "path":      filepath,
             "timestamp": timestamp,
         }
-

@@ -1,10 +1,9 @@
+import os
 from datetime import datetime
-import requests
 
 from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
-from client.core.config import API_BASE_URL
 
 
 class LoggerService:
@@ -12,77 +11,44 @@ class LoggerService:
     LOG_FILE = "storage/app.log"
 
     @staticmethod
-    def log(message):
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Local file log
-        with open(LoggerService.LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {message}\n")
-
-            employee_id = SessionManager.employee_id
-            if not employee_id:
-                return
-
-            connection = Database.connect()
-            cursor     = connection.cursor()
-
-            cursor.execute(
-                """
-                INSERT INTO pending_logs (employee_id, activity)
-                VALUES (?, ?)
-                """,
-                (employee_id, message)
-            )
-
-            log_id = cursor.lastrowid
-            connection.commit()
-            connection.close()
-
-            # API upload try karo
-            try:
-                response = requests.post(
-                    f"{API_BASE_URL}/logs/create",   # hardcoded URL bhi fix hua
-                    json={
-                        "employee_id": employee_id,
-                        "activity":    message,
-                    },
-                    headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                    timeout=5,
-                )
-
-                if response.status_code == 200:
-                    conn = Database.connect()
-                    cur  = conn.cursor()
-                    cur.execute(
-                        "UPDATE pending_logs SET uploaded = 1 WHERE id = ?",
-                        (log_id,)
-                    )
-                    conn.commit()
-                    conn.close()
-
-            except Exception as error:
-                print("[LOG API ERROR]", error)
+    def _ensure_log_dir():
+        os.makedirs("storage", exist_ok=True)
 
     @staticmethod
-    def log_verbose(message):
-        """
-        Noisy/frequent logs ke liye (config sync, schedule generation,
-        idle-tick, etc.) — by default yeh DISABLED hota hai, taaki
-        activity_logs table mein bewajah row-spam na ho.
+    def log(message: str, level: str = "INFO") -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        Admin panel se per-employee 'verbose_logging' flag ON karne par
-        hi yeh actual LoggerService.log() ko call karta hai. Default
-        OFF rehta hai — jab kisi employee ka issue debug karna ho,
-        tabhi admin enable karega.
-        """
-        verbose_enabled = SettingsService.get_setting(
-            "verbose_logging", "false"
-        )
+        LoggerService._ensure_log_dir()
+        try:
+            with open(LoggerService.LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] [{level}] {message}\n")
+        except Exception as e:
+            print(f"[LOG FILE ERROR] {e}")
 
-        # SQLite mein string ke roop mein stored hota hai ("true"/"false"),
-        # isliye case-insensitive string compare karo.
+        try:
+            with Database.get_connection() as conn:
+                conn.cursor().execute(
+                    """
+                    INSERT INTO app_logs
+                        (timestamp, level, source, message)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (timestamp, level, "app", message),
+                )
+        except Exception as e:
+            print(f"[LOG DB ERROR] {e}")
+
+    @staticmethod
+    def log_warning(message: str) -> None:
+        LoggerService.log(message, level="WARNING")
+
+    @staticmethod
+    def log_error(message: str) -> None:
+        LoggerService.log(message, level="ERROR")
+
+    @staticmethod
+    def log_verbose(message: str) -> None:
+        verbose_enabled = SettingsService.get_setting("verbose_logging", "false")
         if str(verbose_enabled).strip().lower() != "true":
             return
-
-        LoggerService.log(message)
+        LoggerService.log(message, level="DEBUG")

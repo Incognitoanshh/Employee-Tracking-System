@@ -1,3 +1,5 @@
+import platform
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -182,7 +184,7 @@ class LoginWindow(BaseWindow):
 
         # ── Version ──────────────────────────────────────────
         card_layout.addSpacing(10)
-        version_label = QLabel("v1.0  ·  Windows  ·  IST")
+        version_label = QLabel(f"v1.0  ·  {platform.system()}  ·  IST")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setStyleSheet(
             "color: #334155; font-size: 11px; background: transparent;"
@@ -212,50 +214,93 @@ class LoginWindow(BaseWindow):
         password = self.password_input.text()
 
         if not username or not password:
-            self.status_label.setStyleSheet(
-                "color: #f59e0b; font-size: 13px; background: transparent;"
-            )
-            self.status_label.setText("⚠  Please enter username and password.")
-            self.login_button.setEnabled(True)
-            self.login_button.setText("Sign In")
+            self._set_status("⚠  Please enter username and password.", "warning")
+            self._reset_button()
             return
 
+        # ✅ Thread mein run karo — UI freeze nahi hogi
+        import threading
+        threading.Thread(
+            target=self._do_login,
+            args=(username, password),
+            daemon=True,
+        ).start()
+        
+    def _do_login(self, username: str, password: str):
+        """Background thread mein login karo."""
+        from PySide6.QtCore import QMetaObject, Qt
+
+        # ✅ Store result FIRST, then notify UI
         result = AuthService.login(username, password)
+        self._login_result = result
 
-        if result.get("success"):
-            LoggerService.log(f"LOGIN SUCCESS : {username}")
-            print("LOGIN RESULT =", result)
-            SessionManager.create_session(
-                employee_id=result["employee_id"],
-                auth_token=result["token"],
-                role=result.get("role", "employee"),
-                shift_start=result.get("shift_start"),
-                shift_end=result.get("shift_end"),
-            )
+        # ✅ UI update main thread pe — Qt requirement (after result is stored)
+        QMetaObject.invokeMethod(
+            self,
+            "_on_login_result",
+            Qt.ConnectionType.QueuedConnection,
+        )
 
-            role = result.get("role", "employee")
+    from PySide6.QtCore import Slot
 
-            # Attendance tracking (source of truth for admin online/offline)
-            # Previously only non-admin employees started shift + attendance.
-            ShiftManager.start_shift()
-            SessionLogManager.start_session()
+    @Slot()
+    def _on_login_result(self):
+        result = getattr(self, "_login_result", {})
+        current_username = self.username_input.text().strip()
 
-            if role == "admin":
-                self.next_window = AdminConfigPanel()
+        try:
+            if result.get("success"):
+                LoggerService.log(f"LOGIN SUCCESS: {result['employee_id']}")
+
+                # ✅ session_id aur full_name bhi pass karo
+                SessionManager.create_session(
+                    employee_id = result["employee_id"],
+                    auth_token  = result["token"],
+                    role        = result.get("role", "employee"),
+                    full_name   = result.get("full_name", ""),
+                    shift_start = result.get("shift_start"),
+                    shift_end   = result.get("shift_end"),
+                    session_id  = result.get("session_id"),
+                )
+
+                ShiftManager.start_shift()
+                SessionLogManager.start_session()
+
+                role = result.get("role", "employee")
+                if role == "admin":
+                    self.next_window = AdminConfigPanel()
+                else:
+                    self.next_window = DashboardWindow()
+
+                # ✅ Show next window and close login
                 self.next_window.show()
                 self.close()
+
             else:
-                self.next_window = DashboardWindow()
-                self.next_window.show()
-                self.close()
-        else:
-            LoggerService.log(f"LOGIN FAILED : {username}")
-            self.status_label.setStyleSheet(
-                "color: #ef4444; font-size: 13px; background: transparent;"
-            )
-            self.status_label.setText(f"✕  {result.get('message', 'Login failed')}")
-            self.login_button.setEnabled(True)
-            self.login_button.setText("Sign In")
+                LoggerService.log(f"LOGIN FAILED: {result.get('message')}")
+                self._set_status(
+                    f"✕  {result.get('message', 'Login failed')}",
+                    "error"
+                )
+
+        finally:
+            self._reset_button()  # ✅ Hamesha reset — even on exception
+
+    def _set_status(self, message: str, kind: str = "error"):
+        colors = {
+            "error":   "#ef4444",
+            "warning": "#f59e0b",
+            "info":    "#3b82f6",
+        }
+        color = colors.get(kind, "#ef4444")
+        self.status_label.setStyleSheet(
+            f"color: {color}; font-size: 13px; background: transparent;"
+        )
+        self.status_label.setText(message)
+
+    def _reset_button(self):
+        self.login_button.setEnabled(True)
+        self.login_button.setText("Sign In")
 
 
     def show_reset_message(self):

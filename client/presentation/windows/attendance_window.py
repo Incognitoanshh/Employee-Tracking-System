@@ -1,369 +1,172 @@
-
-from PySide6.QtWidgets import (
-    QHBoxLayout,
-    QLabel,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QHeaderView,
-    QPushButton,
-    QFileDialog,
-    QMessageBox
-)
-from datetime import datetime
 import csv
-from client.presentation.windows.base_window import BaseWindow
+import threading
+from datetime import datetime
+
 import requests
-import ast
-from client.core.config import API_BASE_URL
+from PySide6.QtCore import QMetaObject, Qt, Slot
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QHeaderView, QPushButton,
+    QFileDialog, QMessageBox,
+)
+
 from client.application.managers.session_manager import SessionManager
+from client.core.config import API_BASE_URL
 from client.presentation.widgets.status_card import StatusCard
+from client.presentation.windows.base_window import BaseWindow
 
 
 class AttendanceWindow(BaseWindow):
 
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("Attendance History")
         self.resize(1000, 650)
-
+        self._shifts_data = []
         self.setup_ui()
-        self.load_data()
+        # ✅ Background load — UI freeze nahi
+        threading.Thread(target=self._fetch_data, daemon=True).start()
 
     def setup_ui(self):
-
         layout = QVBoxLayout()
 
-        cards_layout = QHBoxLayout()
-
-        self.today_card = StatusCard(
-            "Today",
-            "0h"
-        )
-
-        self.week_card = StatusCard(
-            "This Week",
-            "0h"
-        )
-
-        self.month_card = StatusCard(
-            "This Month",
-            "0h"
-        )
-
-        cards_layout.addWidget(
-            self.today_card
-        )
-
-        cards_layout.addWidget(
-            self.week_card
-        )
-
-        cards_layout.addWidget(
-            self.month_card
-        )
-
         title = QLabel("Attendance History")
-        title.setStyleSheet("""
-        font-size: 30px;
-        font-weight: bold;
-        color: white;
-        margin-bottom: 15px;
-        """)
+        title.setStyleSheet(
+            "font-size: 30px; font-weight: bold; "
+            "color: white; margin-bottom: 15px;"
+        )
 
-        self.summary = QLabel("")
-        self.summary.setStyleSheet("""
-        color: #94a3b8;
-            font-size: 14px;
-            margin-bottom: 15px;
-            """)
+        cards_layout = QHBoxLayout()
+        self.today_card = StatusCard("Today",      "0h 0m")
+        self.week_card  = StatusCard("This Week",  "0h 0m")
+        self.month_card = StatusCard("This Month", "0h 0m")
+        cards_layout.addWidget(self.today_card)
+        cards_layout.addWidget(self.week_card)
+        cards_layout.addWidget(self.month_card)
 
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
-            "Employee",
-            "Login Time",
-            "Logout Time",
-            "Duration"
+            "Employee", "Login Time", "Logout Time", "Duration"
         ])
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
-        self.export_button = QPushButton("📥 Export CSV")
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
 
-        self.export_button.setStyleSheet("""
+        export_btn = QPushButton("📥 Export CSV")
+        export_btn.setStyleSheet("""
         QPushButton {
-            background-color: #16a34a;
-                color: white;
-                border-radius: 10px;
-                padding: 10px;
-                font-weight: bold;
+            background-color: #16a34a; color: white;
+            border-radius: 10px; padding: 10px; font-weight: bold;
         }
-
-        QPushButton:hover {
-            background-color: #15803d;
-        }
-        """)
-
-        self.export_button.clicked.connect(
-            self.export_csv
-        )
-
+        QPushButton:hover { background-color: #15803d; }
+            """)
+        export_btn.clicked.connect(self.export_csv)
         layout.addWidget(title)
         layout.addLayout(cards_layout)
-        layout.addWidget(self.summary)
-        layout.addWidget(self.export_button)
+        layout.addWidget(export_btn)
         layout.addWidget(self.table)
-
         self.setLayout(layout)
+    @staticmethod
+    def _format_hours(seconds: int) -> str:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h {m}m"
 
-    def format_hours(self, seconds):
-
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-
-        return f"{hours}h {minutes}m"
-
-    def load_data(self):
-
+    def _fetch_data(self):
+        """Background thread mein API call."""
         try:
-
             response = requests.get(
                 f"{API_BASE_URL}/attendance/all",
                 headers={
-                    "Authorization":
-                        f"Bearer {SessionManager.auth_token}"
-                    },
-                timeout=10
+                    "Authorization": f"Bearer {SessionManager.auth_token}"
+                },
+                timeout=10,
             )
             response.raise_for_status()
-            data = response.json()
-            shifts = []
-            for row in data.get("data", []):
-                
-                shifts.append(
-                    (
-                        row.get("employee_id"),
-                        str(row.get("login_time", "")),
-                        str(row.get("logout_time", "")),
-                        str(row.get("total_hours", ""))
-                    )
-                )
-        except Exception as error:
-        
-            print(
-                "[ATTENDANCE LOAD ERROR]",
-                error
+            data = response.json().get("data", [])
+        except Exception as e:
+            print(f"[ATTENDANCE LOAD ERROR] {e}")
+            data = []
+
+            self._shifts_raw = data
+            QMetaObject.invokeMethod(
+                self, "_apply_data",
+                Qt.ConnectionType.QueuedConnection,
             )
-            shifts = []
 
-        self.table.setRowCount(len(shifts))
+    @Slot()
+    def _apply_data(self):
+        data = getattr(self, "_shifts_raw", [])
 
+        today_sec = week_sec = month_sec = 0
+        now = datetime.now()
 
-        today_seconds = 0
+        self.table.setRowCount(len(data))
 
-        week_seconds = 0
+        for row, shift in enumerate(data):
+            employee    = str(shift.get("employee_id", ""))
+            login_str   = str(shift.get("login_time",  ""))
+            logout_str  = str(shift.get("logout_time", ""))
+            # ✅ total_seconds integer — ShiftManager fix ke baad
+            total_sec   = shift.get("total_seconds", 0) or 0
 
-        month_seconds = 0
-
-        for shift in shifts:
-
-            login_time = shift[1]
-            duration = shift[3]
-
-            if (
-                not duration
-                or duration == "None"
-            ):
-                continue
-            
+            # Summary cards
             try:
-            
-                if duration.startswith("{"):
-                
-                    d = ast.literal_eval(duration)
-                    total_sec = (
-                        d.get("hours", 0) * 3600 +
-                        d.get("minutes", 0) * 60 +
-                        d.get("seconds", 0)
-                    )
-
-                else:
-
-                    duration = duration.split(".")[0]
-
-                    h, m, s = map(
-                        int,
-                        duration.split(":")
-                    )
-
-                    total_sec = (
-                        h * 3600 +
-                        m * 60 +
-                        s
-                    ) 
-
+                shift_dt = datetime.fromisoformat(
+                    login_str.replace("Z", "")
+                )
+                if shift_dt.date() == now.date():
+                    today_sec += total_sec
+                    if shift_dt.isocalendar()[1] == now.isocalendar()[1]:
+                        week_sec += total_sec
+                        if (shift_dt.month == now.month
+                        and shift_dt.year == now.year):
+                            month_sec += total_sec
             except Exception:
-            
-                print(
-                    "[BAD DURATION]",
-                    duration
-                )
+                pass
 
-                continue
-
-
-            try:
-
-                shift_date = datetime.fromisoformat(
-                    login_time.replace("Z", "")
-                )
-
-            except Exception:
-            
-                shift_date = datetime.strptime(
-                    login_time.split(".")[0],
-                    "%Y-%m-%d %H:%M:%S"
-                )
-
-            now = datetime.now()
-
-            if shift_date.date() == now.date():
-                today_seconds += total_sec
-
-            if shift_date.isocalendar()[1] == now.isocalendar()[1]:
-                week_seconds += total_sec
-            if (
-                shift_date.month == now.month
-                and
-                shift_date.year == now.year
-            ):
-                month_seconds += total_sec
-
-
-            self.today_card.update_value(
-                self.format_hours(today_seconds)
+            duration_display = (
+                self._format_hours(total_sec) if total_sec else "🟢 ACTIVE"
             )
+            logout_display = logout_str if logout_str not in ("", "None") \
+                else "🟢 ACTIVE"
 
-            self.week_card.update_value(
-                self.format_hours(week_seconds)
-            )
-
-            self.month_card.update_value(
-                self.format_hours(month_seconds)
-            )
-
-            self.summary.hide()
-
-
-        for row, shift in enumerate(shifts):
-
-            # print("[SHIFT]", row, shift)
-
-            employee = shift[0]
-            login_time = shift[1]
-            logout_time = shift[2]
-            duration = shift[3]
-
-            if (
-                not logout_time
-                or logout_time == "None"
-            ):
-                logout_time = "🟢 ACTIVE"
-            if (duration and duration != "None"):
-
-                if duration.startswith("{"):
-                
-                    d = ast.literal_eval(duration)
-
-                    duration = (
-                        f"{d.get('hours', 0):02}:"
-                        f"{d.get('minutes', 0):02}:"
-                        f"{d.get('seconds', 0):02}"
-                    )
-                else:
-                
-                    duration = duration.split(".")[0]
-            else:
-            
-                duration = "🟢 ACTIVE"
-
-            values = [
-                employee,
-                login_time,
-                logout_time,
-                duration
-            ]
-
-            for col, value in enumerate(values):
-            
+            for col, value in enumerate([
+                employee, login_str, logout_display, duration_display
+            ]):
                 self.table.setItem(
-                    row,
-                    col,
-                    QTableWidgetItem(str(value))
+                    row, col, QTableWidgetItem(value)
                 )
+                # ✅ Cards loop ke BAAD update
+        self.today_card.update_value(self._format_hours(today_sec))
+        self.week_card.update_value(self._format_hours(week_sec))
+        self.month_card.update_value(self._format_hours(month_sec))
+
     def export_csv(self):
-
         file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Attendance",
-            "attendance_report.csv",
-            "CSV Files (*.csv)"
+            self, "Export Attendance",
+            "attendance_report.csv", "CSV Files (*.csv)"
         )
-
         if not file_path:
             return
-
         try:
-
-            with open(
-                file_path,
-                "w",
-                newline="",
-                encoding="utf-8"
-            ) as csv_file:
-
-                writer = csv.writer(csv_file)
-
+            with open(file_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
                 writer.writerow([
-                    "Employee",
-                    "Login Time",
-                    "Logout Time",
-                    "Duration"
+                    "Employee", "Login Time", "Logout Time", "Duration"
                 ])
-
                 for row in range(self.table.rowCount()):
-
-                    row_data = []
-
-                    for col in range(
-                        self.table.columnCount()
-                    ):
-
-                        item = self.table.item(
-                            row,
-                            col
-                        )
-
-                        row_data.append(
-                            item.text()
-                            if item
-                            else ""
-                        )
-
-                    writer.writerow(row_data)
-
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    f"CSV exported successfully:\n{file_path}"
-                )
-
-        except Exception as error:
-
-            QMessageBox.critical(
-                self,
-                "Export Failed",
-                str(error)
+                    writer.writerow([
+                        (self.table.item(row, col).text()
+                        if self.table.item(row, col) else "")
+                        for col in range(4)
+                    ])
+            QMessageBox.information(
+                self, "Success",
+                f"CSV exported:\n{file_path}"
             )
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", str(e))

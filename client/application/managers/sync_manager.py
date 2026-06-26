@@ -1,12 +1,15 @@
 import os
+from datetime import datetime
 import requests
 
 from client.application.managers.session_manager import SessionManager
 from client.core.config import API_BASE_URL
 from client.infrastructure.database.database import Database
+from client.services.logger_service import LoggerService
 
 
 class SyncManager:
+
     @staticmethod
     def _auth_headers():
         if not SessionManager.auth_token:
@@ -14,164 +17,196 @@ class SyncManager:
         return {"Authorization": f"Bearer {SessionManager.auth_token}"}
 
     @staticmethod
+    def queue_screenshot(screenshot_id: str):
+        LoggerService.log(f"SyncManager: queued screenshot {screenshot_id}")
+
+    @staticmethod
     def get_pending_screenshots():
-        connection = Database.connect()
-        cursor = connection.cursor()
-        cursor.execute(
-            """
-            SELECT *
-            FROM screenshots
-            WHERE uploaded = 0
-            """
-        )
-        data = cursor.fetchall()
-        connection.close()
-        return data
+        with Database.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM screenshots
+                WHERE upload_status = 'PENDING'
+                ORDER BY timestamp ASC
+                LIMIT 50
+                """
+            )
+            return cursor.fetchall()
 
     @staticmethod
-    def mark_uploaded(screenshot_id):
-        connection = Database.connect()
-        cursor = connection.cursor()
-        cursor.execute(
-            """
-            UPDATE screenshots
-            SET uploaded = 1
-            WHERE id = ?
-            """,
-            (screenshot_id,),
-        )
-        connection.commit()
-        connection.close()
+    def get_pending_idle_logs():
+        with Database.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM idle_logs
+                WHERE upload_status = 'PENDING'
+                  AND idle_end IS NOT NULL
+                ORDER BY idle_start ASC
+                LIMIT 50
+                """
+            )
+            return cursor.fetchall()
 
     @staticmethod
-    def get_pending_logs():
-        connection = Database.connect()
-        cursor = connection.cursor()
-        cursor.execute(
-            """
-            SELECT *
-            FROM pending_logs
-            WHERE uploaded = 0
-            """
-        )
-        data = cursor.fetchall()
-        connection.close()
-        return data
+    def mark_uploaded(screenshot_id: str):
+        with Database.get_connection() as conn:
+            conn.cursor().execute(
+                """
+                UPDATE screenshots
+                SET upload_status = 'UPLOADED',
+                    last_upload_attempt = ?
+                WHERE id = ?
+                """,
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), screenshot_id),
+            )
 
     @staticmethod
-    def mark_log_uploaded(log_id):
-        connection = Database.connect()
-        cursor = connection.cursor()
-        cursor.execute(
-            """
-            UPDATE pending_logs
-            SET uploaded = 1
-            WHERE id = ?
-            """,
-            (log_id,),
-        )
-        connection.commit()
-        connection.close()
+    def mark_upload_failed(screenshot_id: str):
+        with Database.get_connection() as conn:
+            conn.cursor().execute(
+                """
+                UPDATE screenshots
+                SET upload_status  = 'FAILED',
+                    upload_attempts = upload_attempts + 1,
+                    last_upload_attempt = ?
+                WHERE id = ?
+                """,
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), screenshot_id),
+            )
+
+    @staticmethod
+    def mark_idle_log_uploaded(log_id: int):
+        with Database.get_connection() as conn:
+            conn.cursor().execute(
+                """
+                UPDATE idle_logs
+                SET upload_status = 'UPLOADED'
+                WHERE id = ?
+                """,
+                (log_id,),
+            )
 
     @staticmethod
     def retry_uploads():
         headers = SyncManager._auth_headers()
         if headers is None:
-            print("[SYNC SKIP] No auth token present")
+            LoggerService.log("SyncManager: no auth token — skip upload")
             return
 
+        with Database.get_connection() as conn:
+            conn.cursor().execute(
+                """
+                UPDATE screenshots
+                SET upload_status = 'PENDING'
+                WHERE upload_status = 'FAILED'
+                  AND upload_attempts < 5
+                """
+            )
+
         pending = SyncManager.get_pending_screenshots()
+        LoggerService.log(f"SyncManager: {len(pending)} screenshots pending")
 
         for screenshot in pending:
-            try:
-                file_path = screenshot["file_path"]
-                screenshot_id = screenshot["id"]
+            screenshot_id = screenshot["id"]
+            file_path     = screenshot["file_path"]
 
+            try:
                 if not os.path.exists(file_path):
-                    print(f"[SYNC SKIP] File not found: {screenshot_id}")
-                    SyncManager.mark_uploaded(screenshot_id)
+                    LoggerService.log(f"SyncManager: file missing {screenshot_id}")
+                    SyncManager.mark_upload_failed(screenshot_id)
                     continue
 
-                with open(file_path, "rb") as file:
+                with open(file_path, "rb") as f:
                     response = requests.post(
                         f"{API_BASE_URL}/screenshots/upload",
-                        files={"screenshot": file},
+                        files={"screenshot": f},
+                        data={
+                            "employee_id": screenshot["employee_id"],
+                            "session_id":  screenshot["session_id"],
+                            "timestamp":   screenshot["timestamp"],
+                        },
                         headers=headers,
-                        timeout=10,
+                        timeout=15,
                     )
-
-                print("[SCREENSHOT SYNC]", response.status_code, response.text)
 
                 if response.status_code == 200:
                     SyncManager.mark_uploaded(screenshot_id)
-                    print("[SYNC SUCCESS]", screenshot_id)
+                    LoggerService.log(f"SyncManager: uploaded {screenshot_id}")
+                else:
+                    SyncManager.mark_upload_failed(screenshot_id)
 
-            except Exception as error:
-                print("[SYNC FAILED]", error)
-
-    @staticmethod
-    def cleanup_old_orphans(days=7):
-        """X days se purane unuploaded local records delete karo"""
-        try:
-            from datetime import datetime, timedelta
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            connection = Database.connect()
-            cursor = connection.cursor()
-            # Purane unuploaded screenshots
-            cursor.execute(
-                "SELECT id, file_path FROM screenshots WHERE uploaded = 0 AND timestamp < ?",
-                (cutoff,)
-            )
-            old_screenshots = cursor.fetchall()
-            for row in old_screenshots:
-                try:
-                    if row["file_path"] and os.path.exists(row["file_path"]):
-                        os.remove(row["file_path"])
-                except Exception:
-                    pass
-            cursor.execute(
-                "DELETE FROM screenshots WHERE uploaded = 0 AND timestamp < ?",
-                (cutoff,)
-            )
-            # Purane unuploaded logs
-            cursor.execute(
-                "DELETE FROM pending_logs WHERE uploaded = 0 AND id IN (SELECT id FROM pending_logs LIMIT 1000)",
-            )
-            connection.commit()
-            connection.close()
-            print(f"[CLEANUP] Removed {len(old_screenshots)} orphan screenshots older than {days} days")
-        except Exception as e:
-            print("[CLEANUP ERROR]", e)
+            except Exception as e:
+                SyncManager.mark_upload_failed(screenshot_id)
+                LoggerService.log(f"SyncManager: error {screenshot_id}: {e}")
 
     @staticmethod
     def retry_logs():
         headers = SyncManager._auth_headers()
         if headers is None:
-            print("[SYNC SKIP] No auth token present")
             return
 
-        pending_logs = SyncManager.get_pending_logs()
+        pending_logs = SyncManager.get_pending_idle_logs()
 
         for log in pending_logs:
             try:
                 payload = {
-                    "employee_id": log["employee_id"],
-                    "activity": log["activity"],
+                    "employee_id":      log["employee_id"],
+                    "session_id":       log["session_id"],
+                    "idle_start_ist":   log["idle_start"],
+                    "idle_end_ist":     log["idle_end"],
+                    "duration_seconds": log["duration_seconds"],
                 }
 
                 response = requests.post(
-                    f"{API_BASE_URL}/logs/create",
+                    f"{API_BASE_URL}/logs/upload",
                     json=payload,
                     headers=headers,
-                    timeout=5,
+                    timeout=10,
                 )
 
-                print("[LOG SYNC]", response.status_code, response.text)
-
                 if 200 <= response.status_code < 300:
-                    SyncManager.mark_log_uploaded(log["id"])
-                    print("[LOG SYNC SUCCESS]", log["id"])
+                    SyncManager.mark_idle_log_uploaded(log["id"])
 
-            except Exception as error:
-                print("[LOG SYNC FAILED]", error)
+            except Exception as e:
+                LoggerService.log(f"SyncManager: idle log error: {e}")
 
+    @staticmethod
+    def cleanup_old_orphans(days: int = 7):
+        try:
+            from datetime import timedelta
+            cutoff = (
+                datetime.now() - timedelta(days=days)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
+            with Database.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, file_path FROM screenshots
+                    WHERE upload_status = 'UPLOADED'
+                      AND timestamp < ?
+                    """,
+                    (cutoff,),
+                )
+                old = cursor.fetchall()
+
+                for row in old:
+                    try:
+                        if row["file_path"] and os.path.exists(row["file_path"]):
+                            os.remove(row["file_path"])
+                    except Exception as fe:
+                        LoggerService.log(f"SyncManager cleanup error: {fe}")
+
+                cursor.execute(
+                    """
+                    DELETE FROM screenshots
+                    WHERE upload_status = 'UPLOADED'
+                      AND timestamp < ?
+                    """,
+                    (cutoff,),
+                )
+
+        except Exception as e:
+            LoggerService.log(f"SyncManager cleanup error: {e}")

@@ -1,14 +1,17 @@
-/**
- * Admin-only middleware — role check karo JWT se
- */
-const adminOnly = (req, res, next) => {
-    if (req.employee?.role !== "admin") {
-        return res.status(403).json({
+exports.requireAdmin = (req, res, next) => {
+    if (!req.user) {
+        return res.status(401).json({
             success: false,
-            message: "Admin access required."
+            message: "Unauthorized — not logged in",
         });
     }
+
+    if (req.user.role !== "admin") {
+        return res.status(403).json({
+            success: false,
+            message: "Access denied — admin only",
+        });
+    }
+
     next();
 };
-
-module.exports = { adminOnly };

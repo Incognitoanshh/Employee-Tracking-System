@@ -15,13 +15,12 @@ exports.getEmployees = async (req, res) => {
                 e.username,
                 e.role,
 
-                -- Status: attendance open session = online
+                -- Status: active_sessions = online (matching dashboard logic)
                 CASE
                     WHEN EXISTS (
                         SELECT 1
-                        FROM attendance a
-                        WHERE a.employee_id = e.employee_id
-                          AND a.logout_time IS NULL
+                        FROM active_sessions s
+                        WHERE s.employee_id = e.employee_id
                     )
                     THEN 'online'
                     ELSE 'offline'
@@ -33,26 +32,19 @@ exports.getEmployees = async (req, res) => {
                 CASE
                     WHEN EXISTS (
                         SELECT 1
-                        FROM attendance a
-                        WHERE a.employee_id = e.employee_id
-                          AND a.logout_time IS NULL
+                        FROM active_sessions s
+                        WHERE s.employee_id = e.employee_id
                     )
                     THEN NULL
                     ELSE (
                         SELECT GREATEST(
-                            COALESCE(
-                                (SELECT MAX(a2.logout_time)
-                                 FROM attendance a2
-                                 WHERE a2.employee_id = e.employee_id
-                                   AND a2.logout_time IS NOT NULL),
-                                '1970-01-01'::timestamptz
-                            ),
-                            COALESCE(
-                                (SELECT MAX(al.created_at)
-                                 FROM activity_logs al
-                                 WHERE al.employee_id = e.employee_id),
-                                '1970-01-01'::timestamptz
-                            )
+                            (SELECT MAX(a2.logout_time)
+                             FROM attendance a2
+                             WHERE a2.employee_id = e.employee_id
+                               AND a2.logout_time IS NOT NULL),
+                            (SELECT MAX(al.created_at)
+                             FROM activity_logs al
+                             WHERE al.employee_id = e.employee_id)
                         )
                     )
                 END AS last_seen,
@@ -80,26 +72,6 @@ exports.getEmployees = async (req, res) => {
             success: false,
             error: err.message
         });
-    }
-};
-
-exports.createEmployee = async (req, res) => {
-    const { employee_id, username, password, role = "employee" } = req.body;
-
-    try {
-        const bcrypt = require("bcryptjs");
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        await pool.query(
-            `INSERT INTO employees (employee_id, username, password, role)
-             VALUES ($1, $2, $3, $4)`,
-            [employee_id, username, hashedPassword, role]
-        );
-
-        return res.json({ success: true, message: "Employee created" });
-
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
     }
 };
 
@@ -293,47 +265,6 @@ exports.getScreenshots = async (req, res) => {
     }
 };
 
-exports.getLogs = async (req, res) => {
-    const { employee_id, date, page = 1 } = req.query;
-    const limit  = 50;
-    const offset = (page - 1) * limit;
-
-    const conditions = [];
-    const values     = [];
-    let   idx        = 1;
-
-    if (employee_id) { conditions.push(`employee_id = $${idx++}`); values.push(employee_id); }
-    if (date)        { conditions.push(`DATE(created_at) = $${idx++}`); values.push(date); }
-
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-
-    try {
-        const noiseWhere = where
-            ? `${where} AND activity NOT LIKE '%ConfigSyncManager%' AND activity NOT LIKE '%SchedulerService%' AND activity NOT LIKE '%SYNC SAVE%'`
-            : `WHERE activity NOT LIKE '%ConfigSyncManager%' AND activity NOT LIKE '%SchedulerService%' AND activity NOT LIKE '%SYNC SAVE%'`;
-        const result = await pool.query(
-            `SELECT id, employee_id, activity, created_at
-             FROM activity_logs
-             ${noiseWhere}
-             ORDER BY created_at DESC
-             LIMIT $${idx} OFFSET $${idx + 1}`,
-            [...values, limit, offset]
-        );
-        const countResult = await pool.query(
-            `SELECT COUNT(*) FROM activity_logs ${noiseWhere}`, values
-        );
-
-        return res.json({
-            success: true,
-            data:    result.rows,
-            total:   Number(countResult.rows[0].count),
-            page:    Number(page),
-        });
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-    }
-};
-
 exports.getEmployeeDetails = async (req, res) => {
     const { employee_id } = req.params;
 
@@ -352,13 +283,13 @@ exports.getEmployeeDetails = async (req, res) => {
             [employee_id]
         );
 
-        const attendance = await pool.query(
-            `SELECT 1 FROM attendance
-             WHERE employee_id = $1 AND logout_time IS NULL LIMIT 1`,
+        const sessionCheck = await pool.query(
+            `SELECT 1 FROM active_sessions
+             WHERE employee_id = $1 LIMIT 1`,
             [employee_id]
         );
 
-        const isOnline = attendance.rows.length > 0;
+        const isOnline = sessionCheck.rows.length > 0;
 
         const logsCount = await pool.query(
             `SELECT COUNT(*) AS count FROM activity_logs WHERE employee_id = $1`,
@@ -448,71 +379,198 @@ exports.getEmployeeDetails = async (req, res) => {
     }
 };
 
+// ── createEmployee — Validation add ──────────────────────────
+exports.createEmployee = async (req, res) => {
+    const { employee_id, username, password, role } = req.body;
+
+    // ✅ Validation
+    if (!employee_id || !username || !password) {
+        return res.status(400).json({
+            success: false,
+            message: "employee_id, username, password required",
+        });
+    }
+
+    // ✅ Role whitelist
+    const allowed_roles = ["employee", "admin"];
+    const safe_role = allowed_roles.includes(role) ? role : "employee";
+
+    try {
+        const bcrypt = require("bcryptjs");
+        const hashed = await bcrypt.hash(password, 10);
+
+        await pool.query(
+            `INSERT INTO employees
+                (employee_id, username, password, role)
+             VALUES ($1, $2, $3, $4)`,
+            [employee_id, username, hashed, safe_role]
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Employee created",
+        });
+
+    } catch (err) {
+        // ✅ Duplicate check
+        if (err.code === "23505") {
+            return res.status(409).json({
+                success: false,
+                message: "Employee ID or username already exists",
+            });
+        }
+        console.error("[CREATE EMPLOYEE ERROR]", err.message);
+        return res.status(500).json({
+            success: false,
+            message: err.message,
+        });
+    }
+};
+
+// ── getLogs — Count query params fix ─────────────────────────
+exports.getLogs = async (req, res) => {
+    const { employee_id, date, page = 1 } = req.query;
+    const limit  = 50;
+    const offset = (parseInt(page) - 1) * limit;
+
+    const conditions = [];
+    const values     = [];
+    let   idx        = 1;
+
+    if (employee_id) {
+        conditions.push(`employee_id = $${idx++}`);
+        values.push(employee_id);
+    }
+    if (date) {
+        conditions.push(`DATE(created_at) = $${idx++}`);
+        values.push(date);
+    }
+
+    // Noise filter
+    const noiseFilters = [
+        `activity NOT LIKE '%ConfigSyncManager%'`,
+        `activity NOT LIKE '%SchedulerService%'`,
+        `activity NOT LIKE '%SYNC SAVE%'`,
+    ].join(" AND ");
+
+    const where = conditions.length
+        ? `WHERE ${conditions.join(" AND ")} AND ${noiseFilters}`
+        : `WHERE ${noiseFilters}`;
+
+    try {
+        // ✅ Count aur data ke liye alag params
+        const countResult = await pool.query(
+            `SELECT COUNT(*) FROM activity_logs ${where}`,
+            values  // sirf filter params — limit/offset nahi
+        );
+
+        const result = await pool.query(
+            `SELECT id, employee_id, activity, created_at
+             FROM activity_logs
+             ${where}
+             ORDER BY created_at DESC
+             LIMIT $${idx} OFFSET $${idx + 1}`,
+            [...values, limit, offset]
+        );
+
+        return res.status(200).json({
+            success: true,
+            data:    result.rows,
+            total:   parseInt(countResult.rows[0].count),
+            page:    parseInt(page),
+        });
+
+    } catch (err) {
+        console.error("[ADMIN LOGS ERROR]", err.message);
+        return res.status(500).json({
+            success: false,
+            message: err.message,
+        });
+    }
+};
+
+// ── deleteEmployee — Disk files bhi delete karo ───────────────
 exports.deleteEmployee = async (req, res) => {
     const { employee_id } = req.params;
+    const fs   = require("fs");
+    const path = require("path");
 
     const client = await pool.connect();
 
     try {
         await client.query("BEGIN");
 
-        const employee = await client.query(
-            `SELECT employee_id
-             FROM employees
-             WHERE employee_id = $1`,
+        const empCheck = await client.query(
+            `SELECT employee_id FROM employees WHERE employee_id = $1`,
             [employee_id]
         );
-
-        if (employee.rows.length === 0) {
+        if (empCheck.rows.length === 0) {
             await client.query("ROLLBACK");
             return res.status(404).json({
                 success: false,
-                message: "Employee not found"
+                message: "Employee not found",
             });
         }
 
-        await client.query(
-            `DELETE FROM employee_configs
-             WHERE employee_id = $1`,
+        // ✅ Screenshot files disk se delete karo
+        const files = await client.query(
+            `SELECT file_name FROM screenshots WHERE employee_id = $1`,
             [employee_id]
         );
+        for (const row of files.rows) {
+            try {
+                const filePath = path.resolve(
+                    __dirname,
+                    "../uploads/screenshots",
+                    path.basename(row.file_name)
+                );
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
+            } catch (fe) {
+                console.warn("[DELETE FILE WARN]", fe.message);
+            }
+        }
 
+        // DB cleanup — order matters (FK constraints)
         await client.query(
-            `DELETE FROM attendance
-             WHERE employee_id = $1`,
+            `DELETE FROM employee_configs WHERE employee_id = $1`,
             [employee_id]
         );
-
         await client.query(
-            `DELETE FROM screenshots
-             WHERE employee_id = $1`,
+            `DELETE FROM attendance WHERE employee_id = $1`,
             [employee_id]
         );
-
         await client.query(
-            `DELETE FROM activity_logs
-             WHERE employee_id = $1`,
+            `DELETE FROM active_sessions WHERE employee_id = $1`,
             [employee_id]
         );
-
         await client.query(
-            `DELETE FROM employees
-             WHERE employee_id = $1`,
+            `DELETE FROM screenshots WHERE employee_id = $1`,
+            [employee_id]
+        );
+        await client.query(
+            `DELETE FROM activity_logs WHERE employee_id = $1`,
+            [employee_id]
+        );
+        await client.query(
+            `DELETE FROM employees WHERE employee_id = $1`,
             [employee_id]
         );
 
         await client.query("COMMIT");
 
-        return res.json({
+        return res.status(200).json({
             success: true,
-            message: `Employee ${employee_id} deleted`
+            message: `Employee ${employee_id} deleted`,
         });
 
     } catch (err) {
         await client.query("ROLLBACK");
+        console.error("[DELETE EMPLOYEE ERROR]", err.message);
         return res.status(500).json({
             success: false,
-            error: err.message
+            message: err.message,
         });
     } finally {
         client.release();

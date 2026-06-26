@@ -1,187 +1,178 @@
 from datetime import datetime
+import threading
 
 import requests
 
 from PySide6.QtWidgets import (
-    QListWidget,
-    QListWidgetItem,
-    QLabel,
-    QPushButton,
-    QGridLayout,
-    QHBoxLayout,
-    QVBoxLayout,
-    QFrame,
-    QApplication,
+    QListWidget, QListWidgetItem, QLabel,
+    QPushButton, QGridLayout, QHBoxLayout,
+    QVBoxLayout, QFrame,
 )
-from client.core.config import API_BASE_URL
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QMetaObject, Slot
 from PySide6.QtGui import QCursor, QColor
-from client.presentation.windows.admin_config_panel import AdminConfigPanel
+
+from client.core.config import API_BASE_URL
 from client.application.managers.session_log_manager import SessionLogManager
-from client.infrastructure.database.database import Database
+from client.application.managers.session_manager import SessionManager
 from client.application.managers.shift_manager import ShiftManager
 from client.application.managers.sync_manager import SyncManager
-from client.presentation.windows.logs_window import LogsWindow
-from client.presentation.tray.system_tray import SystemTray
-from client.presentation.windows.settings_window import SettingsWindow
-from client.presentation.windows.base_window import BaseWindow
-from client.presentation.widgets.status_card import StatusCard
-from client.application.managers.session_manager import SessionManager
-from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
-from client.services.logger_service import LoggerService
+from client.application.schedulers.scheduler_service import SchedulerService
+from client.application.services.auth_service import AuthService
+from client.infrastructure.database.database import Database
+from client.presentation.windows.admin_config_panel import AdminConfigPanel
+from client.presentation.windows.base_window import BaseWindow
+from client.presentation.widgets.status_card import StatusCard
+from client.presentation.windows.logs_window import LogsWindow
+from client.presentation.windows.settings_window import SettingsWindow
 from client.presentation.windows.attendance_window import AttendanceWindow
+from client.presentation.tray.system_tray import SystemTray
+from client.services.logger_service import LoggerService
 
 
 class DashboardWindow(BaseWindow):
     def __init__(self):
         super().__init__()
-        self.last_mouse_position = QCursor.pos()
-
         self.setWindowTitle("ETS Dashboard")
         self.resize(1100, 720)
 
-        # FIX #6: Cache login_time so shift timer doesn't hit DB every second
+        # Shift timer cache — DB hit sirf ek baar
         self._shift_login_time: datetime | None = None
         self._load_shift_login_time()
 
         self.setup_ui()
+        self._start_timers()
+
+        # ── Setup ─────────────────────────────────────────────────────────────
+
+    def _start_timers(self):
+        # Network check — 30s (server ping, not google)
         self.network_timer = QTimer()
         self.network_timer.timeout.connect(self.check_network_status)
-        self.network_timer.start(5000)
-
+        self.network_timer.start(30_000)
         self.check_network_status()
-        self.tray = SystemTray(self)
-        self.tray.show()
-        self.tray.show_message()
 
-        self.activity_timer = QTimer()
-        self.activity_timer.timeout.connect(self.track_activity)
-        self.activity_timer.start(1000)
-
-        # FIX #6: Shift timer now uses cached login_time — no DB query per tick
+        # Shift duration display — 1s, no DB
         self.shift_timer = QTimer()
         self.shift_timer.timeout.connect(self.update_shift_timer)
         self.shift_timer.start(1000)
 
-        # FIX #1/#8: Dashboard refresh at 30s, not 15s — reduces blocking
+        # Dashboard refresh — 30s
         self.dashboard_refresh_timer = QTimer()
         self.dashboard_refresh_timer.timeout.connect(self.refresh_dashboard)
-        self.dashboard_refresh_timer.start(30000)
+        self.dashboard_refresh_timer.start(30_000)
 
-        print("DASHBOARD CREATED")
+        # Tray
+        self.tray = SystemTray(self)
+        self.tray.show()
+
+        # Services
+        self.scheduler = SchedulerService()
+        self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
+        self.scheduler.force_logout.connect(self.logout)
+        self.scheduler.start()
+
+        self.idle_tracker = IdleTracker()
+        self.idle_tracker.status_changed.connect(self.update_idle_status)
+        self.idle_tracker.start()
+
+        # Deferred loads — UI render ke baad
+        QTimer.singleShot(1000, self.load_dashboard_stats)
+        QTimer.singleShot(2000, self.load_recent_logs)
 
     def _load_shift_login_time(self):
-        """DB se login_time ek baar read karo — cache karo for timer."""
         try:
-            connection = Database.connect()
-            cursor = connection.cursor()
-            cursor.execute("""
-                SELECT login_time FROM shifts
-                WHERE employee_id = ?
-                ORDER BY id DESC LIMIT 1
-                """, (SessionManager.employee_id,))
-            shift = cursor.fetchone()
-            connection.close()
+            with Database.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT login_time FROM shifts
+                    WHERE employee_id = ? AND status = 'ACTIVE'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (SessionManager.employee_id,),
+                )
+                shift = cursor.fetchone()
             if shift:
-                self._shift_login_time = datetime.strptime(shift[0], "%Y-%m-%d %H:%M:%S")
+                login_time_str = shift["login_time"]
+                try:
+                    # Try ISO8601 first (with timezone)
+                    self._shift_login_time = datetime.fromisoformat(login_time_str)
+                except ValueError:
+                    # Fallback to simple format
+                    self._shift_login_time = datetime.strptime(
+                        login_time_str, "%Y-%m-%d %H:%M:%S"
+                    )
         except Exception as e:
-            print("[SHIFT LOGIN TIME LOAD ERROR]", e)
+            LoggerService.log_error(f"DashboardWindow shift time load error: {e}")
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(28, 22, 28, 20)
         main_layout.setSpacing(0)
 
-        # ── Header ──────────────────────────────────────────
+        # Header
         header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-
         title = QLabel("ETS Control Center")
-        title.setStyleSheet("""
-            font-size: 26px;
-            font-weight: 700;
-            color: #f1f5f9;
-            letter-spacing: -0.5px;
-            """)
+        title.setStyleSheet(
+            "font-size: 26px; font-weight: 700; color: #f1f5f9;"
+            )
 
         employee_container = QVBoxLayout()
-        employee_container.setSpacing(2)
-
-        employee_label = QLabel(f"👤  {SessionManager.employee_id}")
-        employee_label.setStyleSheet("""
-            color: #94a3b8;
-            font-size: 13px;
-            """)
-
+        employee_label = QLabel(
+            f"👤  {SessionManager.full_name or SessionManager.employee_id}"
+        )
+        employee_label.setStyleSheet("color: #94a3b8; font-size: 13px;")
         self.status_label = QLabel("🟢  ONLINE")
-        self.status_label.setStyleSheet("""
-            color: #22c55e;
-            font-size: 12px;
-            font-weight: bold;
-            """)
-
-        employee_container.addWidget(employee_label, alignment=Qt.AlignmentFlag.AlignRight)
-        employee_container.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignRight)
-
+        self.status_label.setStyleSheet(
+            "color: #22c55e; font-size: 12px; font-weight: bold;"
+            )
+        employee_container.addWidget(
+            employee_label, alignment=Qt.AlignmentFlag.AlignRight
+        )
+        employee_container.addWidget(
+            self.status_label, alignment=Qt.AlignmentFlag.AlignRight
+        )
         header_layout.addWidget(title)
         header_layout.addStretch()
         header_layout.addLayout(employee_container)
-
-        # ── Divider ─────────────────────────────────────────
         divider = QFrame()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background-color: #1e2d3d; margin: 16px 0px 20px 0px;")
+        divider.setStyleSheet(
+            "background-color: #1e2d3d; margin: 16px 0px 20px 0px;"
+        )
 
-        # ── Cards Grid ─────────────────────────────────────
+        # Cards
         cards_layout = QGridLayout()
         cards_layout.setSpacing(16)
-        cards_layout.setContentsMargins(0, 0, 0, 0)
-
-        tracking_card = StatusCard("Tracking Status", "ACTIVE")
-        tracking_card.set_status_color("#22c55e")
-
-        self.idle_card = StatusCard("Idle Status", "WORKING")
-        self.idle_card.set_status_color("#22c55e")
-
-        # FIX #6: This card shows SHIFT DURATION, not offline employees
-        self.shift_card = StatusCard("Session Duration", "00:00:00")
-
-        upload_card = StatusCard("Upload Status", "SYNCED")
-        upload_card.set_status_color("#22c55e")
-
-        self.internet_card = StatusCard("Internet", "CONNECTED")
-        self.internet_card.set_status_color("#22c55e")
-
+        self.idle_card  = StatusCard("Idle Status",       "WORKING")
+        self.shift_card = StatusCard("Session Duration",  "00:00:00")
+        self.internet_card  = StatusCard("Internet",      "CONNECTED")
         self.log_count_card = StatusCard("Logs Recorded", "—")
-
-        cards_layout.addWidget(tracking_card, 0, 0)
-        cards_layout.addWidget(self.idle_card, 0, 1)
-        cards_layout.addWidget(self.shift_card, 0, 2)
-        cards_layout.addWidget(upload_card, 1, 0)
-        cards_layout.addWidget(self.internet_card, 1, 1)
+        tracking_card = StatusCard("Tracking Status", "ACTIVE")
+        upload_card   = StatusCard("Upload Status",   "SYNCED")
+        self.idle_card.set_status_color("#22c55e")
+        self.internet_card.set_status_color("#22c55e")
+        tracking_card.set_status_color("#22c55e")
+        upload_card.set_status_color("#22c55e")
+        cards_layout.addWidget(tracking_card,       0, 0)
+        cards_layout.addWidget(self.idle_card,      0, 1)
+        cards_layout.addWidget(self.shift_card,     0, 2)
+        cards_layout.addWidget(upload_card,         1, 0)
+        cards_layout.addWidget(self.internet_card,  1, 1)
         cards_layout.addWidget(self.log_count_card, 1, 2)
-
-        # ── Activity Feed ───────────────────────────────────
+        # Activity feed
         feed_header = QHBoxLayout()
-        feed_label = QLabel("Recent Activity")
-        feed_label.setStyleSheet("""
-            font-size: 16px;
-            font-weight: 700;
-            color: #e2e8f0;
-            """)
-
+        feed_label  = QLabel("Recent Activity")
+        feed_label.setStyleSheet(
+            "font-size: 16px; font-weight: 700; color: #e2e8f0;"
+            )
         self.feed_count_label = QLabel("0 events")
-        self.feed_count_label.setStyleSheet("""
-            font-size: 12px;
-            color: #475569;
-            """)
-
+        self.feed_count_label.setStyleSheet("font-size: 12px; color: #475569;")
         feed_header.addWidget(feed_label)
         feed_header.addStretch()
         feed_header.addWidget(self.feed_count_label)
-
         self.activity_list = QListWidget()
         self.activity_list.setMinimumHeight(180)
         self.activity_list.setMaximumHeight(220)
@@ -193,80 +184,66 @@ class DashboardWindow(BaseWindow):
                 border-radius: 12px;
                 padding: 8px;
                 font-size: 13px;
-                outline: none;
-            }
+                }
             QListWidget::item {
                 padding: 9px 12px;
                 margin: 2px 0px;
                 border-radius: 8px;
                 background-color: #0f172a;
-                color: #cbd5e1;
             }
             QListWidget::item:hover { background-color: #1e293b; }
-            QListWidget::item:selected { background-color: #1e3a5f; color: white; }
-            QScrollBar:vertical { background: #0a0f1a; width: 6px; border-radius: 3px; }
-            QScrollBar::handle:vertical { background: #334155; border-radius: 3px; }
+            QListWidget::item:selected {
+                background-color: #1e3a5f; color: white;
+                }
             """)
-
-        # ── Buttons ──────────────────────────────────────────
+                        # Buttons
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(12)
-
-        logs_button       = QPushButton("📋  Activity Logs")
-        settings_button   = QPushButton("⚙  Settings")
-        logout_button     = QPushButton("🔒  Logout")
-        attendance_button = QPushButton("📊 Attendance")
-
-        admin_button = None
-
-        if SessionManager.role == "admin":
-            admin_button = QPushButton("🛠 Admin Panel")
-            admin_button.setFixedHeight(42)
-
-        for btn in [logs_button, attendance_button, settings_button]:
+        logs_btn       = QPushButton("📋  Activity Logs")
+        settings_btn   = QPushButton("⚙  Settings")
+        logout_btn     = QPushButton("🔒  Logout")
+        attendance_btn = QPushButton("📊  Attendance")
+        for btn in [logs_btn, attendance_btn, settings_btn, logout_btn]:
             btn.setFixedHeight(42)
-
-        logs_button.setStyleSheet("""
+        logs_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1d4ed8;
-                border: 1px solid #2563eb;
-                border-radius: 10px;
-                color: white;
-                font-weight: 600;
-                font-size: 13px;
+                background-color: #1d4ed8; border: 1px solid #2563eb;
+                border-radius: 10px; color: white;
+                font-weight: 600; font-size: 13px;
             }
             QPushButton:hover { background-color: #2563eb; }
-            QPushButton:pressed { background-color: #1e40af; }
-            """)
-
-        settings_button.setStyleSheet("""
+                """)
+        settings_btn.setStyleSheet("""
             QPushButton {
-                background-color: #1e293b;
-                border: 1px solid #334155;
-                border-radius: 10px;
-                color: #e2e8f0;
-                font-weight: 600;
-                font-size: 13px;
+                background-color: #1e293b; border: 1px solid #334155;
+                border-radius: 10px; color: #e2e8f0;
+                font-weight: 600; font-size: 13px;
             }
             QPushButton:hover { background-color: #334155; }
-            QPushButton:pressed { background-color: #0f172a; }
             """)
-
-        logout_button.clicked.connect(self.logout)
-        attendance_button.clicked.connect(self.open_attendance_window)
-        logs_button.clicked.connect(self.open_logs_window)
-        settings_button.clicked.connect(self.open_settings_window)
-
-        bottom_layout.addWidget(logs_button)
-        bottom_layout.addWidget(settings_button)
-        bottom_layout.addWidget(logout_button, alignment=Qt.AlignmentFlag.AlignRight)
-        bottom_layout.addWidget(attendance_button, alignment=Qt.AlignmentFlag.AlignRight)
-
-        if admin_button:
-            admin_button.clicked.connect(self.open_admin_panel)
-            bottom_layout.addWidget(admin_button)
-
-        # ── Assemble ─────────────────────────────────────────
+        logout_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #7f1d1d; border: 1px solid #991b1b;
+                border-radius: 10px; color: white;
+                font-weight: 600; font-size: 13px;
+            }
+            QPushButton:hover { background-color: #991b1b; }
+            """)
+        logs_btn.clicked.connect(self.open_logs_window)
+        settings_btn.clicked.connect(self.open_settings_window)
+        logout_btn.clicked.connect(self.logout)
+        attendance_btn.clicked.connect(self.open_attendance_window)
+        bottom_layout.addWidget(logs_btn)
+        bottom_layout.addWidget(settings_btn)
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(attendance_btn)
+        bottom_layout.addWidget(logout_btn)
+        if SessionManager.role == "admin":
+            admin_btn = QPushButton("🛠  Admin Panel")
+            admin_btn.setFixedHeight(42)
+            admin_btn.clicked.connect(self.open_admin_panel)
+            bottom_layout.addWidget(admin_btn)
+            # Assemble
         main_layout.addLayout(header_layout)
         main_layout.addWidget(divider)
         main_layout.addLayout(cards_layout)
@@ -276,31 +253,22 @@ class DashboardWindow(BaseWindow):
         main_layout.addWidget(self.activity_list)
         main_layout.addSpacing(16)
         main_layout.addLayout(bottom_layout)
-
         self.setLayout(main_layout)
+                                                                        # ── Timer callbacks ───────────────────────────────────────────────────
 
-        # ── Services ─────────────────────────────────────────
-        self.scheduler = SchedulerService()
-        self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
-        if hasattr(self.scheduler, "force_logout"):
-            self.scheduler.force_logout.connect(self.logout)
-        self.scheduler.start()
-
-        self.idle_tracker = IdleTracker()
-        self.idle_tracker.status_changed.connect(self.update_idle_status)
-        self.idle_tracker.start()
-
-        from PySide6.QtCore import QTimer
-
-        self.check_pending_sync()
-
-        QTimer.singleShot(1000, self.load_dashboard_stats)
-        QTimer.singleShot(2000, self.load_recent_logs)
-
-    def capture_screenshot(self):
-        result = ScreenshotManager.capture_screenshot()
-        print(result)
-        self.load_recent_logs()
+    def update_shift_timer(self):
+        if not self._shift_login_time:
+            return
+        try:
+            now = datetime.now()
+            login_time = self._shift_login_time
+            # If login_time is timezone-aware, make now aware too
+            if hasattr(login_time, 'tzinfo') and login_time.tzinfo is not None:
+                now = datetime.now().astimezone()
+            elapsed = now - login_time
+            self.shift_card.update_value(str(elapsed).split(".")[0])
+        except Exception as e:
+            LoggerService.log_error(f"DashboardWindow shift timer: {e}")
 
     def update_idle_status(self, status: str):
         if hasattr(self, "tray"):
@@ -312,129 +280,199 @@ class DashboardWindow(BaseWindow):
             self.idle_card.update_value("WORKING")
             self.idle_card.set_status_color("#22c55e")
 
-    def update_shift_timer(self):
-        """FIX #6: Use cached login_time — no DB query every second."""
-        if not self._shift_login_time:
-            return
+                # ── Screenshot ────────────────────────────────────────────────────────
+
+    def capture_screenshot(self):
+        """✅ Background thread mein — UI freeze nahi hogi."""
+        threading.Thread(
+            target=self._do_capture,
+            daemon=True,
+        ).start()
+
+    def _do_capture(self):
         try:
-            duration = datetime.now() - self._shift_login_time
-            self.shift_card.update_value(str(duration).split(".")[0])
+            ScreenshotManager.capture_screenshot()
+            QMetaObject.invokeMethod(
+                self,
+                "_on_capture_done",
+                Qt.ConnectionType.QueuedConnection,
+            )
         except Exception as e:
-            print("[SHIFT TIMER ERROR]", e)
+            LoggerService.log_error(f"DashboardWindow capture error: {e}")
 
-    def track_activity(self):
-        current_position = QCursor.pos()
-        if current_position != self.last_mouse_position:
-            self.last_mouse_position = current_position
-            self.idle_tracker.reset_activity()
+    @Slot()
+    def _on_capture_done(self):
+        self.load_recent_logs()
 
-    def open_logs_window(self):
-        self.logs_window = LogsWindow()
-        self.logs_window.show()
-        self.logs_window.raise_()
-        self.logs_window.activateWindow()
+        # ── Network ───────────────────────────────────────────────────────────
 
-    def open_settings_window(self):
-        self.settings_window = SettingsWindow()
-        self.settings_window.saved = None
-        self.settings_window.show()
+    def check_network_status(self):
+        """✅ Server ping use karo — Google nahi."""
+        threading.Thread(
+            target=self._do_network_check,
+            daemon=True,
+        ).start()
 
-    def closeEvent(self, event):
-        if getattr(self, "_force_closing", False):
-            event.accept()
+    def _do_network_check(self):
+        online = False
+        try:
+            # Ping endpoint is at /status/ping (no /api prefix)
+            base_url = API_BASE_URL.replace("/api", "")
+            r = requests.get(
+                f"{base_url}/status/ping",
+                timeout=3,
+            )
+            online = r.status_code == 200
+        except Exception:
+            pass
+        # Set value BEFORE queuing UI update to avoid race condition
+        self._network_online = online
+        QMetaObject.invokeMethod(
+            self,
+            "_update_network_ui",
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    @Slot()
+    def _update_network_ui(self):
+        online = getattr(self, "_network_online", False)
+        if online:
+            self.status_label.setText("🟢 ONLINE")
+            self.status_label.setStyleSheet(
+                "color: #22c55e; font-size: 12px; font-weight: bold;"
+                )
+            self.internet_card.update_value("CONNECTED")
+            self.internet_card.set_status_color("#22c55e")
+        else:
+            self.status_label.setText("🔴 OFFLINE")
+            self.status_label.setStyleSheet(
+                "color: #ef4444; font-size: 12px; font-weight: bold;"
+                )
+            self.internet_card.update_value("DISCONNECTED")
+            self.internet_card.set_status_color("#ef4444")
+
+                # ── Dashboard data ────────────────────────────────────────────────────
+
+    def refresh_dashboard(self):
+        if SessionManager.is_token_expired():
+            LoggerService.log("DashboardWindow: token expired — auto logout")
+            self.logout()
             return
-        event.ignore()
-        self.hide()
-
-    def check_pending_sync(self):
-        pending = SyncManager.get_pending_screenshots()
-        print(f"PENDING SCREENSHOTS: {len(pending)}")
+        self.load_dashboard_stats()
+        self.load_recent_logs()
 
     def load_dashboard_stats(self):
-        
+        threading.Thread(
+            target=self._fetch_stats,
+            daemon=True,
+        ).start()
+
+    def _fetch_stats(self):
         try:
             response = requests.get(
                 f"{API_BASE_URL}/dashboard/stats",
-                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=2,
+                headers={
+                    "Authorization": f"Bearer {SessionManager.auth_token}"
+                },
+                timeout=5,
             )
-            result = response.json()
-            data   = result.get("data", {})
+            data = response.json().get("data", {})
+            self._stats_data = data
+        except Exception:
+            self._stats_data = None
+        QMetaObject.invokeMethod(
+            self, "_apply_stats",
+            Qt.ConnectionType.QueuedConnection,
+        )
 
-            total_activity_logs = data.get("activity_logs")
+    @Slot()
+    def _apply_stats(self):
+        data = getattr(self, "_stats_data", None)
+        if data:
+            count = data.get("activity_logs")
             self.log_count_card.update_value(
-                str(total_activity_logs if total_activity_logs is not None else "—")
+                str(count) if count is not None else "—"
             )
-            # FIX #6: shift_card is session duration, populated by timer — don't overwrite here
-        except Exception as error:
-            print("[SUMMARY ERROR]", error)
+        else:
             self._load_stats_from_local_db()
 
     def _load_stats_from_local_db(self):
+        """✅ app_logs use karo — activity_logs nahi."""
         try:
-            conn = Database.connect()
-            cur  = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM activity_logs")
-            log_count = cur.fetchone()[0]
-            conn.close()
-            self.log_count_card.update_value(str(log_count))
+            with Database.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) as cnt FROM app_logs")
+                row = cursor.fetchone()
+                self.log_count_card.update_value(str(row["cnt"]))
         except Exception as e:
-            print("[LOCAL STATS ERROR]", e)
+            LoggerService.log_error(f"DashboardWindow local stats: {e}")
 
     def load_recent_logs(self):
-        print("=== LOGS START ===")
-        loaded = self._load_logs_from_api()
-        if not loaded:
-            self._load_logs_from_local_db()
+        threading.Thread(
+            target=self._fetch_logs,
+            daemon=True,
+        ).start()
 
-    def _load_logs_from_api(self):
-        print("=== API LOGS CALL ===")
-        
+    def _fetch_logs(self):
+        logs = None
         try:
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
-                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=2,
+                headers={
+                    "Authorization": f"Bearer {SessionManager.auth_token}"
+                },
+                timeout=5,
             )
             result = response.json()
-            logs   = result["data"][:15]
-            self.activity_list.clear()
+            logs   = result.get("data", [])[:15]
+        except Exception:
+            pass
+
+        self._logs_data = logs
+        QMetaObject.invokeMethod(
+            self, "_apply_logs",
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    @Slot()
+    def _apply_logs(self):
+        logs = getattr(self, "_logs_data", None)
+        if logs is not None:
             self._populate_activity_list(logs)
-            return True
-        except Exception as error:
-            print("[API LOGS ERROR]", error)
-            return False
+        else:
+            self._load_logs_from_local_db()
 
     def _load_logs_from_local_db(self):
+        """✅ app_logs + correct column names."""
         try:
-            conn = Database.connect()
-            cur  = conn.cursor()
-            cur.execute("""
-                SELECT created_at, activity
-                FROM activity_logs
-                ORDER BY id DESC
-                LIMIT 15
-                """)
-            rows = cur.fetchall()
-            conn.close()
+            with Database.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT timestamp, message FROM app_logs
+                    ORDER BY id DESC LIMIT 15
+                    """
+                )
+                rows = cursor.fetchall()
 
-            self.activity_list.clear()
-            if not rows:
-                placeholder = QListWidgetItem("  No recent activity found.")
-                placeholder.setForeground(QColor("#475569"))
-                self.activity_list.addItem(placeholder)
-                self.feed_count_label.setText("0 events")
-                return
-
-            logs = [{"created_at": r[0], "activity": r[1]} for r in rows]
+            logs = [
+                {
+                    "created_at": row["timestamp"],
+                    "activity":   row["message"],
+                }
+                for row in rows
+            ]
             self._populate_activity_list(logs)
-        except Exception as e:
-            print("[LOCAL LOGS ERROR]", e)
-            self.activity_list.clear()
-            self.activity_list.addItem(QListWidgetItem("  Unable to load activity."))
 
-    def _populate_activity_list(self, logs):
-        self.activity_list.clear()
+        except Exception as e:
+            LoggerService.log_error(f"DashboardWindow local logs: {e}")
+            self.activity_list.clear()
+            self.activity_list.addItem(
+                QListWidgetItem("  Unable to load activity.")
+            )
+
+    def _populate_activity_list(self, logs: list):
+        IGNORE = {"CONFIGSYNCMANAGER", "SCHEDULERSERVICE", "SYNCMANAGER"}
 
         icon_map = {
             "SCREENSHOT CAPTURED": ("📸", "#60a5fa", "Screenshot Captured"),
@@ -446,139 +484,106 @@ class DashboardWindow(BaseWindow):
             "UPLOAD SUCCESS":      ("✅", "#34d399", "Upload Success"),
             "UPLOAD FAILED":       ("❌", "#f87171", "Upload Failed"),
         }
-        
-        IGNORE_LOGS = [
-            "CONFIGSYNCMANAGER",
-            "SCHEDULERSERVICE",
-            "CONFIGSYNC",
-            "SYNCMANAGER",
-        ]
+
+        self.activity_list.clear()
+        shown = 0
 
         for log in logs:
-            
             activity_raw = str(log.get("activity", "")).upper()
-
-            if any(x in activity_raw for x in IGNORE_LOGS):
+            if any(x in activity_raw for x in IGNORE):
                 continue
+
             ts = str(log.get("created_at", ""))
-            # FIX #7: Parse UTC timestamp → local time
             try:
                 dt        = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 time_part = dt.astimezone().strftime("%H:%M")
             except Exception:
-                time_part = ts[11:16] if len(ts) >= 16 else ts[:5]
+                time_part = ts[11:16] if len(ts) >= 16 else ts
 
-            activity_raw = str(log.get("activity", "")).upper()
             icon, color, label = "◾", "#94a3b8", log.get("activity", "Event")
-
             for key, (ic, col, lbl) in icon_map.items():
                 if key in activity_raw:
                     icon, color, label = ic, col, lbl
                     break
-
-            text = f"  {icon}  {time_part}  ·  {label}"
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(f"  {icon}  {time_part}  ·  {label}")
             item.setForeground(QColor(color))
             self.activity_list.addItem(item)
+            shown += 1
+        if shown == 0:
+            placeholder = QListWidgetItem("  No recent activity found.")
+            placeholder.setForeground(QColor("#475569"))
+            self.activity_list.addItem(placeholder)
+        self.feed_count_label.setText(
+            f"{shown} event{'s' if shown != 1 else ''}"
+        )
+                        # ── Window events ─────────────────────────────────────────────────────
 
-        count = self.activity_list.count()
-        self.feed_count_label.setText(f"{count} event{'s' if count != 1 else ''}")
-
-    def check_network_status(self):
-        try:
-            requests.get("https://www.google.com", timeout=3)
-
-            self.status_label.setText("🟢 ONLINE")
-            self.internet_card.update_value("CONNECTED")
-            self.status_label.setStyleSheet("""
-            color: #22c55e;
-                font-size: 12px;
-                font-weight: bold;
-            """)
-
-        except Exception:
-            self.status_label.setText("🔴 OFFLINE")
-            self.internet_card.update_value("DISCONNECTED")
-            self.status_label.setStyleSheet("""
-            color: #ef4444;
-                font-size: 12px;
-                font-weight: bold;
-            """)
-
-
-    def refresh_dashboard(self):
-        from client.application.managers.session_manager import SessionManager
-        if SessionManager.is_token_expired():
-            print("[TOKEN EXPIRED] Auto-logout triggered")
-            self.logout()
+    def closeEvent(self, event):
+        if getattr(self, "_force_closing", False):
+            event.accept()
             return
-        try:
-            self.load_dashboard_stats()
-            self.load_recent_logs()
-        except Exception as error:
-            print("[REFRESH ERROR]", error)
+        event.ignore()
+        self.hide()
+
+        # ── Logout ────────────────────────────────────────────────────────────
 
     def logout(self):
-        print("[LOGOUT] Starting...")
+        LoggerService.log("DashboardWindow: logout initiated")
+
+        # ✅ Server token revoke
+        try:
+            AuthService.logout(SessionManager.session_id)
+        except Exception as e:
+            LoggerService.log_error(f"AuthService logout error: {e}")
 
         try:
             SessionLogManager.end_session()
         except Exception as e:
-            print("END_SESSION ERROR:", e)
+            LoggerService.log_error(f"SessionLogManager end error: {e}")
 
         try:
             ShiftManager.end_shift()
         except Exception as e:
-            print("END_SHIFT ERROR:", e)
+            LoggerService.log_error(f"ShiftManager end error: {e}")
 
-        # FIX #9: Stop ALL timers before destroying objects
-        try:
-            self.activity_timer.stop()
-        except Exception:
-            pass
-        try:
-            self.shift_timer.stop()
-        except Exception:
-            pass
-        try:
-            self.dashboard_refresh_timer.stop()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, "scheduler"):
-                self.scheduler.stop()
-                self.scheduler.deleteLater()
-                self.scheduler = None
-        except Exception as e:
-            print("SCHEDULER ERROR:", e)
-
-        try:
-            if hasattr(self, "idle_tracker"):
-                self.idle_tracker.stop()
-                self.idle_tracker.deleteLater()
-                self.idle_tracker = None
-        except Exception as e:
-            print("IDLE ERROR:", e)
-
-        try:
-            if hasattr(self, "tray"):
-                self.tray.hide()
-                self.tray.deleteLater()
-                self.tray = None
-        except Exception as e:
-            print("TRAY ERROR:", e)
-
+        # Stop all timers
+        for timer_name in [
+            "network_timer", "shift_timer", "dashboard_refresh_timer"
+        ]:
+            try:
+                getattr(self, timer_name).stop()
+            except Exception:
+                pass
+            # Stop services
+        for attr in ["scheduler", "idle_tracker", "tray"]:
+            try:
+                obj = getattr(self, attr, None)
+                if obj:
+                    obj.stop() if hasattr(obj, "stop") else None
+                    obj.hide() if hasattr(obj, "hide") else None
+                    obj.deleteLater()
+                    setattr(self, attr, None)
+            except Exception:
+                pass
         SessionManager.clear_session()
-
-        from client.presentation.windows.login_window import LoginWindow
-
         self._force_closing = True
         self.close()
         self.deleteLater()
 
+        from client.presentation.windows.login_window import LoginWindow
         self.login_window = LoginWindow()
         self.login_window.show()
+
+        # ── Navigation ────────────────────────────────────────────────────────
+
+    def open_logs_window(self):
+        self.logs_window = LogsWindow()
+        self.logs_window.show()
+        self.logs_window.raise_()
+
+    def open_settings_window(self):
+        self.settings_window = SettingsWindow()
+        self.settings_window.show()
 
     def open_attendance_window(self):
         self.attendance_window = AttendanceWindow()

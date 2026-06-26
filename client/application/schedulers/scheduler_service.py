@@ -130,7 +130,7 @@ class SchedulerService(QObject):
         if not SessionManager.is_authenticated:
             return
 
-        interval = int(
+        interval_seconds = int(
             SettingsService.get_setting("upload_interval_minutes", "5")
         ) * 60
 
@@ -140,7 +140,7 @@ class SchedulerService(QObject):
             auth_token      = SessionManager.auth_token,
             on_new_config   = self._apply_new_config,
             on_force_logout = self._handle_force_logout,
-            sync_interval   = 5,
+            sync_interval   = interval_seconds,
         )
         self._config_sync.start()
         LoggerService.log_verbose("SchedulerService: ConfigSync started")

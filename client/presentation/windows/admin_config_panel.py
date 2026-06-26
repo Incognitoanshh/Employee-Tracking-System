@@ -787,7 +787,7 @@ class _ScreenshotsTab(QWidget):
         root.addLayout(pag_row)
         self._load()
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(5000)
+        self._refresh_timer.setInterval(30000)
         self._refresh_timer.timeout.connect(
             lambda: self._load(self._page)
         )
@@ -830,14 +830,15 @@ class _ScreenshotsTab(QWidget):
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
 
-                    ts = dt.astimezone().strftime(
-                        "%d %b %Y %I:%M:%S %p"
-                    )
+                ts = dt.astimezone().strftime(
+                    "%d %b %Y %I:%M:%S %p"
+                )
 
             except Exception:
                 pass
             
             self._table.setItem(i, 3, QTableWidgetItem(ts))
+            
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 20 < total)
@@ -953,11 +954,17 @@ class _DashboardTab(QWidget):
         w.start()
 
     def _on_charts(self, data: dict):
-        print("[CHARTS DATA RECEIVED]", data)
-        d = data.get("data", {})
-        self._chart_screenshots.set_data(d.get("screenshots_per_day", []))
-        self._chart_attendance.set_data(d.get("attendance_per_day", []))
-        self._chart_activity.set_data(d.get("activity_per_day", []))
+        try:
+            print("[CHARTS DATA RECEIVED]", data)
+            if not isinstance(data, dict): return
+            d = data.get("data", {})
+            if not isinstance(d, dict): d = {}
+
+            self._chart_screenshots.set_data(d.get("screenshots_per_day", []))
+            self._chart_attendance.set_data(d.get("attendance_per_day", []))
+            self._chart_activity.set_data(d.get("activity_per_day", []))
+        except Exception as e:
+            print("[CHARTS RENDER ERROR]", e)
 
     def _load_all(self):
         self._load_summary()
@@ -983,27 +990,46 @@ class _DashboardTab(QWidget):
         w.start()
 
     def _on_summary(self, data: dict):
-        # Debug: print exact payload so we can bind to the real keys.
-        print("[ADMIN SUMMARY RESPONSE]", data)
+        try:
+            print("[ADMIN SUMMARY RESPONSE]", data)
+            if not isinstance(data, dict): return
 
-        s = data.get("data", data)
+            s = data.get("data", data)
+            if not isinstance(s, dict): return
 
-        self._card_total_employees.set_value(s.get('total_employees', '—'))
-        self._card_online.set_value(s.get('online_employees', '—'))
-        self._card_offline.set_value(s.get('offline_employees', '—'))
-        self._card_total_screens.set_value(s.get('total_screenshots', '—'))
-        self._card_total_logs.set_value(s.get('total_activity_logs', '—'))
+            # casting variables strictly into strings to avoid PySide Core Type Errors
+            self._card_total_employees.set_value(str(s.get('total_employees', '—')))
+            self._card_online.set_value(str(s.get('online_employees', '—')))
+            self._card_offline.set_value(str(s.get('offline_employees', '—')))
+            self._card_total_screens.set_value(str(s.get('total_screenshots', '—')))
+            self._card_total_logs.set_value(str(s.get('total_activity_logs', '—')))
+        except Exception as e:
+            print("[SUMMARY RENDER ERROR]", e)
 
     def _on_feed(self, data: dict):
-        rows = data.get("data", data).get("recent_activity", []) if isinstance(data, dict) else []
-        if rows is None:
-            rows = []
-        self._feed.clear()
-        for r in rows:
-            # Expect shape: { 'message': str, 'created_at': optional }
-            msg = r.get("message") if isinstance(r, dict) else str(r)
-            self._feed.addItem(msg)
+        try:
+            if not isinstance(data, dict): return
+            self._feed.clear()
 
+            # Safe parsing regardless if it is wrapped in data key or nested structure
+            inner_data = data.get("data", data)
+            rows = []
+
+            if isinstance(inner_data, dict):
+                rows = inner_data.get("recent_activity", [])
+            elif isinstance(inner_data, list):
+                rows = inner_data
+
+            if not rows: return
+            for r in rows:
+                if isinstance(r, dict):
+                    msg = r.get("message", "") or r.get("activity", "Unknown Activity")
+                else:
+                    msg = str(r)
+                if msg:
+                    self._feed.addItem(msg)
+        except Exception as e:
+            print("[FEED RENDER ERROR]", e)
 
 class _LogsTab(QWidget):
 
@@ -1012,6 +1038,7 @@ class _LogsTab(QWidget):
         self._workers: list = []
         self._page = 1
         self._logs: list[dict] = []
+        self._user_searched = False   # ← ADD THIS
         self._build_ui()
 
     def _build_ui(self):
@@ -1088,48 +1115,67 @@ class _LogsTab(QWidget):
     def _load(self, page=1):
         self._page = page
         params = {"page": page}
-        emp = self._emp_filter.text().strip()
-        dt  = self._date_filter.date().toString("yyyy-MM-dd")
-        if emp: params["employee_id"] = emp
-        if dt:  params["date"]        = dt
 
-        w = _FetchWorker(f"{API_BASE_URL}/admin/logs", params)
+        emp = self._emp_filter.text().strip()
+        if emp:
+            params["employee_id"] = emp
+
+        # ✅ Fix 1: Sirf tab date bhejo jab user ne Search click kiya ho
+        if self._user_searched:
+            dt = self._date_filter.date().toString("yyyy-MM-dd")
+            params["date"] = dt
+
+        # ✅ Fix 2: audit_logs endpoint use karo
+        w = _FetchWorker(f"{API_BASE_URL}/admin/audit-logs", params)
         w.finished.connect(self._populate)
-        w.error.connect(lambda e: print("Logs error:", e))
+        w.error.connect(lambda e: print("Audit logs error:", e))
         self._workers.append(w)
         w.start()
 
+    def _on_search_clicked(self):
+        self._user_searched = True   # ← Tab date filter lagega
+        self._load(page=1)
+
     def _populate(self, data: dict):
-        print("LOGS RESPONSE =", data)
-        rows  = data.get("data", [])
-        self._logs = rows
-        total = data.get("total", 0)
-        self._table.setRowCount(len(rows))
-        for i, row in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
-            self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
-            self._table.setItem(i, 2, QTableWidgetItem(row.get("activity", "")))
-            ts = row.get("created_at", "")
+        try:
+            print("LOGS RESPONSE =", data)
+            if not isinstance(data, dict): return
 
-            try:
-                dt = datetime.fromisoformat(
-                    ts.replace("Z", "+00:00")
-                )
+            rows = data.get("data", [])
+            self._logs = rows
+            total = data.get("total", 0)
+            self._table.setRowCount(len(rows))
 
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+            for i, row in enumerate(rows):
+                self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
+                self._table.setItem(i, 1, QTableWidgetItem(str(row.get("employee_id", ""))))
+                self._table.setItem(i, 2, QTableWidgetItem(str(row.get("activity", ""))))
+                ts = row.get("created_at", "")
 
-                    ts = dt.astimezone().strftime(
-                        "%d %b %Y %I:%M:%S %p"
-                    )
+                try:
+                    # Replacing trailing Z or handling clean ISO text safely
+                    clean_ts = ts.replace("Z", "+00:00") if ts else ""
+                    if "." in clean_ts and "+" in clean_ts:
+                        # cleanup potential micros mismatch
+                        base, tz = clean_ts.split("+")
+                        if len(base.split(".")[-1]) > 6:
+                            base = base[:base.find(".")+7]
+                            clean_ts = f"{base}+{tz}"
 
-            except Exception:
-                pass
+                    dt = datetime.fromisoformat(clean_ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    ts = dt.astimezone().strftime("%d %b %Y %I:%M:%S %p")
+                except Exception:
+                    pass
 
-            self._table.setItem(i, 3, QTableWidgetItem(ts))
-        self._page_label.setText(f"Page {self._page}  •  Total: {total}")
-        self._prev_btn.setEnabled(self._page > 1)
-        self._next_btn.setEnabled(self._page * 50 < total)
+                self._table.setItem(i, 3, QTableWidgetItem(str(ts)))
+
+            self._page_label.setText(f"Page {self._page}  •  Total: {total}")
+            self._prev_btn.setEnabled(self._page > 1)
+            self._next_btn.setEnabled(self._page * 50 < total)
+        except Exception as e:
+            print("[LOGS POPULATE ERROR]", e)
 
     def _export_logs_csv(self):
         if not self._logs:
@@ -1267,28 +1313,19 @@ class _AttendanceTab(QWidget):
             total_hours = self._format_total_hours(row.get("total_hours"))
             self._table.setItem(i, 4, QTableWidgetItem(total_hours))
 
-    def _format_total_hours(self, value):
-        """Backend may send None, an HH:MM:SS string, or a dict-like
-        string such as "{'hours': 0, 'minutes': 6, 'seconds': 0}".
-        Normalize all of these into a clean HH:MM:SS display string."""
+    def _format_total_hours(self, value) -> str:
         if value is None or value == "" or value == "None":
             return "—"
-
-        value = str(value)
-
         try:
-            if value.startswith("{"):
-                d = ast.literal_eval(value)
-                h = int(d.get("hours", 0))
-                m = int(d.get("minutes", 0))
-                s = int(d.get("seconds", 0))
-            else:
-                parts = value.split(".")[0].split(":")
-                h, m, s = (int(p) for p in parts)
+            total = int(value)
+            h = total // 3600
+            m = (total % 3600) // 60
+            s = total % 60
+            return f"{h:02}:{m:02}:{s:02}"
         except Exception:
             return "—"
 
-        return f"{h:02}:{m:02}:{s:02}"
+        # return f"{h:02}:{m:02}:{s:02}"
 
     def _export_attendance_csv(self):
         if not self._attendance:
@@ -1828,24 +1865,17 @@ class _EmployeesTab(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        w = _DeleteWorker(
-            f"{API_BASE_URL}/admin/employees/{emp_id}"
-        )
-
-        w.finished.connect(
-            lambda d: (
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    "Employee deleted"
-                ),
-                self._load_employees()
-            )
-        )
-
+        w = _DeleteWorker(f"{API_BASE_URL}/admin/employees/{emp_id}")
+        w.finished.connect(lambda d: (
+            QMessageBox.information(self, "Success", "Employee deleted"),
+            self._load_employees(),
+        ))
+        # ✅ Error handler add kiya
+        w.error.connect(lambda e: QMessageBox.warning(
+            self, "Delete Failed", f"Could not delete employee:\n{e}"
+        ))
         self._workers.append(w)
         w.start()
-
         
     def _add_employee(self):
 
@@ -2131,58 +2161,67 @@ class AdminConfigPanel(QMainWindow):
         self.header.set_page(page["icon"], page["title"], page["subtitle"])
 
     def capture_screenshot(self):
-        result = ScreenshotManager.capture_screenshot()
-        print(result)
+        import threading
+        threading.Thread(
+            target=self._do_capture,
+            daemon=True,
+        ).start()
 
+    def _do_capture(self):
+        try:
+            ScreenshotManager.capture_screenshot()
+        except Exception as e:
+            from client.services.logger_service import LoggerService
+            LoggerService.log_error(f"AdminPanel capture error: {e}")
     def logout(self):
         from client.application.managers.session_manager import SessionManager
         from client.application.managers.shift_manager import ShiftManager
         from client.application.managers.session_log_manager import SessionLogManager
+        from client.application.services.auth_service import AuthService
         from client.presentation.windows.login_window import LoginWindow
 
-        # Guard flag - prevent duplicate execution
         if self._logging_out:
             return
-
         self._logging_out = True
 
-        # Stop tracking services (cleanup timers)
+        # ✅ Tab timers — stack se direct access
+        for i in range(self.stack.count()):
+            tab = self.stack.widget(i)
+            if hasattr(tab, '_refresh_timer'):
+                tab._refresh_timer.stop()
+                # EmployeeDetailsDialog ke andar timers
+            if hasattr(tab, '_workers'):
+                for w in tab._workers:
+                    try:
+                        w.quit()
+                        w.wait(300)
+                    except Exception:
+                        pass
+                        
         if hasattr(self, 'scheduler'):
             self.scheduler.stop()
         if hasattr(self, 'idle_tracker'):
             self.idle_tracker.stop()
-
-        # Stop all tab refresh timers explicitly (no Qt parent set)
-        for tab_attr in ['_config_tab', '_screenshots_tab', '_logs_tab', '_attendance_tab', '_employees_tab', '_dashboard_tab']:
-            tab = getattr(self, tab_attr, None)
-            if tab and hasattr(tab, '_refresh_timer'):
-                tab._refresh_timer.stop()
-        # Stop all background workers
-        for w in getattr(self, '_workers', []):
-            try:
-                w.quit()
-                w.wait(500)
-            except Exception:
-                pass
-
         try:
-            SessionLogManager.end_session()
+           AuthService.logout(SessionManager.session_id)
+        except Exception:
+           pass
+        try:
+           SessionLogManager.end_session()
         except Exception as e:
-            print("SESSION END ERROR:", e)
-
+           print("SESSION END ERROR:")
         try:
             ShiftManager.end_shift()
         except Exception as e:
-            print("SHIFT END ERROR:", e)
-
+            print("SHIFT END ERROR:")
         SessionManager.clear_session()
-
         self.login_window = LoginWindow()
         self.login_window.show()
-
-        # Close the window directly - ignore closeEvent since we handled cleanup
-        QMainWindow.close(self)
+        # ✅ hide instead of close — closeEvent loop avoid
+        self.hide()
+        self.deleteLater()
 
     def closeEvent(self, event):
-        self.logout()
-        event.accept()
+        if not self._logging_out:
+            self.logout()
+            event.accept()

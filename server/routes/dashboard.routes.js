@@ -1,29 +1,14 @@
-const express = require("express");
+const express             = require("express");
+const router              = express.Router();
+const dashboardController = require("../controllers/dashboard.controller");
+const { requireAdmin }    = require("../middleware/admin.middleware");
 
-const router = express.Router();
+// Employee dashboard
+router.get("/stats", dashboardController.getStats);
 
-const dashboardController = require(
-    "../controllers/dashboard.controller"
-);
+// Admin only routes
+router.get("/summary",         requireAdmin, dashboardController.getAdminSummary);
+router.get("/recent-activity", requireAdmin, dashboardController.getRecentActivity);
+router.get("/charts",          requireAdmin, dashboardController.getChartsData);
 
-router.get(
-    "/stats",
-    dashboardController.getStats
-);
-
-// Admin dashboard compatible endpoints (summary + recent activity)
-router.get(
-    "/summary",
-    dashboardController.getAdminSummary
-);
-
-router.get(
-    "/recent-activity",
-    dashboardController.getRecentActivity
-);
-
-router.get(
-    "/charts",
-    dashboardController.getChartsData
-);
 module.exports = router;

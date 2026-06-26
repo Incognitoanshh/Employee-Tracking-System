@@ -9,7 +9,6 @@ from client.services.settings_service import SettingsService
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
 
-# macOS support
 try:
     import Quartz
 except Exception:
@@ -30,118 +29,64 @@ class IdleTracker(QObject):
     def __init__(self):
         super().__init__()
 
-        self.is_idle = False
+        self.is_idle        = False
+        self._idle_start_dt: datetime | None = None  # ✅ Duration track ke liye
 
-        # Load once on init (can be reloaded explicitly / on timer)
         self.idle_threshold = int(
-            SettingsService.get_setting(
-                "idle_threshold_seconds",
-                "60",
-            )
+            SettingsService.get_setting("idle_threshold_seconds", "60")
         )
 
-        print(
-            f"[IDLE TRACKER] Threshold = "
-            f"{self.idle_threshold} seconds"
-        )
-
+        # Threshold reload: har 10 checks = har 20 seconds (timer=2s × 10)
         self._reload_every_n_checks = 10
-        self._check_counter = 0
+        self._check_counter         = 0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_idle)
 
-
     def start(self):
-
-        print(
-            f"[IDLE TRACKER] Started "
-            f"({platform.system()})"
-        )
-
+        LoggerService.log(f"IdleTracker: started on {platform.system()}")
         self.timer.start(2000)
 
     def stop(self):
         self.timer.stop()
 
     def reload_threshold(self):
-
         self.idle_threshold = int(
-            SettingsService.get_setting(
-                "idle_threshold_seconds",
-                "60"
-            )
+            SettingsService.get_setting("idle_threshold_seconds", "60")
         )
 
-        print(
-            f"[IDLE TRACKER] "
-            f"Threshold Reloaded = "
-            f"{self.idle_threshold}"
-        )
-
-    def _get_idle_seconds(self):
-
+    def _get_idle_seconds(self) -> float:
         system = platform.system()
 
-        # WINDOWS
         if system == "Windows":
-
             try:
-
-                lii = _LASTINPUTINFO()
+                lii        = _LASTINPUTINFO()
                 lii.cbSize = ctypes.sizeof(_LASTINPUTINFO)
-
-                ctypes.windll.user32.GetLastInputInfo(
-                    ctypes.byref(lii)
-                )
-
-                millis = (
-                    ctypes.windll.kernel32.GetTickCount()
-                    - lii.dwTime
-                )
-
+                ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
+                millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
                 return millis / 1000.0
-
-            except Exception as error:
-
-                print(
-                    f"[WINDOWS IDLE ERROR] "
-                    f"{error}"
-                )
-
+            except Exception as e:
+                LoggerService.log(f"IdleTracker Windows error: {e}")
                 return 0.0
 
-            # MAC
         elif system == "Darwin":
-
             try:
-
                 if Quartz is None:
                     return 0.0
-
                 idle = Quartz.CGEventSourceSecondsSinceLastEventType(
                     Quartz.kCGEventSourceStateCombinedSessionState,
-                    Quartz.kCGAnyInputEventType
+                    Quartz.kCGAnyInputEventType,
                 )
-
                 return float(idle)
-
-            except Exception as error:
-
-                print(
-                    f"[MAC IDLE ERROR] "
-                    f"{error}"
-                )
-
+            except Exception as e:
+                LoggerService.log(f"IdleTracker macOS error: {e}")
                 return 0.0
 
-            return 0.0
+            # Linux / other: not supported in v1
+        return 0.0
 
 
     def check_idle(self):
-
-        # Reload threshold only periodically to keep settings responsive
-        # without causing frequent DB reads.
         self._check_counter += 1
         if self._check_counter >= self._reload_every_n_checks:
             self.reload_threshold()
@@ -149,83 +94,80 @@ class IdleTracker(QObject):
 
         idle_seconds = self._get_idle_seconds()
 
-        print(
-            f"[IDLE CHECK] "
-            f"idle={idle_seconds:.1f}s "
-            f"threshold={self.idle_threshold}s"
-        )
-
         if idle_seconds >= self.idle_threshold:
-            # Became idle
+            # User abhi idle hai
             if not self.is_idle:
-                self.is_idle = True
+                self.is_idle        = True
+                self._idle_start_dt = datetime.now()
                 self.status_changed.emit("IDLE")
-                self.save_log("IDLE")
-                LoggerService.log(
-                    f"USER IDLE ({idle_seconds:.1f}s)"
-                )
-                print("[IDLE STATUS] IDLE")
+                LoggerService.log(f"IdleTracker: user IDLE ({idle_seconds:.1f}s)")
         else:
-            # Became working
+            # User active ho gaya
             if self.is_idle:
-                self.is_idle = False
+                self.is_idle     = False
+                idle_end_dt      = datetime.now()
+                duration_seconds = int(
+                    (idle_end_dt - self._idle_start_dt).total_seconds()
+                ) if self._idle_start_dt else 0
+                self._save_idle_period(
+                    idle_start = self._idle_start_dt or idle_end_dt,
+                    idle_end   = idle_end_dt,
+                    duration   = duration_seconds,
+                )
+                self._idle_start_dt = None
                 self.status_changed.emit("WORKING")
-                self.save_log("WORKING")
-                LoggerService.log("USER ACTIVE")
-                print("[IDLE STATUS] WORKING")
+                LoggerService.log(
+                    f"IdleTracker: user ACTIVE — idle was {duration_seconds}s"
+                )
 
-
-
-    def save_log(self, status):
-
+    def _save_idle_period(
+        self,
+        idle_start: datetime,
+        idle_end:   datetime,
+        duration:   int,
+    ):
+        """Complete idle period DB mein save karo — start+end+duration."""
         try:
-
-            connection = Database.connect()
-
-            cursor = connection.cursor()
-
-            cursor.execute(
-                """
-                INSERT INTO idle_logs
-                (
-                    employee_id,
-                    status,
-                    timestamp
+            with Database.get_connection() as conn:
+                conn.cursor().execute(
+                    """
+                    INSERT INTO idle_logs
+                    (employee_id, session_id,
+                    idle_start, idle_end,
+                    duration_seconds, upload_status)
+                    VALUES (?, ?, ?, ?, ?, 'PENDING')
+                    """,
+                    (
+                        SessionManager.employee_id,
+                        SessionManager.session_id,
+                        idle_start.strftime("%Y-%m-%d %H:%M:%S"),
+                        idle_end.strftime("%Y-%m-%d %H:%M:%S"),
+                        duration,
+                    ),
                 )
-                VALUES (?, ?, ?)
-                """,
-                (
-                    SessionManager.employee_id,
-                    status,
-                    datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                )
+            LoggerService.log(
+                f"IdleTracker: idle period saved "
+                f"{idle_start.strftime('%H:%M:%S')}–"
+                f"{idle_end.strftime('%H:%M:%S')} "
+                f"({duration}s)"
             )
-
-            connection.commit()
-            connection.close()
-
-            print(
-                f"[IDLE STATUS SAVED] {status}"
-            )
-
-        except Exception as error:
-
-            print(
-                f"[IDLE LOG ERROR] "
-                f"{error}"
-            )
+        except Exception as e:
+            LoggerService.log(f"IdleTracker DB error: {e}")
 
     def reset_activity(self):
-
+        """Manual override — jab force active karna ho."""
         if self.is_idle:
-            self.is_idle = False
+            self.is_idle     = False
+            idle_end_dt      = datetime.now()
+            duration_seconds = int(
+                (idle_end_dt - self._idle_start_dt).total_seconds()
+            ) if self._idle_start_dt else 0
 
+            self._save_idle_period(
+                idle_start = self._idle_start_dt or idle_end_dt,
+                idle_end   = idle_end_dt,
+                duration   = duration_seconds,
+            )
+            self._idle_start_dt = None
             self.status_changed.emit("WORKING")
-
-            self.save_log("WORKING")
-
-            LoggerService.log("USER ACTIVE")
-
-            print("[IDLE STATUS] WORKING")
+            LoggerService.log("IdleTracker: manually reset to ACTIVE")
