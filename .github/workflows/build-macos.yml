@@ -2,24 +2,20 @@ name: Build macOS App
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - '.github/workflows/build-macos.yml'
-      - 'requirements.txt'
+    branches:
+      - main
   workflow_dispatch:
-
-concurrency:
-  group: macos-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -32,14 +28,14 @@ jobs:
       - name: Create .env
         run: |
           mkdir -p client
-          echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
+          echo "APP_NAME=${{ secrets.APP_NAME }}" > client/.env
           echo "SCREENSHOT_MIN_INTERVAL=${{ secrets.SCREENSHOT_MIN_INTERVAL }}" >> client/.env
           echo "SCREENSHOT_MAX_INTERVAL=${{ secrets.SCREENSHOT_MAX_INTERVAL }}" >> client/.env
           echo "IDLE_THRESHOLD=${{ secrets.IDLE_THRESHOLD }}" >> client/.env
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> client/.env
           echo "SCREENSHOT_AES_KEY=${{ secrets.SCREENSHOT_AES_KEY }}" >> client/.env
 
-      - name: Build macOS App
+      - name: Build App
         shell: bash
         run: |
           if [ -f "client/main.spec" ]; then
@@ -53,13 +49,13 @@ jobs:
       - name: Package App
         shell: bash
         run: |
-          if [ -d "dist/ETS-Client.app" ]; then
+          if [ -d "dist/main.app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/main.app ETS-Client-Mac.zip
+          elif [ -d "dist/ETS-Client.app" ]; then
             ditto -c -k --sequesterRsrc --keepParent dist/ETS-Client.app ETS-Client-Mac.zip
-          elif [ -d "dist" ]; then
-            cd dist
-            zip -r ../ETS-Client-Mac.zip .
           else
-            echo "Build output not found"
+            echo "No .app found"
+            ls -R dist || true
             exit 1
           fi
 
@@ -67,4 +63,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Mac
-          path: ETS-Client-Mac.zip# trigger
+          path: ETS-Client-Mac.zip
