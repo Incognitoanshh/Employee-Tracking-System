@@ -27,7 +27,7 @@ jobs:
       - name: Build Windows EXE
         run: |
           # Yahan 'main.py' ko badal dena agar tumhari frontend entry file ka naam alag hai
-          pyinstaller --onefile --windowed --name="ETS-Employee-Monitor" client/main.py
+          pyinstaller --onefile --windowed --add-data "client/config.json;." --name="ETS-Employee-Monitor" client/main.py
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -56,7 +56,7 @@ jobs:
           
         - name: Build Mac Executable
           run: |
-            pyinstaller --onefile --windowed --name="ETS-Employee-Monitor" client/main.py
+            pyinstaller --onefile --windowed --add-data "client/config.json:." --name="ETS-Employee-Monitor" client/main.py
           
         - name: Create DMG Installer
           run: |
