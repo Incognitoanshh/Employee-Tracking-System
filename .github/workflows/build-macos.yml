@@ -4,6 +4,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -26,10 +30,18 @@ jobs:
           if [ -f "client/main.spec" ]; then pyinstaller client/main.spec;
           elif [ -f "main.spec" ]; then pyinstaller main.spec;
           else pyinstaller --windowed --onefile client/main.py; fi
+
+      # === FIX: Sahi path par zip banana taaki GitHub ko file mil sake ===
       - name: Zip App Bundle
         run: |
-          cd dist || cd client/dist || exit 1
-          zip -r ../../ETS-Client-Mac.zip *.app || zip -r ../../ETS-Client-Mac.zip main
+          if [ -d "dist" ]; then
+            cd dist && zip -r ../ETS-Client-Mac.zip ./*
+          elif [ -d "client/dist" ]; then
+            cd client/dist && zip -r ../../ETS-Client-Mac.zip ./*
+          else
+            echo "Dist directory not found!" && exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Mac
