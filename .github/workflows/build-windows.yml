@@ -5,7 +5,6 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# Yeh purane saare phanse hue/queued runs ko automatically kill kar dega
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -37,10 +36,19 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller main.spec
+          if [ -f "client/main.spec" ]; then
+            pyinstaller client/main.spec
+          elif [ -f "main.spec" ]; then
+            pyinstaller main.spec
+          else
+            pyinstaller --onefile client/main.py
+          fi
+        shell: bash
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Windows
-          path: dist/main.exe
+          path: |
+            dist/*.exe
+            client/dist/*.exe
