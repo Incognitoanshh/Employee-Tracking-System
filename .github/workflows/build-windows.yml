@@ -1,0 +1,41 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-windows.txt
+
+      - name: Create .env file
+        shell: bash
+        run: |
+          echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
+          echo "SCREENSHOT_MIN_INTERVAL=${{ secrets.SCREENSHOT_MIN_INTERVAL }}" >> client/.env
+          echo "SCREENSHOT_MAX_INTERVAL=${{ secrets.SCREENSHOT_MAX_INTERVAL }}" >> client/.env
+          echo "IDLE_THRESHOLD=${{ secrets.IDLE_THRESHOLD }}" >> client/.env
+          echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> client/.env
+          echo "SCREENSHOT_AES_KEY=${{ secrets.SCREENSHOT_AES_KEY }}" >> client/.env
+
+      - name: Build EXE
+        run: |
+          pyinstaller main.spec
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETS-Client-Windows
+          path: dist/main.exe
