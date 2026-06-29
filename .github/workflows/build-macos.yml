@@ -1,30 +1,21 @@
 name: Build macOS App
-
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: macos-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-macos.txt || pip install -r requirements.txt
-
-      - name: Create .env file
+      - run: pip install -r requirements-macos.txt || pip install -r requirements.txt
+      - name: Create .env
         run: |
           echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
           echo "SCREENSHOT_MIN_INTERVAL=${{ secrets.SCREENSHOT_MIN_INTERVAL }}" >> client/.env
@@ -32,24 +23,16 @@ jobs:
           echo "IDLE_THRESHOLD=${{ secrets.IDLE_THRESHOLD }}" >> client/.env
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> client/.env
           echo "SCREENSHOT_AES_KEY=${{ secrets.SCREENSHOT_AES_KEY }}" >> client/.env
-
-      - name: Build macOS App Bundle
+      - name: Build App
         run: |
-          if [ -f "client/main.spec" ]; then
-            pyinstaller client/main.spec
-          elif [ -f "main.spec" ]; then
-            pyinstaller main.spec
-          else
-            pyinstaller --windowed --onefile client/main.py
-          fi
-
-      - name: Zip App Bundle for Easy Download
+          if [ -f "client/main.spec" ]; then pyinstaller client/main.spec;
+          elif [ -f "main.spec" ]; then pyinstaller main.spec;
+          else pyinstaller --windowed --onefile client/main.py; fi
+      - name: Zip App Bundle
         run: |
           cd dist || cd client/dist || exit 1
           zip -r ../../ETS-Client-Mac.zip *.app || zip -r ../../ETS-Client-Mac.zip main
-
-      - name: Upload macOS Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Mac
           path: ETS-Client-Mac.zip
