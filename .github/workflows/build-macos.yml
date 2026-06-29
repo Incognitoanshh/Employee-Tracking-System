@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r requirements-macos.txt || pip install -r requirements.txt
+      - run: pip install -r requirements.txt
       - name: Create .env
         run: |
           echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
@@ -31,7 +31,6 @@ jobs:
           elif [ -f "main.spec" ]; then pyinstaller main.spec;
           else pyinstaller --windowed --onefile client/main.py; fi
 
-      # === FIX: Sahi path par zip banana taaki GitHub ko file mil sake ===
       - name: Zip App Bundle
         run: |
           if [ -d "dist" ]; then
