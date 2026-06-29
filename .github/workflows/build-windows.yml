@@ -1,9 +1,14 @@
-name: Build Windows EXE
+name: Build Windows EXE Fast
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
+# Yeh purane saare phanse hue/queued runs ko automatically kill kar dega
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
