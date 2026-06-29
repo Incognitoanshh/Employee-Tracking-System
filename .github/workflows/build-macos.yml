@@ -1,4 +1,5 @@
 name: Build macOS App
+
 on:
   push:
     branches: [ main ]
@@ -14,37 +15,56 @@ concurrency:
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install -r requirements.txt
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
       - name: Create .env
         run: |
+          mkdir -p client
           echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
           echo "SCREENSHOT_MIN_INTERVAL=${{ secrets.SCREENSHOT_MIN_INTERVAL }}" >> client/.env
           echo "SCREENSHOT_MAX_INTERVAL=${{ secrets.SCREENSHOT_MAX_INTERVAL }}" >> client/.env
           echo "IDLE_THRESHOLD=${{ secrets.IDLE_THRESHOLD }}" >> client/.env
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> client/.env
           echo "SCREENSHOT_AES_KEY=${{ secrets.SCREENSHOT_AES_KEY }}" >> client/.env
-      - name: Build App
-        run: |
-          if [ -f "client/main.spec" ]; then pyinstaller client/main.spec;
-          elif [ -f "main.spec" ]; then pyinstaller main.spec;
-          else pyinstaller --windowed --onefile client/main.py; fi
 
-      - name: Zip App Bundle
+      - name: Build macOS App
+        shell: bash
         run: |
-          if [ -d "dist" ]; then
-            cd dist && zip -r ../ETS-Client-Mac.zip ./*
-          elif [ -d "client/dist" ]; then
-            cd client/dist && zip -r ../../ETS-Client-Mac.zip ./*
+          if [ -f "client/main.spec" ]; then
+            pyinstaller client/main.spec
+          elif [ -f "main.spec" ]; then
+            pyinstaller main.spec
           else
-            echo "Dist directory not found!" && exit 1
+            pyinstaller --windowed --name ETS-Client client/main.py
           fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Package App
+        shell: bash
+        run: |
+          if [ -d "dist/ETS-Client.app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/ETS-Client.app ETS-Client-Mac.zip
+          elif [ -d "dist" ]; then
+            cd dist
+            zip -r ../ETS-Client-Mac.zip .
+          else
+            echo "Build output not found"
+            exit 1
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Mac
-          path: ETS-Client-Mac.zip
+          path: ETS-Client-Mac.zip# trigger
