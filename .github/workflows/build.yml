@@ -9,6 +9,9 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -21,21 +24,25 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PySide6 python-dotenv pyinstaller
-          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
+          pip install PySide6 python-dotenv pyinstaller
+          if exist requirements.txt (
+            echo Cleaning requirements.txt for Windows...
+            findstr /V /I "pyobjc" requirements.txt > req_win.txt
+            pip install -r req_win.txt
+          )
 
       - name: Create client .env file
         run: |
-          echo APP_NAME=ETS > client/.env
-          echo SCREENSHOT_MIN_INTERVAL=300 >> client/.env
-          echo SCREENSHOT_MAX_INTERVAL=600 >> client/.env
-          echo IDLE_THRESHOLD=60 >> client/.env
-          echo API_BASE_URL=http://65.21.212.85:8000/api >> client/.env
-          echo SCREENSHOT_ENCRYPTION_KEY=g12Cdb/UXwN+NqAwivsBiLEv21yzJeyJ5+PWk6i/i0M= >> client/.env
+          echo APP_NAME=ETS > client\.env
+          echo SCREENSHOT_MIN_INTERVAL=300 >> client\.env
+          echo SCREENSHOT_MAX_INTERVAL=600 >> client\.env
+          echo IDLE_THRESHOLD=60 >> client\.env
+          echo API_BASE_URL=http://65.21.212.85:8000/api >> client\.env
+          echo SCREENSHOT_ENCRYPTION_KEY=g12Cdb/UXwN+NqAwivsBiLEv21yzJeyJ5+PWk6i/i0M= >> client\.env
 
       - name: Build Windows EXE
         run: |
-          python -m PyInstaller --onefile --windowed --add-data "client/.env;." --name="ETS-Employee-Monitor" client/main.py
+          pyinstaller --onefile --windowed --add-data "client/.env;." --name="ETS-Employee-Monitor" client/main.py
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -58,8 +65,8 @@ jobs:
         run: |
           brew install create-dmg
           python -m pip install --upgrade pip
-          python -m pip install PySide6 python-dotenv pyinstaller
-          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          pip install PySide6 python-dotenv pyinstaller
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Create client .env file
         run: |
@@ -72,7 +79,7 @@ jobs:
 
       - name: Build Mac Executable
         run: |
-          python -m PyInstaller --onefile --windowed --add-data "client/.env:." --name="ETS-Employee-Monitor" client/main.py
+          pyinstaller --onefile --windowed --add-data "client/.env:." --name="ETS-Employee-Monitor" client/main.py
 
       - name: Create DMG Installer
         run: |
