@@ -21,8 +21,8 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install PySide6 python-dotenv pyinstaller
+          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
 
       - name: Create client .env file
         run: |
@@ -35,7 +35,7 @@ jobs:
 
       - name: Build Windows EXE
         run: |
-          pyinstaller --onefile --windowed --add-data "client/.env;." --name="ETS-Employee-Monitor" client/main.py
+          python -m PyInstaller --onefile --windowed --add-data "client/.env;." --name="ETS-Employee-Monitor" client/main.py
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -58,8 +58,8 @@ jobs:
         run: |
           brew install create-dmg
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install PySide6 python-dotenv pyinstaller
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
 
       - name: Create client .env file
         run: |
@@ -72,7 +72,7 @@ jobs:
 
       - name: Build Mac Executable
         run: |
-          pyinstaller --onefile --windowed --add-data "client/.env:." --name="ETS-Employee-Monitor" client/main.py
+          python -m PyInstaller --onefile --windowed --add-data "client/.env:." --name="ETS-Employee-Monitor" client/main.py
 
       - name: Create DMG Installer
         run: |
