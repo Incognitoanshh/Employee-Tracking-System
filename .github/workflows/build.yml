@@ -36,39 +36,42 @@ jobs:
           path: dist/ETS-Employee-Monitor.exe
 
   build-mac:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install Mac Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller create-dmg
-
-      - name: Build Mac Executable
-        run: |
-          pyinstaller --onefile --windowed --name="ETS-Employee-Monitor" client/main.py
-
-      - name: Create DMG Installer
-        run: |
-          mkdir dmg_out
-          create-dmg \
-            --volname "ETS Monitor Installer" \
-            --window-size 500 300 \
-            --icon-size 100 \
-            --app-drop-link 350 120 \
-            "dmg_out/ETS-Employee-Monitor.dmg" \
-            "dist/ETS-Employee-Monitor.app"
-
-      - name: Upload Mac DMG Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ETS-Mac-DMG
-          path: dmg_out/ETS-Employee-Monitor.dmg
+      runs-on: macos-latest
+      steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
+      
+        - name: Set up Python
+          uses: actions/setup-python@v5
+          with:
+            python-version: '3.10'
+          
+        - name: Install Mac System Tools & Dependencies
+          run: |
+            # create-dmg ko brew se install karna padega, pip se nahi
+            brew install create-dmg
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            pip install pyinstaller
+          
+        - name: Build Mac Executable
+          run: |
+            pyinstaller --onefile --windowed --name="ETS-Employee-Monitor" client/main.py
+          
+        - name: Create DMG Installer
+          run: |
+            mkdir dmg_out
+            # create-dmg ka sahi syntax github actions ke liye
+            create-dmg \
+              --volname "ETS Monitor Installer" \
+              --window-size 500 300 \
+              --icon-size 100 \
+              --app-drop-link 350 120 \
+              "dmg_out/ETS-Employee-Monitor.dmg" \
+              "dist/ETS-Employee-Monitor.app"
+          
+        - name: Upload Mac DMG Artifact
+          uses: actions/upload-artifact@v4
+          with:
+            name: ETS-Mac-DMG
+            path: dmg_out/ETS-Employee-Monitor.dmg
