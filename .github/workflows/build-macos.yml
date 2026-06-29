@@ -1,21 +1,19 @@
 name: Build macOS App
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -28,15 +26,11 @@ jobs:
       - name: Create .env
         run: |
           mkdir -p client
-          echo "APP_NAME=${{ secrets.APP_NAME }}" > client/.env
-          echo "SCREENSHOT_MIN_INTERVAL=${{ secrets.SCREENSHOT_MIN_INTERVAL }}" >> client/.env
-          echo "SCREENSHOT_MAX_INTERVAL=${{ secrets.SCREENSHOT_MAX_INTERVAL }}" >> client/.env
-          echo "IDLE_THRESHOLD=${{ secrets.IDLE_THRESHOLD }}" >> client/.env
+          echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> client/.env
           echo "SCREENSHOT_AES_KEY=${{ secrets.SCREENSHOT_AES_KEY }}" >> client/.env
 
-      - name: Build App
-        shell: bash
+      - name: Build
         run: |
           if [ -f "client/main.spec" ]; then
             pyinstaller client/main.spec
@@ -46,20 +40,17 @@ jobs:
             pyinstaller --windowed --name ETS-Client client/main.py
           fi
 
-      - name: Package App
-        shell: bash
+      - name: Zip all apps
         run: |
-          if [ -d "dist/main.app" ]; then
-            ditto -c -k --sequesterRsrc --keepParent dist/main.app ETS-Client-Mac.zip
-          elif [ -d "dist/ETS-Client.app" ]; then
-            ditto -c -k --sequesterRsrc --keepParent dist/ETS-Client.app ETS-Client-Mac.zip
-          else
+          APP=$(find . -name "*.app" | head -n 1)
+          if [ -z "$APP" ]; then
             echo "No .app found"
-            ls -R dist || true
             exit 1
           fi
 
-      - name: Upload Artifact
+          ditto -c -k --sequesterRsrc --keepParent "$APP" ETS-Client-Mac.zip
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Mac

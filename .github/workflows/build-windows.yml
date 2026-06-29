@@ -1,43 +1,50 @@
-name: Build Windows EXE Fast
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - '.github/workflows/build-windows.yml'
-      - 'requirements-windows.txt'
-  workflow_dispatch:
+name: Build Windows EXE
 
-concurrency:
-  group: windows-${{ github.ref }}
-  cancel-in-progress: true
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install -r requirements-windows.txt
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-windows.txt
+          pip install pyinstaller
+
       - name: Create .env
         shell: bash
         run: |
+          mkdir -p client
           echo "APP_NAME=${{ secrets.APP_NAME }}" >> client/.env
-          echo "SCREENSHOT_MIN_INTERVAL=${{ secrets.SCREENSHOT_MIN_INTERVAL }}" >> client/.env
-          echo "SCREENSHOT_MAX_INTERVAL=${{ secrets.SCREENSHOT_MAX_INTERVAL }}" >> client/.env
-          echo "IDLE_THRESHOLD=${{ secrets.IDLE_THRESHOLD }}" >> client/.env
           echo "API_BASE_URL=${{ secrets.API_BASE_URL }}" >> client/.env
           echo "SCREENSHOT_AES_KEY=${{ secrets.SCREENSHOT_AES_KEY }}" >> client/.env
-      - name: Build EXE
-        run: |
-          if [ -f "client/main.spec" ]; then pyinstaller client/main.spec;
-          elif [ -f "main.spec" ]; then pyinstaller main.spec;
-          else pyinstaller --onefile client/main.py; fi
+
+      - name: Build
         shell: bash
-      - uses: actions/upload-artifact@v4
+        run: |
+          if [ -f "client/main.spec" ]; then
+            pyinstaller client/main.spec
+          elif [ -f "main.spec" ]; then
+            pyinstaller main.spec
+          else
+            pyinstaller --onefile --windowed --name ETS-Client client/main.py
+          fi
+
+      - name: Upload all build outputs
+        uses: actions/upload-artifact@v4
         with:
           name: ETS-Client-Windows
           path: |
-            dist/*.exe
-            client/dist/*.exe
+            **/*.exe
