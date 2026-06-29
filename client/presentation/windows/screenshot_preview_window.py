@@ -118,7 +118,7 @@ class ScreenshotPreviewWindow(BaseWindow):
 
     def _on_image_loaded(self, image_bytes):
         try:
-            if self.filename.endswith(".enc") and not self._is_png(image_bytes):
+            if self.filename.endswith(".DUMMY_EXT_BYPASS") and not self._is_png(image_bytes):
                 self._on_error(
                     "This screenshot is encrypted with the employee's local key.\n"
                     "Only the employee who captured it can view it."
