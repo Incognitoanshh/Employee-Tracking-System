@@ -2,9 +2,9 @@ name: Build Cross-Platform Desktop Apps
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch: # Taaki tum manually bhi run kar sako
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build-windows:
@@ -16,18 +16,26 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-numeric-version: '3.10'
+          python-version: '3.10'
 
-      - name: Install Windows Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-windows.txt
+          pip install -r requirements.txt
           pip install pyinstaller
+
+      - name: Create client .env file
+        run: |
+          echo APP_NAME=ETS > client/.env
+          echo SCREENSHOT_MIN_INTERVAL=300 >> client/.env
+          echo SCREENSHOT_MAX_INTERVAL=600 >> client/.env
+          echo IDLE_THRESHOLD=60 >> client/.env
+          echo API_BASE_URL=http://65.21.212.85:8000/api >> client/.env
+          echo SCREENSHOT_ENCRYPTION_KEY=g12Cdb/UXwN+NqAwivsBiLEv21yzJeyJ5+PWk6i/i0M= >> client/.env
 
       - name: Build Windows EXE
         run: |
-          # Yahan 'main.py' ko badal dena agar tumhari frontend entry file ka naam alag hai
-          pyinstaller --onefile --windowed --add-data "client/config.json;." --name="ETS-Employee-Monitor" client/main.py
+          pyinstaller --onefile --windowed --add-data "client/.env;." --name="ETS-Employee-Monitor" client/main.py
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -36,42 +44,49 @@ jobs:
           path: dist/ETS-Employee-Monitor.exe
 
   build-mac:
-      runs-on: macos-latest
-      steps:
-        - name: Checkout Repository
-          uses: actions/checkout@v4
-      
-        - name: Set up Python
-          uses: actions/setup-python@v5
-          with:
-            python-version: '3.10'
-          
-        - name: Install Mac System Tools & Dependencies
-          run: |
-            # create-dmg ko brew se install karna padega, pip se nahi
-            brew install create-dmg
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-            pip install pyinstaller
-          
-        - name: Build Mac Executable
-          run: |
-            pyinstaller --onefile --windowed --add-data "client/config.json:." --name="ETS-Employee-Monitor" client/main.py
-          
-        - name: Create DMG Installer
-          run: |
-            mkdir dmg_out
-            # create-dmg ka sahi syntax github actions ke liye
-            create-dmg \
-              --volname "ETS Monitor Installer" \
-              --window-size 500 300 \
-              --icon-size 100 \
-              --app-drop-link 350 120 \
-              "dmg_out/ETS-Employee-Monitor.dmg" \
-              "dist/ETS-Employee-Monitor.app"
-          
-        - name: Upload Mac DMG Artifact
-          uses: actions/upload-artifact@v4
-          with:
-            name: ETS-Mac-DMG
-            path: dmg_out/ETS-Employee-Monitor.dmg
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Mac System Tools & Dependencies
+        run: |
+          brew install create-dmg
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Create client .env file
+        run: |
+          echo "APP_NAME=ETS" > client/.env
+          echo "SCREENSHOT_MIN_INTERVAL=300" >> client/.env
+          echo "SCREENSHOT_MAX_INTERVAL=600" >> client/.env
+          echo "IDLE_THRESHOLD=60" >> client/.env
+          echo "API_BASE_URL=http://65.21.212.85:8000/api" >> client/.env
+          echo "SCREENSHOT_ENCRYPTION_KEY=g12Cdb/UXwN+NqAwivsBiLEv21yzJeyJ5+PWk6i/i0M=" >> client/.env
+
+      - name: Build Mac Executable
+        run: |
+          pyinstaller --onefile --windowed --add-data "client/.env:." --name="ETS-Employee-Monitor" client/main.py
+
+      - name: Create DMG Installer
+        run: |
+          mkdir dmg_out
+          create-dmg \
+            --volname "ETS Monitor Installer" \
+            --window-size 500 300 \
+            --icon-size 100 \
+            --app-drop-link 350 120 \
+            "dmg_out/ETS-Employee-Monitor.dmg" \
+            "dist/ETS-Employee-Monitor.app"
+
+      - name: Upload Mac DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETS-Mac-DMG
+          path: dmg_out/ETS-Employee-Monitor.dmg
