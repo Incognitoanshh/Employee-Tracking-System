@@ -241,6 +241,29 @@ def _global_stylesheet() -> str:
     """
 
 
+def _track_worker(workers_list: list, w) -> None:
+    """
+    Worker (QThread) ko tracking list mein daalo, AUR jab wo complete ho
+    jaye (success ya error, dono cases) to khud list se hata do.
+
+    BUG FIX: Pehle sirf `_track_worker(self._workers, w)` hota tha, koi cleanup
+    nahi tha. Dashboard tab har 5 second pe 3 naye worker banata hai
+    (summary/feed/charts) — agar app kai ghante/din chalti rahe (jaisa
+    real-world mein hota hai), ye list hazaron/lakhon purane (already
+    finished) QThread objects se bhar jaati — genuine memory leak, jo
+    lambe time tak chalne par app ko slow/heavy bana deta hai. Ab har
+    worker khatam hote hi khud ko list se remove kar leta hai.
+    """
+    workers_list.append(w)
+
+    def _cleanup(*_args):
+        if w in workers_list:
+            workers_list.remove(w)
+
+    w.finished.connect(_cleanup)
+    w.error.connect(_cleanup)
+
+
 def _btn(text: str, variant: str = "secondary", height: int = 36, width: int | None = None) -> QPushButton:
     b = QPushButton(text)
     b.setProperty("variant", variant)
@@ -626,7 +649,7 @@ class _ConfigTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/admin/employees")
         w.finished.connect(self._on_employees_loaded)
         w.error.connect(lambda e: self._status_label.setText(f"Error: {e}"))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _on_employees_loaded(self, data: dict):
@@ -646,7 +669,7 @@ class _ConfigTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/admin/config/{emp_id}")
         w.finished.connect(self._populate_form)
         w.error.connect(lambda e: self._status_label.setText(f"Config load error: {e}"))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _populate_form(self, data: dict):
@@ -696,7 +719,7 @@ class _ConfigTab(QWidget):
             self._save_btn.setEnabled(True),
             self._save_btn.setText("💾  Save Config"),
         ))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _on_save_done(self, data: dict):
@@ -729,7 +752,7 @@ class _ConfigTab(QWidget):
             "✅ Force logout set!" if d.get("success") else f"❌ {d.get('error')}"
         ))
         w.error.connect(lambda e: self._status_label.setText(f"❌ {e}"))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
 
@@ -784,8 +807,8 @@ class _ScreenshotsTab(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 50)
-        self._table.setColumnWidth(1, 90)
+        self._table.setColumnWidth(0, 120)
+        self._table.setColumnWidth(1, 100)
         self._table.setColumnWidth(3, 200)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -828,7 +851,7 @@ class _ScreenshotsTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/admin/screenshots", params)
         w.finished.connect(self._populate)
         w.error.connect(lambda e: print("Screenshots error:", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _populate(self, data: dict):
@@ -970,7 +993,7 @@ class _DashboardTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/dashboard/charts")
         w.finished.connect(self._on_charts)
         w.error.connect(lambda e: print("Charts error:", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _on_charts(self, data: dict):
@@ -990,7 +1013,7 @@ class _DashboardTab(QWidget):
 
         w.finished.connect(self._on_summary)
         w.error.connect(lambda e: print("[SUMMARY ERROR]", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _load_feed(self):
@@ -998,7 +1021,7 @@ class _DashboardTab(QWidget):
 
         w.finished.connect(self._on_feed)
         w.error.connect(lambda e: print("Dashboard feed error:", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _on_summary(self, data: dict):
@@ -1117,7 +1140,7 @@ class _LogsTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/admin/logs", params)
         w.finished.connect(self._populate)
         w.error.connect(lambda e: print("Logs error:", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _populate(self, data: dict):
@@ -1235,7 +1258,7 @@ class _AttendanceTab(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 50)
+        self._table.setColumnWidth(0, 70)
         self._table.setColumnWidth(1, 90)
         self._table.setColumnWidth(4, 110)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1254,7 +1277,7 @@ class _AttendanceTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/attendance/all", params)
         w.finished.connect(self._populate)
         w.error.connect(lambda e: print("Attendance error:", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _populate(self, data: dict):
@@ -1469,7 +1492,7 @@ class EmployeeDetailsDialog(QDialog):
 
         w.error.connect(_on_worker_error)
 
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     # AFTER
@@ -1627,7 +1650,7 @@ class _EmployeesTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/admin/employees")
         w.finished.connect(self._on_employees_loaded)
         w.error.connect(lambda e: print("Employees load error:", e))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _on_employees_loaded(self, data: dict):
@@ -1800,7 +1823,7 @@ class _EmployeesTab(QWidget):
             "✅ Force logout set!" if d.get('success') else f"❌ {d.get('error')}"
         ))
         w.error.connect(lambda e: QMessageBox.warning(self, "Error", f"Force logout failed: {e}"))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
         
     def _toggle_verbose(self, emp: dict):
@@ -1819,7 +1842,7 @@ class _EmployeesTab(QWidget):
             else QMessageBox.warning(self, "Error", f"❌ {d.get('error', 'Toggle failed')}")
         ))
         w.error.connect(lambda e: QMessageBox.warning(self, "Error", f"Toggle failed: {e}"))
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
     def _delete_employee(self, emp):
@@ -1852,7 +1875,7 @@ class _EmployeesTab(QWidget):
             )
         )
 
-        self._workers.append(w)
+        _track_worker(self._workers, w)
         w.start()
 
         
@@ -1929,7 +1952,7 @@ class _EmployeesTab(QWidget):
                 )
             )
 
-            self._workers.append(worker)
+            _track_worker(self._workers, worker)
             worker.start()
 
         save_btn.clicked.connect(submit)

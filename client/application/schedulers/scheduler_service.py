@@ -35,7 +35,8 @@ class SchedulerService(QObject):
         try:
             SyncManager.cleanup_old_orphans(days=7)
         except Exception as e:
-            LoggerService.log("SchedulerService: started (shift-based mode)")
+            LoggerService.log(f"SchedulerService: cleanup_old_orphans failed on startup — {e}")
+        LoggerService.log("SchedulerService: started (shift-based mode)")
 
     def stop(self):
         self._sync_timer.stop()
@@ -108,7 +109,6 @@ class SchedulerService(QObject):
 
     def _fire_screenshot(self):
         """Timer fire hone par signal emit karo."""
-        LoggerService.log("SchedulerService: screenshot timer fired")
         self.screenshot_triggered.emit()
 
 

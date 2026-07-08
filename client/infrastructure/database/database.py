@@ -66,9 +66,16 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 employee_id TEXT,
                 activity TEXT,
-                uploaded INTEGER DEFAULT 0
+                uploaded INTEGER DEFAULT 0,
+                timestamp TEXT
             )
             """)
+
+            # Migration: existing DBs (pre-timestamp-column) — add column if missing
+            cursor.execute("PRAGMA table_info(pending_logs)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if "timestamp" not in existing_cols:
+                cursor.execute("ALTER TABLE pending_logs ADD COLUMN timestamp TEXT")
 
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -87,6 +94,28 @@ class Database:
                 status TEXT
             )
             """)
+            connection.commit()
+        finally:
+            connection.close()
+
+    @classmethod
+    def cleanup_stale_sessions_and_shifts(cls):
+        """
+        Pichhli run agar crash/force-kill hui thi (proper logout call kabhi
+        nahi hua), to yaha purani 'ACTIVE' shifts/sessions ko 'CLOSED' mark
+        kar dete hain — taaki wo hamesha ke liye 'ACTIVE' na dikhti rahe.
+
+        IMPORTANT: Ye method main.py me sirf tab call hota hai jab
+        AutoLoginManager.try_auto_login() FAIL ho jaye. Agar auto-login
+        SUCCEED hota hai, to SessionLogManager.start_session() already
+        purani row ko sahi tarike se close karke nayi ACTIVE row banata
+        hai — is method ko us case me chalana nayi-abhi-bani session ko
+        bhi galti se 'CLOSED' kar dega.
+        """
+        connection = cls.connect()
+        try:
+            cursor = connection.cursor()
+
             cursor.execute("""
                 UPDATE shifts
                 SET logout_time = login_time, total_hours = '00:00:00'

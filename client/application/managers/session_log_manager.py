@@ -8,6 +8,46 @@ from client.security.crypto_engine import CryptoEngine
 class SessionLogManager:
 
     @staticmethod
+    def get_last_session():
+        """
+        Sabse recent ACTIVE session return karo (auto-login ke liye).
+        Explicit logout ke baad status 'LOGGED_OUT'/'FORCE_CLOSED' ho jata
+        hai — wo session dobara auto-login se resurrect nahi hogi, sirf
+        genuinely-open session (app crash/reboot se band hui) restore hogi.
+        Auth token yahan decrypt karke return hota hai; expiry check
+        AutoLoginManager karta hai, yaha sirf raw data milta hai.
+        Returns dict {employee_id, auth_token} ya None.
+        """
+        conn = Database.connect()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT employee_id, auth_token
+            FROM sessions
+            WHERE status = 'ACTIVE'
+            ORDER BY id DESC LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        if not row or not row["auth_token"]:
+            return None
+
+        try:
+            # start_session() encrypt_token() use karta hai (base64 string
+            # return karta hai) — isliye yahan decrypt_token() hi use karo,
+            # decrypt_bytes() nahi (wo raw blob expect karta hai).
+            decrypted_token = CryptoEngine.decrypt_token(row["auth_token"])
+        except Exception:
+            return None
+
+        return {
+            "employee_id": row["employee_id"],
+            "auth_token": decrypted_token,
+        }
+
+    @staticmethod
     def start_session():
 
         conn = Database.connect()

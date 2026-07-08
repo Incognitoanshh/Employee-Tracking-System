@@ -14,9 +14,9 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from client.core.config import API_BASE_URL
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QThread, Signal
 from PySide6.QtGui import QCursor, QColor
-from client.presentation.windows.admin_config_panel import AdminConfigPanel
+from client.presentation.windows.admin_config_panel import AdminConfigPanel, _track_worker
 from client.application.managers.session_log_manager import SessionLogManager
 from client.infrastructure.database.database import Database
 from client.application.managers.shift_manager import ShiftManager
@@ -34,6 +34,38 @@ from client.services.logger_service import LoggerService
 from client.presentation.windows.attendance_window import AttendanceWindow
 
 
+class _CallWorker(QThread):
+    """
+    Generic background worker — koi bhi blocking call (jaise `requests.get`)
+    ko UI thread se hataane ke liye.
+
+    BUG FIX: DashboardWindow (jo HAR employee use karta hai, sirf admin
+    nahi) pehle `check_network_status()` (har 5s), aur `refresh_dashboard()`
+    ke andar `load_dashboard_stats()`/`load_recent_logs()` (har 30s) —
+    teeno seedhe `requests.get(...)` MAIN/UI thread pe call karte the.
+    Network slow/down hone par UI kai second ke liye freeze ho jaata
+    (buttons click na hona, window drag na hona) — har employee ke
+    daily-use experience ko affect karta. admin_config_panel.py mein
+    already yehi QThread-worker pattern istemal hota hai — yahan bhi
+    wahi consistent approach use kar rahe hain.
+    """
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+
+    def run(self):
+        try:
+            result = self._fn(*self._args, **self._kwargs)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class DashboardWindow(BaseWindow):
     def __init__(self):
         super().__init__()
@@ -45,6 +77,7 @@ class DashboardWindow(BaseWindow):
         # FIX #6: Cache login_time so shift timer doesn't hit DB every second
         self._shift_login_time: datetime | None = None
         self._load_shift_login_time()
+        self._workers: list = []
 
         self.setup_ui()
         self.network_timer = QTimer()
@@ -365,20 +398,33 @@ class DashboardWindow(BaseWindow):
         print(f"PENDING SCREENSHOTS: {len(pending)}")
 
     def load_dashboard_stats(self):
-        try:
-            # ROOT CAUSE FIX: "Logs Recorded" card was stuck on "—" for every
-            # employee because this previously called /dashboard/stats, which
-            # is adminOnly on the server (see dashboard.routes.js) and always
-            # returns 403 for a normal employee token. The employee-safe,
-            # per-employee-scoped endpoint is /logs/all (log.routes.js ->
-            # log.controller.getLogs), which is also what load_recent_logs()
-            # already uses. Switching to that endpoint here as well.
+        # ROOT CAUSE FIX: "Logs Recorded" card was stuck on "—" for every
+        # employee because this previously called /dashboard/stats, which
+        # is adminOnly on the server (see dashboard.routes.js) and always
+        # returns 403 for a normal employee token. The employee-safe,
+        # per-employee-scoped endpoint is /logs/all (log.routes.js ->
+        # log.controller.getLogs), which is also what load_recent_logs()
+        # already uses. Switching to that endpoint here as well.
+        #
+        # BUG FIX: yeh network call pehle seedhe UI thread pe blocking
+        # tarike se hoti thi — background worker mein move kiya (dekho
+        # _CallWorker class ke top comment mein poori wajah).
+        def _fetch():
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=2,
             )
-            result = response.json()
+            return response.json()
+
+        w = _CallWorker(_fetch)
+        w.finished.connect(self._on_dashboard_stats_loaded)
+        w.error.connect(lambda e: (print("[SUMMARY ERROR]", e), self._load_stats_from_local_db()))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _on_dashboard_stats_loaded(self, result):
+        try:
 
             # Safely parse and extract the employee-specific logs count if present,
             # otherwise fallback to local queued logs.
@@ -490,30 +536,36 @@ class DashboardWindow(BaseWindow):
 
     def load_recent_logs(self):
         print("=== LOGS START ===")
-        loaded = self._load_logs_from_api()
-        if not loaded:
-            self._load_logs_from_local_db()
-
-    def _load_logs_from_api(self):
-        print("=== API LOGS CALL ===")
-        
-        try:
+        # BUG FIX: pehle yeh seedhe UI thread pe blocking `requests.get`
+        # karta tha. Ab background worker mein — result callback
+        # (_on_recent_logs_loaded) mein aata hai; fail hone par wahi
+        # local-DB fallback chalta hai jo pehle synchronous return value
+        # check se chalta tha.
+        def _fetch():
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=2,
             )
-            result = response.json()
+            return response.json()
+
+        w = _CallWorker(_fetch)
+        w.finished.connect(self._on_recent_logs_loaded)
+        w.error.connect(lambda e: (print("[API LOGS ERROR]", e), self._load_logs_from_local_db()))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _on_recent_logs_loaded(self, result):
+        try:
             all_logs = result.get("data", [])
             # Filter: sirf meaningful logs dikhao
             noise = ['ConfigSyncManager', 'SchedulerService', 'SyncManager', 'ScreenshotManager']
             logs = [l for l in all_logs if not any(n in l.get('activity','') for n in noise)][:15]
             self.activity_list.clear()
             self._populate_activity_list(logs)
-            return True
         except Exception as error:
             print("[API LOGS ERROR]", error)
-            return False
+            self._load_logs_from_local_db()
 
     def _load_logs_from_local_db(self):
         try:
@@ -615,9 +667,18 @@ class DashboardWindow(BaseWindow):
             self.feed_count_label.setText(f"{count} event{'s' if count != 1 else ''}")
 
     def check_network_status(self):
-        try:
+        def _ping():
             requests.get("https://www.google.com", timeout=3)
+            return True
 
+        w = _CallWorker(_ping)
+        w.finished.connect(lambda _r: self._on_network_status(True))
+        w.error.connect(lambda _e: self._on_network_status(False))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _on_network_status(self, is_online: bool):
+        if is_online:
             self.status_label.setText("🟢 ONLINE")
             self.internet_card.update_value("CONNECTED")
             self.status_label.setStyleSheet("""
@@ -625,8 +686,7 @@ class DashboardWindow(BaseWindow):
                 font-size: 12px;
                 font-weight: bold;
             """)
-
-        except Exception:
+        else:
             self.status_label.setText("🔴 OFFLINE")
             self.internet_card.update_value("DISCONNECTED")
             self.status_label.setStyleSheet("""

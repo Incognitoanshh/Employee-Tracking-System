@@ -14,6 +14,7 @@ router.delete("/employees/:employee_id", adminCtrl.deleteEmployee);
 // Config
 router.get("/config/:employee_id", adminCtrl.getConfig);   // GET config for one employee or "global"
 router.post("/config",             adminCtrl.saveConfig);   // Save/update config
+router.post("/config/shift",       adminCtrl.saveShift);    // Lightweight shift-only save (no full config payload needed)
 router.post("/force-logout",       adminCtrl.forceLogout);  // Force logout employee
 router.post("/toggle-verbose-logging", adminCtrl.toggleVerboseLogging);  // Quick per-employee verbose toggle
 

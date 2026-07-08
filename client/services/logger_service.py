@@ -58,10 +58,10 @@ class LoggerService:
             cursor = connection.cursor()
             cursor.execute(
                 """
-                INSERT INTO pending_logs (employee_id, activity)
-                VALUES (?, ?)
+                INSERT INTO pending_logs (employee_id, activity, timestamp)
+                VALUES (?, ?, ?)
                 """,
-                (employee_id, message)
+                (employee_id, message, timestamp)
             )
             log_id = cursor.lastrowid
             connection.commit()

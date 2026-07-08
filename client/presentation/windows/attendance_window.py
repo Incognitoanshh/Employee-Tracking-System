@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox
 )
+from PySide6.QtCore import QThread, Signal
 from datetime import datetime, timezone, timedelta
 import csv
 from client.presentation.windows.base_window import BaseWindow
@@ -18,6 +19,29 @@ import ast
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
 from client.presentation.widgets.status_card import StatusCard
+from client.presentation.windows.admin_config_panel import _track_worker
+
+
+class _AttendanceFetchWorker(QThread):
+    """
+    BUG FIX: load_data() pehle seedhe `requests.get(...timeout=10...)` UI
+    thread pe karta tha — window khulte hi UI 10 second tak freeze ho
+    sakta tha (network slow/down hone par). Ab background thread mein.
+    """
+    finished = Signal(object)
+    error = Signal(str)
+
+    def run(self):
+        try:
+            response = requests.get(
+                f"{API_BASE_URL}/attendance/all",
+                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            self.finished.emit(response.json())
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class AttendanceWindow(BaseWindow):
@@ -27,6 +51,7 @@ class AttendanceWindow(BaseWindow):
 
         self.setWindowTitle("Attendance History")
         self.resize(1000, 650)
+        self._workers: list = []
 
         self.setup_ui()
         self.load_data()
@@ -126,37 +151,33 @@ class AttendanceWindow(BaseWindow):
         return f"{hours}h {minutes}m"
 
     def load_data(self):
+        w = _AttendanceFetchWorker()
+        w.finished.connect(self._on_data_loaded)
+        w.error.connect(self._on_data_load_failed)
+        _track_worker(self._workers, w)
+        w.start()
 
-        try:
+    def _on_data_load_failed(self, error):
+        print(
+            "[ATTENDANCE LOAD ERROR]",
+            error
+        )
+        self._process_shifts([])
 
-            response = requests.get(
-                f"{API_BASE_URL}/attendance/all",
-                headers={
-                    "Authorization":
-                        f"Bearer {SessionManager.auth_token}"
-                    },
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            shifts = []
-            for row in data.get("data", []):
-                
-                shifts.append(
-                    (
-                        row.get("employee_id"),
-                        str(row.get("login_time", "")),
-                        str(row.get("logout_time") or ""),
-                        str(row.get("total_hours") or "")
-                    )
+    def _on_data_loaded(self, data):
+        shifts = []
+        for row in data.get("data", []):
+            shifts.append(
+                (
+                    row.get("employee_id"),
+                    str(row.get("login_time", "")),
+                    str(row.get("logout_time") or ""),
+                    str(row.get("total_hours") or "")
                 )
-        except Exception as error:
-        
-            print(
-                "[ATTENDANCE LOAD ERROR]",
-                error
             )
-            shifts = []
+        self._process_shifts(shifts)
+
+    def _process_shifts(self, shifts):
 
         self.table.setRowCount(len(shifts))
 
@@ -226,6 +247,19 @@ class AttendanceWindow(BaseWindow):
                     login_time.split(".")[0],
                     "%Y-%m-%d %H:%M:%S"
                 )
+
+            # BUG FIX: shift_date yahan tak UTC wall-clock string se parse
+            # hui hai (server UTC pe chalta hai), koi tzinfo attach nahi
+            # hai. Neeche `now = datetime.now()` LOCAL (IST) time hai —
+            # dono ko seedha compare karna galat hai, especially midnight
+            # IST ke aas-paas (UTC se ~5:30 ghante aage) — ek login jo
+            # actually "aaj IST" hua tha, UTC string dekh ke "kal" bucket
+            # mein chala jaata (ya vice versa). display ke liye niche
+            # `to_ist()` sahi conversion karta hai, lekin ye bucketing
+            # (Today/Week/Month cards) conversion nahi karti thi — ab
+            # explicitly UTC → IST convert karke hi bucket karte hain.
+            IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+            shift_date = shift_date.replace(tzinfo=timezone.utc).astimezone(IST_OFFSET).replace(tzinfo=None)
 
             now = datetime.now()
 

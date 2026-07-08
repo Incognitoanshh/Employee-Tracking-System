@@ -14,6 +14,7 @@ from client.security.crypto_engine import CryptoEngine
 from client.services.logger_service import LoggerService
 from client.services.settings_service import SettingsService
 from client.core.config import API_BASE_URL
+from client.core.config.settings import Settings
 
 
 class ScreenshotManager:
@@ -24,9 +25,18 @@ class ScreenshotManager:
         cls, shift_start: datetime, shift_end: datetime
     ) -> list:
         """Shift ke andar N random timestamps generate karo."""
+        # Fallback defaults ab .env-driven Settings se aate hain (DB me
+        # koi override save nahi hua to yehi use hoga) — pehle yaha
+        # hardcoded "3"/"10" tha jo .env ke SCREENSHOT_MIN_INTERVAL/
+        # SCREENSHOT_MAX_INTERVAL se independent ho sakta tha (config
+        # drift risk: .env badlo, ye fallback kabhi sync na ho).
         count = int(SettingsService.get_setting("screenshot_count", "3"))
-        min_gap = int(SettingsService.get_setting("screenshot_min_minutes", "3")) * 60
-        _max_gap = int(SettingsService.get_setting("screenshot_max_minutes", "10")) * 60
+        min_gap = int(SettingsService.get_setting(
+            "screenshot_min_minutes", str(Settings.SCREENSHOT_MIN_INTERVAL // 60)
+        )) * 60
+        _max_gap = int(SettingsService.get_setting(
+            "screenshot_max_minutes", str(Settings.SCREENSHOT_MAX_INTERVAL // 60)
+        )) * 60
 
         shift_duration = (shift_end - shift_start).total_seconds()
         if shift_duration <= 0 or count <= 0:
@@ -60,51 +70,61 @@ class ScreenshotManager:
 
     @classmethod
     def capture_screenshot(cls):
-        os.makedirs(cls.STORAGE_PATH, exist_ok=True)
-
         screenshot_id = str(uuid.uuid4())
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # BUG FIX: Pehle .enc file seedha upload ho rahi thi — server PNG chahiye.
-        # Fix: PNG bytes in-memory rakho — encrypted version local disk pe save karo,
-        # aur PNG bytes server ko upload karo (in-memory, koi plain file disk pe nahi).
-        screenshot = pyautogui.screenshot()
-        buf = io.BytesIO()
-        screenshot.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
-
-        # Encrypted file local storage pe save karo
-        enc_filename = f"{screenshot_id}.enc"
-        enc_filepath = os.path.join(cls.STORAGE_PATH, enc_filename)
-        CryptoEngine.save_encrypted(png_bytes, enc_filepath)
-
-        LoggerService.log(f"SCREENSHOT CAPTURED : {enc_filepath}")
-
-        # Local DB mein record karo
-        # BUG FIX: column ka naam 'file_name' tha jo schema mein exist nahi karta
-        # (schema mein column 'file_path' hai) — isse INSERT crash hota tha aur
-        # capture_screenshot() kabhi upload tak pahunchta hi nahi tha.
-        # Path bhi enc_filepath honi chahiye (jahan file actually disk pe hai),
-        # taaki SyncManager.retry_uploads() us file ko dhoondh sake.
-        connection = Database.connect()
-        cursor = connection.cursor()
-        cursor.execute(
-            """
-            INSERT INTO screenshots (id, employee_id, file_path, timestamp)
-            VALUES (?, ?, ?, ?)
-            """,
-            (screenshot_id, SessionManager.employee_id, enc_filepath,
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        )
-        connection.commit()
-        connection.close()
-
-        # Server ko PNG bytes upload karo (in-memory — disk pe plain PNG nahi)
+        # Capture + encrypt + local DB record — pehle yahan koi try/except
+        # nahi tha. Agar pyautogui.screenshot() fail ho jaye (e.g. macOS pe
+        # Screen Recording permission missing) to exception Qt signal-slot
+        # ke through silently swallow ho jaata (sirf stderr pe print hota,
+        # server ko kabhi pata nahi chalta screenshots kyun ruk gaye). Ab
+        # failure explicitly log hoti hai.
         try:
-            upload_filename = f"{screenshot_id}.png"
+            os.makedirs(cls.STORAGE_PATH, exist_ok=True)
+
+            # PNG bytes in-memory rakho (disk pe kahi bhi plain PNG save nahi hoti).
+            # Encrypted (.enc) version hi local disk pe save hoti hai, aur wahi
+            # (.enc) server ko bhi upload hoti hai. Decrypt sirf app se open
+            # karte waqt hota hai (screenshot_preview_window.py).
+            screenshot = pyautogui.screenshot()
+            buf = io.BytesIO()
+            screenshot.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+
+            # Encrypted file local storage pe save karo
+            enc_filename = f"{screenshot_id}.enc"
+            enc_filepath = os.path.join(cls.STORAGE_PATH, enc_filename)
+            CryptoEngine.save_encrypted(png_bytes, enc_filepath)
+
+            LoggerService.log(f"SCREENSHOT CAPTURED : {enc_filepath}")
+
+            # Local DB mein record karo
+            connection = Database.connect()
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO screenshots (id, employee_id, file_path, timestamp)
+                VALUES (?, ?, ?, ?)
+                """,
+                (screenshot_id, SessionManager.employee_id, enc_filepath,
+                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            connection.commit()
+            connection.close()
+        except Exception as error:
+            LoggerService.log(f"ScreenshotManager: capture failed — {error}")
+            return None
+
+        # Server ko encrypted (.enc) bytes upload karo — plain PNG kabhi
+        # network pe nahi jaani chahiye.
+        try:
+            with open(enc_filepath, "rb") as f:
+                enc_bytes = f.read()
+
+            upload_filename = f"{screenshot_id}.enc"
             response = requests.post(
                 f"{API_BASE_URL}/screenshots/upload",
-                files={"screenshot": (upload_filename, png_bytes, "image/png")},
+                files={"screenshot": (upload_filename, enc_bytes, "application/octet-stream")},
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=10,
             )
