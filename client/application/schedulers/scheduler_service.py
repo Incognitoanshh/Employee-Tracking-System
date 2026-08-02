@@ -35,7 +35,8 @@ class SchedulerService(QObject):
         try:
             SyncManager.cleanup_old_orphans(days=7)
         except Exception as e:
-            LoggerService.log("SchedulerService: started (shift-based mode)")
+            LoggerService.log(f"SchedulerService: cleanup_old_orphans failed on startup — {e}")
+        LoggerService.log("SchedulerService: started (shift-based mode)")
 
     def stop(self):
         self._sync_timer.stop()
@@ -62,6 +63,30 @@ class SchedulerService(QObject):
                 # ISO format parse karo
                 shift_start = datetime.fromisoformat(shift_start_str)
                 shift_end   = datetime.fromisoformat(shift_end_str)
+
+                # BUG FIX: Server/ConfigSync kabhi kabhi shift ke saath
+                # PURANI (ya kisi bhi) date bhej deta hai — e.g. aaj 30th hai
+                # lekin payload me "2026-06-29T09:00:00+05:30" aata hai.
+                # Ye ek REPEATING DAILY shift hai (sirf 09:00-18:00 time-of-day
+                # matter karta hai, date nahi) — lekin pehle code us date ko
+                # literally use kar leta tha, is wajah se shift turant hi
+                # "already ended" ban jaati thi aur saare pending screenshot
+                # timers reschedule() me cancel ho ke khaali reh jaate the
+                # (ye poore app.log me sabse bada pattern hai — har
+                # "shift updated" ke baad "shift already ended, no
+                # screenshots scheduled" aa raha tha).
+                # Fix: date hamesha AAJ ki date se replace karo, server jo
+                # bhi date bheje uska koi farak na pade.
+                today = now.date()
+                shift_start = shift_start.replace(
+                    year=today.year, month=today.month, day=today.day
+                )
+                shift_end = shift_end.replace(
+                    year=today.year, month=today.month, day=today.day
+                )
+                if shift_end <= shift_start:
+                    # Overnight shift (e.g. 22:00-06:00) — end agle din maano
+                    shift_end += timedelta(days=1)
             except Exception:
                 # Fallback: aaj ki date pe HH:MM format
                 try:
@@ -108,7 +133,6 @@ class SchedulerService(QObject):
 
     def _fire_screenshot(self):
         """Timer fire hone par signal emit karo."""
-        LoggerService.log("SchedulerService: screenshot timer fired")
         self.screenshot_triggered.emit()
 
 
@@ -227,3 +251,4 @@ class SchedulerService(QObject):
         self._pending_timers.clear()
         self._schedule_shift_screenshots()
         LoggerService.log_verbose("SchedulerService: rescheduled after config change")
+

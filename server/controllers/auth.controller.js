@@ -2,6 +2,35 @@ const pool = require("../config/db");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 
+exports.logout = async (req, res) => {
+    const authHeader = req.headers["authorization"];
+    const token = authHeader && authHeader.split(" ")[1];
+    if (!token) return res.status(400).json({ success: false, message: "No token provided" });
+
+    // Best-effort decode (signature/expiry verify zaroori nahi — agar token
+    // already expire ho chuka hai to bhi employee_id nikal ke uski
+    // active_session clear kar do; logout ka intent already achieve hai).
+    const decoded = jwt.decode(token);
+    if (decoded && decoded.employee_id) {
+        try {
+            // token = NULL karo, row DELETE nahi — verifyToken middleware
+            // sirf tab hi purane token ko reject karta hai jab active_sessions
+            // row EXIST kare aur token mismatch ho. Row delete karne se check
+            // hi skip ho jata (koi row hi nahi milta), purana token tab bhi
+            // apni natural 24h expiry tak chalta rehta — security gap.
+            await pool.query(
+                `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+                [decoded.employee_id]
+            );
+        } catch (dbError) {
+            // DB issue — client-side session already clear ho chuki hogi,
+            // logout request ko fail mat karo iske liye.
+        }
+    }
+
+    return res.json({ success: true, message: "Logged out" });
+};
+
 exports.refresh = async (req, res) => {
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];

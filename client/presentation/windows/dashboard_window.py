@@ -14,9 +14,9 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from client.core.config import API_BASE_URL
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QThread, Signal
 from PySide6.QtGui import QCursor, QColor
-from client.presentation.windows.admin_config_panel import AdminConfigPanel
+from client.presentation.windows.admin_config_panel import AdminConfigPanel, _track_worker
 from client.application.managers.session_log_manager import SessionLogManager
 from client.infrastructure.database.database import Database
 from client.application.managers.shift_manager import ShiftManager
@@ -34,6 +34,38 @@ from client.services.logger_service import LoggerService
 from client.presentation.windows.attendance_window import AttendanceWindow
 
 
+class _CallWorker(QThread):
+    """
+    Generic background worker — koi bhi blocking call (jaise `requests.get`)
+    ko UI thread se hataane ke liye.
+
+    BUG FIX: DashboardWindow (jo HAR employee use karta hai, sirf admin
+    nahi) pehle `check_network_status()` (har 5s), aur `refresh_dashboard()`
+    ke andar `load_dashboard_stats()`/`load_recent_logs()` (har 30s) —
+    teeno seedhe `requests.get(...)` MAIN/UI thread pe call karte the.
+    Network slow/down hone par UI kai second ke liye freeze ho jaata
+    (buttons click na hona, window drag na hona) — har employee ke
+    daily-use experience ko affect karta. admin_config_panel.py mein
+    already yehi QThread-worker pattern istemal hota hai — yahan bhi
+    wahi consistent approach use kar rahe hain.
+    """
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+
+    def run(self):
+        try:
+            result = self._fn(*self._args, **self._kwargs)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class DashboardWindow(BaseWindow):
     def __init__(self):
         super().__init__()
@@ -45,6 +77,7 @@ class DashboardWindow(BaseWindow):
         # FIX #6: Cache login_time so shift timer doesn't hit DB every second
         self._shift_login_time: datetime | None = None
         self._load_shift_login_time()
+        self._workers: list = []
 
         self.setup_ui()
         self.network_timer = QTimer()
@@ -365,27 +398,27 @@ class DashboardWindow(BaseWindow):
         print(f"PENDING SCREENSHOTS: {len(pending)}")
 
     def load_dashboard_stats(self):
-        try:
-            # ROOT CAUSE FIX: "Logs Recorded" card was stuck on "—" for every
-            # employee because this previously called /dashboard/stats, which
-            # is adminOnly on the server (see dashboard.routes.js) and always
-            # returns 403 for a normal employee token. The employee-safe,
-            # per-employee-scoped endpoint is /logs/all (log.routes.js ->
-            # log.controller.getLogs), which is also what load_recent_logs()
-            # already uses. Switching to that endpoint here as well.
+        def _fetch():
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=2,
             )
-            result = response.json()
+            return response.json()
 
-            # Safely parse and extract the employee-specific logs count if present,
-            # otherwise fallback to local queued logs.
+        w = _CallWorker(_fetch)
+        w.finished.connect(self._on_dashboard_stats_loaded)
+        w.error.connect(lambda e: (print("[SUMMARY ERROR]", e), self._load_stats_from_local_db()))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _on_dashboard_stats_loaded(self, result):
+        try:
+
             total_activity_logs = 0
 
             try:
-                # Defensive: always work with dicts
+                
                 if isinstance(result, dict):
                     # Prefer nested data structures
                     data_block = result.get("data")
@@ -478,9 +511,6 @@ class DashboardWindow(BaseWindow):
         try:
             conn = Database.connect()
             cur  = conn.cursor()
-            # BUG FIX: local SQLite DB mein 'activity_logs' table nahi hai,
-            # 'pending_logs' hai. Galat table name se SQL error aata tha aur
-            # stat card hamesha empty rehta tha.
             cur.execute("SELECT COUNT(*) FROM pending_logs")
             log_count = cur.fetchone()[0]
             conn.close()
@@ -490,37 +520,37 @@ class DashboardWindow(BaseWindow):
 
     def load_recent_logs(self):
         print("=== LOGS START ===")
-        loaded = self._load_logs_from_api()
-        if not loaded:
-            self._load_logs_from_local_db()
 
-    def _load_logs_from_api(self):
-        print("=== API LOGS CALL ===")
-        
-        try:
+        def _fetch():
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=2,
             )
-            result = response.json()
+            return response.json()
+
+        w = _CallWorker(_fetch)
+        w.finished.connect(self._on_recent_logs_loaded)
+        w.error.connect(lambda e: (print("[API LOGS ERROR]", e), self._load_logs_from_local_db()))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _on_recent_logs_loaded(self, result):
+        try:
             all_logs = result.get("data", [])
             # Filter: sirf meaningful logs dikhao
             noise = ['ConfigSyncManager', 'SchedulerService', 'SyncManager', 'ScreenshotManager']
             logs = [l for l in all_logs if not any(n in l.get('activity','') for n in noise)][:15]
             self.activity_list.clear()
             self._populate_activity_list(logs)
-            return True
         except Exception as error:
             print("[API LOGS ERROR]", error)
-            return False
+            self._load_logs_from_local_db()
 
     def _load_logs_from_local_db(self):
         try:
             conn = Database.connect()
             cur  = conn.cursor()
-            # BUG FIX: local SQLite mein activity_logs nahi, pending_logs hai.
-            # created_at column bhi nahi — activity column se kaam chalao.
             cur.execute("""
                 SELECT id, activity
                 FROM pending_logs
@@ -615,9 +645,18 @@ class DashboardWindow(BaseWindow):
             self.feed_count_label.setText(f"{count} event{'s' if count != 1 else ''}")
 
     def check_network_status(self):
-        try:
+        def _ping():
             requests.get("https://www.google.com", timeout=3)
+            return True
 
+        w = _CallWorker(_ping)
+        w.finished.connect(lambda _r: self._on_network_status(True))
+        w.error.connect(lambda _e: self._on_network_status(False))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _on_network_status(self, is_online: bool):
+        if is_online:
             self.status_label.setText("🟢 ONLINE")
             self.internet_card.update_value("CONNECTED")
             self.status_label.setStyleSheet("""
@@ -625,8 +664,7 @@ class DashboardWindow(BaseWindow):
                 font-size: 12px;
                 font-weight: bold;
             """)
-
-        except Exception:
+        else:
             self.status_label.setText("🔴 OFFLINE")
             self.internet_card.update_value("DISCONNECTED")
             self.status_label.setStyleSheet("""
@@ -717,12 +755,7 @@ class DashboardWindow(BaseWindow):
     def open_admin_panel(self):
         if SessionManager.role != "admin":
             return
-        # BUG FIX: Pehle dashboard ka scheduler/idle_tracker chalta rehta tha
-        # jab admin panel khulta tha — dono apna apna SchedulerService +
-        # IdleTracker chalate the same employee/device ke liye, jisse
-        # duplicate screenshots, duplicate idle logs, aur duplicate
-        # config-sync calls ho rahe the. Ab dashboard ka tracking pause
-        # karte hain jab tak admin panel khula hai.
+       
         if hasattr(self, "scheduler") and self.scheduler:
             self.scheduler.stop()
         if hasattr(self, "idle_tracker") and self.idle_tracker:
@@ -733,8 +766,6 @@ class DashboardWindow(BaseWindow):
         self.admin_panel.show()
 
     def _resume_tracking_after_admin_panel(self):
-        # Admin panel band hua (ya logout hua) — dashboard ka apna tracking
-        # resume karo, agar session abhi bhi active hai.
         if not SessionManager.is_authenticated:
             return
         if hasattr(self, "scheduler") and self.scheduler:

@@ -4,7 +4,6 @@ import requests
 from client.application.managers.session_manager import SessionManager
 from client.core.config import API_BASE_URL
 from client.infrastructure.database.database import Database
-from client.security.crypto_engine import CryptoEngine
 
 
 class SyncManager:
@@ -94,26 +93,15 @@ class SyncManager:
                     SyncManager.mark_uploaded(screenshot_id)
                     continue
 
-                # BUG FIX: pehle yahan local .enc file ke RAW (still encrypted)
-                # bytes seedha server ko upload ho jaate the. Server unhe
-                # PNG samajh ke save kar leta tha, lekin wo encrypted garbage
-                # hote — admin panel mein screenshot kabhi khulti nahi thi.
-                # Ab upload se pehle decrypt karke plain PNG bytes bhejte hain.
+                # .enc file ke RAW encrypted bytes hi server ko upload karo.
+                # Decrypt sirf app se open karte waqt hoga (preview window
+                # me), server pe plain PNG kabhi nahi jaani chahiye.
                 with open(file_path, "rb") as file:
                     encrypted_bytes = file.read()
 
-                try:
-                    plaintext_png = CryptoEngine.decrypt_bytes(encrypted_bytes)
-                except Exception as decrypt_error:
-                    LoggerService.log(
-                        f"SyncManager: failed to decrypt {file_path} for retry "
-                        f"upload — {decrypt_error}. Skipping, file kept for now."
-                    )
-                    continue
-
                 response = requests.post(
                     f"{API_BASE_URL}/screenshots/upload",
-                    files={"screenshot": (f"{screenshot_id}.png", plaintext_png, "image/png")},
+                    files={"screenshot": (f"{screenshot_id}.enc", encrypted_bytes, "application/octet-stream")},
                     headers=headers,
                     timeout=10,
                 )
@@ -156,16 +144,37 @@ class SyncManager:
                 "DELETE FROM screenshots WHERE uploaded = 0 AND timestamp < ?",
                 (cutoff,)
             )
-            # Purane unuploaded logs - cutoff se purane wale delete karo
-            # BUG FIX: pehle yahan cutoff ignore ho rahi thi — saare unuploaded
-            # logs delete ho jaate the chahe wo recent hi kyun na hon.
-            # pending_logs mein timestamp nahi hai, isliye old IDs (top 1000
-            # oldest) ko cutoff proxy ke taur pe use karo.
+            # Already-uploaded purane logs delete karo — safe hai, server ke
+            # paas already ye data hai, local copy sirf backlog badha rahi thi.
             cursor.execute(
-                "DELETE FROM pending_logs WHERE uploaded = 0 AND id < (SELECT MIN(id) + 1000 FROM pending_logs WHERE uploaded = 0)",
+                "DELETE FROM pending_logs WHERE uploaded = 1 AND timestamp < ?",
+                (cutoff,)
             )
+
+            # Unsent (uploaded = 0) logs kabhi silently delete nahi karte —
+            # ye data-loss hota (server ne kabhi receive nahi kiya). Agar
+            # backlog bahut bada ho gaya hai to sirf warn karo taaki koi
+            # dekh sake ki server/network issue hai, data khoyega nahi.
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM pending_logs WHERE uploaded = 0 AND timestamp < ?",
+                (cutoff,)
+            )
+            stale_pending = cursor.fetchone()["cnt"]
+
             connection.commit()
             connection.close()
+
+            # LoggerService.log() apna alag DB connection kholta hai — isko
+            # transaction commit/close hone ke BAAD hi call karo, warna
+            # SQLite "database is locked" error deta hai (ek hi DB file pe
+            # do open connections, ek abhi tak uncommitted write hold kiye
+            # hue).
+            if stale_pending > 0:
+                LoggerService.log(
+                    f"SyncManager: {stale_pending} unsent logs older than "
+                    f"{days} days — server/network issue likely, not deleting "
+                    f"(would cause data loss)."
+                )
         except Exception as e:
             LoggerService.log(f"SyncManager: cleanup_old_orphans error — {e}")
 

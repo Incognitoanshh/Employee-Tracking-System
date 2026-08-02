@@ -58,9 +58,14 @@ exports.loginAttendance = async (req, res) => {
             return res.status(400).json({ success: false, error: "employee_id required" });
         }
 
-        // Close any open sessions
+        // Close any open sessions (crash/force-close se pehle wali session
+        // jo kabhi properly logout nahi hui — naye login se pehle safety-net
+        // ke taur pe band kar do). total_hours yaha bhi NOW() - login_time
+        // se compute karo (NULL chhodne ki jagah) — self-consistent rehta
+        // hai (isi row ke apne dono timestamps se), display pe "—" ki jagah
+        // ek meaningful (best-effort) duration dikhega.
         await pool.query(
-            `UPDATE attendance SET logout_time = NOW(), total_hours = NULL
+            `UPDATE attendance SET logout_time = NOW(), total_hours = NOW()::timestamp - login_time
              WHERE employee_id = $1 AND logout_time IS NULL`,
             [employee_id]
         );
@@ -83,7 +88,7 @@ exports.loginAttendance = async (req, res) => {
 
 exports.logoutAttendance = async (req, res) => {
     try {
-        let { employee_id, total_hours } = req.body;
+        let { employee_id } = req.body;
 
         if (req.employee?.role !== "admin") {
             employee_id = req.employee?.employee_id;
@@ -93,26 +98,25 @@ exports.logoutAttendance = async (req, res) => {
             return res.status(400).json({ success: false, error: "employee_id required" });
         }
 
-        // Validate total_hours
-        let interval_value = null;
-        if (total_hours && typeof total_hours === "string" && total_hours.trim().length > 0) {
-            const validInterval = /^\d+\s*(hour[s]?\s*)?\d*\s*(minute[s]?)?$|^\d+\s*minutes?$|^\d+\s*hours?$/i;
-            if (validInterval.test(total_hours.trim())) {
-                interval_value = total_hours.trim();
-            }
-        }
-
-        // BUG FIX: logout_time bhi NOW() se UTC mein store karo
+        // total_hours client se LIYA NAHI jata — client ka local session
+        // (SQLite `shifts` row) server ke actual attendance row se DISCONNECT
+        // ho sakta hai (e.g. auto-login ke baad purani open server-session
+        // continue hoti hai lekin naya chhota local shift row bhi ban jaata
+        // hai) — is wajah se client ka duration calculation kabhi bahut
+        // chhota (jaise "8 minutes") ho sakta hai jabki actual server session
+        // ghanton lambi thi. Server khud NOW() - login_time se authoritative
+        // total_hours compute karta hai — dono values USI row se aate hain,
+        // isliye kabhi mismatch nahi ho sakta.
         const result = await pool.query(
             `UPDATE attendance
-             SET logout_time = NOW(), total_hours = $1::interval
+             SET logout_time = NOW(), total_hours = NOW()::timestamp - login_time
              WHERE id = (
                  SELECT id FROM attendance
-                 WHERE employee_id = $2 AND logout_time IS NULL
+                 WHERE employee_id = $1 AND logout_time IS NULL
                  ORDER BY id DESC LIMIT 1
              )
              RETURNING id`,
-            [interval_value, employee_id]
+            [employee_id]
         );
 
         if (result.rows.length === 0) {

@@ -1,38 +1,18 @@
-import os
+"""
+Settings — client.core.config.__init__ ke Settings class ka re-export.
 
-from dotenv import load_dotenv
+NOTE: Pehle yaha ek ALAG (aur buggy) Settings class thi jo apna khud ka
+.env loading logic rakhti thi — usme base_path galat resolve hota tha
+(client/core/config/ ki jagah client/ tak jaana chahiye tha), jisse
+SCREENSHOT_ENCRYPTION_KEY jaise vars silently missing rehte the.
 
-load_dotenv()
+Wo bug __init__.py mein already fix ho chuka hai. Is file ko duplicate
+(aur potentially phir se out-of-sync) rakhne ki jagah, yahan sirf wahi
+(already-correct) Settings class re-export karte hain — taaki
+`from client.core.config.settings import Settings` import path bhi
+kaam kare, bina kisi doosri jagah wahi buggy logic dobara likhe.
+"""
 
+from client.core.config import Settings
 
-class Settings:
-
-    APP_NAME = os.getenv(
-        "APP_NAME",
-        "ETS Client"
-    )
-
-    APP_VERSION = "1.0.0"
-
-    SCREENSHOT_MIN_INTERVAL = int(
-        os.getenv(
-            "SCREENSHOT_MIN_INTERVAL",
-            180
-        )
-    )
-
-    SCREENSHOT_MAX_INTERVAL = int(
-        os.getenv(
-            "SCREENSHOT_MAX_INTERVAL",
-            600
-        )
-    )
-
-    IDLE_THRESHOLD = int(
-        os.getenv(
-            "IDLE_THRESHOLD",
-            60
-        )
-    )
-
-    DATABASE_URL = "sqlite:///storage/ets.db"
+__all__ = ["Settings"]

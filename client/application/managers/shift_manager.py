@@ -92,6 +92,16 @@ class ShiftManager:
             login_time = datetime.strptime(shift[1], "%Y-%m-%d %H:%M:%S")
         except Exception:
             connection.close()
+            # login_time corrupt/unparseable — duration calculate nahi ho
+            # sakti, lekin shift row ko logout_time=NULL chhodna galat hai
+            # (permanently "open" dikhta rahega). Database.close_current_shift()
+            # ko fallback ke taur pe use karo — sirf logout_time set karta
+            # hai (best-effort, duration ke bina), taaki row kabhi dangling
+            # na rahe.
+            try:
+                Database.close_current_shift(SessionManager.employee_id)
+            except Exception:
+                pass
             return
 
         duration      = logout_time - login_time

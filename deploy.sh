@@ -71,8 +71,8 @@ if echo "$MSG" | grep -qi "invalid\|expired\|token"; then pass "Invalid token �
 # ── 2. STATUS / PING ─────────────────────────────────────────────────────────
 section "2. STATUS / PING"
 
-R=$(curl -s "$BASE_URL/status/ping")
-if echo "$R" | grep -qi "pong\|ok\|alive\|success"; then pass "GET /status/ping"; else warn "GET /status/ping → $R (route may not exist)"; fi
+R=$(curl -s "$BASE_URL/health")
+if echo "$R" | grep -qi "healthy\|success"; then pass "GET /health"; else fail "GET /health → $R"; fi
 
 # ── 3. DASHBOARD ─────────────────────────────────────────────────────────────
 section "3. DASHBOARD"
@@ -151,13 +151,31 @@ R=$(curl -s -X POST "$BASE_URL/screenshots/upload" \
     -F "session_id=test-session-001")
 rm -f "$TMPFILE"
 check "POST /screenshots/upload" "True" "$R"
-SS_ID=$(echo "$R" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('id','') or d.get('id',''))" 2>/dev/null)
+
+# BUG FIX: uploadScreenshot response mein sirf {"success":true,"file":"<filename>"}
+# aata hai — koi "id" nahi hota (client ko turant zaroorat nahi padti). Isliye
+# download test karne ke liye humein /screenshots/all se filename match karke
+# uska id khud dhoondhna padta hai.
+SS_FILE=$(echo "$R" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('file',''))" 2>/dev/null)
+SS_ID=""
+if [ -n "$SS_FILE" ] && [ "$SS_FILE" != "None" ]; then
+    LIST=$(curl -s "$BASE_URL/screenshots/all" -H "Authorization: Bearer $ADMIN_TOKEN")
+    SS_ID=$(echo "$LIST" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+rows = d.get('data', d) if isinstance(d.get('data', d), list) else []
+for r in rows:
+    if r.get('file_name') == '$SS_FILE':
+        print(r.get('id', ''))
+        break
+" 2>/dev/null)
+fi
 
 if [ -n "$SS_ID" ] && [ "$SS_ID" != "None" ]; then
     R=$(curl -s "$BASE_URL/screenshots/download/$SS_ID" -H "Authorization: Bearer $ADMIN_TOKEN")
     if echo "$R" | grep -qi "success\|true\|data"; then pass "GET /screenshots/download/:id"; else warn "GET /screenshots/download/$SS_ID → $R"; fi
 else
-    warn "Screenshot upload returned no ID — skipping download test"
+    warn "Could not resolve uploaded screenshot's id from listing — skipping download test"
 fi
 
 # Path traversal check
@@ -198,7 +216,7 @@ check "POST /admin/config (invalid → should fail)" "False" "$R"
 R=$(curl -s -X POST "$BASE_URL/admin/force-logout" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{\"username\":\"$EMP_ID\"}")
+    -d "{\"employee_id\":\"$EMP_ID\"}")
 check "POST /admin/force-logout" "True" "$R"
 
 R=$(curl -s "$BASE_URL/admin/screenshots" -H "Authorization: Bearer $ADMIN_TOKEN")

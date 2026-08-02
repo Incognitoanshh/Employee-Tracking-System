@@ -8,6 +8,7 @@ from client.services.logger_service import LoggerService
 from client.services.settings_service import SettingsService
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
+from client.core.config.settings import Settings
 
 try:
     import Quartz
@@ -30,7 +31,9 @@ class IdleTracker(QObject):
         super().__init__()
         self.is_idle = False
         self.idle_threshold = int(
-            SettingsService.get_setting("idle_threshold_seconds", "60")
+            SettingsService.get_setting(
+                "idle_threshold_seconds", str(Settings.IDLE_THRESHOLD)
+            )
         )
         self._reload_every_n_checks = 10
         self._check_counter = 0
@@ -45,7 +48,9 @@ class IdleTracker(QObject):
 
     def reload_threshold(self):
         self.idle_threshold = int(
-            SettingsService.get_setting("idle_threshold_seconds", "60")
+            SettingsService.get_setting(
+                "idle_threshold_seconds", str(Settings.IDLE_THRESHOLD)
+            )
         )
 
     def _get_idle_seconds(self):

@@ -111,12 +111,17 @@ class ConfigSyncManager:
             self._persist_config(config)
             if self._on_new_config:
                 self._on_new_config(config)
-            LoggerService.log_verbose(
-                f"ConfigSyncManager: sync OK — "
-                f"screenshot={config.get('screenshot_min_minutes')}-"
-                f"{config.get('screenshot_max_minutes')}min, "
-                f"upload={config.get('upload_interval_minutes')}min"
-            )
+            # NOTE: pehle yahan har successful sync (default har 5 min) pe
+            # ek "sync OK" heartbeat unconditionally log hoti thi — chahe
+            # config me kuch badla ho ya nahi. Lambe time tak app chalte
+            # rehne pe (jaise ek naya laptop restart ke bina din-raat chale)
+            # ye activity_logs table ko hazaron repetitive rows se bhar deta
+            # tha, jisse admin panel ke "Latest Activity" me asli meaningful
+            # events (login, idle/active, errors) dab jaate the. Jab
+            # config actually badalta hai, scheduler_service.py ka
+            # _apply_new_config() already ek meaningful log likhta hai
+            # ("config updated — ...") — isliye ye redundant heartbeat
+            # hata diya gaya hai.
             return config
 
         except requests.exceptions.ConnectionError:

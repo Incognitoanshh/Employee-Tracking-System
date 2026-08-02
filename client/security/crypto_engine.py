@@ -3,12 +3,12 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
-from client.core.config import SCREENSHOT_ENCRYPTION_KEY
+from client.core.config import SCREENSHOT_ENCRYPTION_KEY, STORAGE_DIR
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-KEY_DIR  = Path("storage") / "keys"
+KEY_DIR  = Path(STORAGE_DIR) / "keys"
 KEY_FILE = KEY_DIR / "device.key"
 
 AES_KEY_LENGTH = 32
@@ -144,3 +144,4 @@ class CryptoEngine:
     def decrypt_token(encrypted_b64: str) -> str:
         blob = base64.b64decode(encrypted_b64.encode("ascii"))
         return CryptoEngine.decrypt_bytes(blob).decode("utf-8")
+

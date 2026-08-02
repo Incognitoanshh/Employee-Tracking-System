@@ -31,4 +31,10 @@ router.post(
     authController.refresh
 );
 
+router.post(
+    "/logout",
+    generalLimiter,
+    authController.logout
+);
+
 module.exports = router;

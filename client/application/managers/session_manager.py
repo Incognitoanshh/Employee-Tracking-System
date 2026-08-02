@@ -26,24 +26,32 @@ class SessionManager:
                 cls.device_id = str(uuid.uuid4())
         return cls.device_id
 
+    @staticmethod
+    def decode_token_payload(token):
+        """Kisi bhi JWT string se payload decode karo (signature verify nahi
+        karta — sirf local exp/claims check ke liye). None return on failure."""
+        if not token:
+            return None
+        try:
+            parts = token.split('.')
+            if len(parts) != 3:
+                return None
+            padding = 4 - len(parts[1]) % 4
+            payload_bytes = base64.urlsafe_b64decode(parts[1] + '=' * padding)
+            return json.loads(payload_bytes)
+        except Exception:
+            return None
+
     @classmethod
     def is_token_expired(cls):
         """JWT exp claim check karo locally - no server call needed"""
-        if not cls.auth_token:
+        payload = cls.decode_token_payload(cls.auth_token)
+        if payload is None:
             return True
-        try:
-            parts = cls.auth_token.split('.')
-            if len(parts) != 3:
-                return True
-            padding = 4 - len(parts[1]) % 4
-            payload_bytes = base64.urlsafe_b64decode(parts[1] + '=' * padding)
-            payload = json.loads(payload_bytes)
-            exp = payload.get('exp')
-            if exp is None:
-                return False
-            return time.time() > exp
-        except Exception:
-            return True
+        exp = payload.get('exp')
+        if exp is None:
+            return False
+        return time.time() > exp
 
     @classmethod
     def create_session(cls, employee_id, auth_token, role="employee", shift_start=None, shift_end=None):

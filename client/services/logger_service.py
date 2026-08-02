@@ -1,24 +1,23 @@
 from datetime import datetime
+import os
 import requests
 
 from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
-from client.core.config import API_BASE_URL
+from client.core.config import API_BASE_URL, STORAGE_DIR
 
 
 class LoggerService:
 
-    LOG_FILE = "storage/app.log"
-    CRITICAL_LOG_FILE = "storage/critical_errors.log"
+    LOG_FILE = os.path.join(STORAGE_DIR, "app.log")
+    CRITICAL_LOG_FILE = os.path.join(STORAGE_DIR, "critical_errors.log")
 
     @staticmethod
     def _fallback_critical_log(message: str) -> None:
         """Last-resort file sink. Never raises."""
-        import os
-
         try:
-            os.makedirs("storage", exist_ok=True)
+            os.makedirs(STORAGE_DIR, exist_ok=True)
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(LoggerService.CRITICAL_LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {message}\n")
@@ -27,10 +26,9 @@ class LoggerService:
 
     @staticmethod
     def log(message):
-        import os
         import sys
 
-        os.makedirs("storage", exist_ok=True)
+        os.makedirs(STORAGE_DIR, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Primary persistent sink
@@ -58,10 +56,10 @@ class LoggerService:
             cursor = connection.cursor()
             cursor.execute(
                 """
-                INSERT INTO pending_logs (employee_id, activity)
-                VALUES (?, ?)
+                INSERT INTO pending_logs (employee_id, activity, timestamp)
+                VALUES (?, ?, ?)
                 """,
-                (employee_id, message)
+                (employee_id, message, timestamp)
             )
             log_id = cursor.lastrowid
             connection.commit()
@@ -114,4 +112,5 @@ class LoggerService:
         if str(verbose_enabled).strip().lower() != "true":
             return
         LoggerService.log(message)
+
 
