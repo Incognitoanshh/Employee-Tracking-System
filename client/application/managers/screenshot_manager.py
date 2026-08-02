@@ -45,27 +45,80 @@ class ScreenshotManager:
             )
             return []
 
-        buffer = 300  # 5 minutes
-        available = shift_duration - 2 * buffer
+        # BUG FIX: pehle ye loop shift_start se aage random min_gap..max_gap
+        # steps leta tha aur `count` pe ruk jaata tha — yaani SAARE
+        # screenshots shift ke pehle ~20 minute me hi ho jaate the, aur uske
+        # baad poore din (8-9 ghante) ek bhi capture nahi hota tha.
+        # Example (09:00–18:00, count=3, gap 3–10 min): 09:08, 09:16, 09:22
+        # — phir 18:00 tak kuch nahi. `buffer`/`available` calculate to hote
+        # the lekin kabhi use hi nahi hote the.
+        #
+        # Ab: shift ko `count` barabar slots me baanto aur HAR slot ke andar
+        # ek random moment chuno. Isse poori shift cover hoti hai (admin ke
+        # "Screenshots per shift" label ke mutabik) aur timing phir bhi
+        # unpredictable rehti hai — employee guess nahi kar sakta.
+        #
+        # Shift ke bilkul kinare pe capture na ho (login/logout ke exact
+        # waqt pe) is liye dono taraf chhota buffer chhodte hain.
+        buffer = min(120.0, shift_duration / (count * 4))
+        window_start = shift_start + timedelta(seconds=buffer)
+        window_duration = shift_duration - 2 * buffer
 
-        if available <= 0:
+        if window_duration <= 0:
             return [shift_start + (shift_end - shift_start) / 2]
 
-        timestamps = []
-        current = shift_start + timedelta(minutes=2)
+        slot_seconds = window_duration / count
 
-        while (current < shift_end and len(timestamps) < count):
-            gap = random.randint(min_gap, _max_gap)
-            current += timedelta(seconds=gap)
-            if current < shift_end:
-                timestamps.append(current)
+        # min_gap ek FLOOR hai (do captures itne paas na hon). Agar slot
+        # max_gap se bada hai to iska matlab hai ki is count pe poori shift
+        # cover karne ke liye gap max_gap se zyada hoga — us case me admin ka
+        # `count` binding constraint hai, isliye log kar dete hain taaki
+        # admin ko dikhe ki uska max-interval effective nahi ho raha.
+        if slot_seconds > _max_gap:
+            LoggerService.log(
+                f"ScreenshotManager: screenshot_count={count} is shift ke liye "
+                f"~{int(slot_seconds // 60)} min ka gap deta hai, jo configured "
+                f"max interval ({_max_gap // 60} min) se zyada hai. Poori shift "
+                f"cover karne ke liye count badhao."
+            )
+
+        timestamps: list[datetime] = []
+        previous: datetime | None = None
+
+        for index in range(count):
+            slot_start = window_start + timedelta(seconds=index * slot_seconds)
+            slot_end = slot_start + timedelta(seconds=slot_seconds)
+
+            candidate = slot_start + timedelta(
+                seconds=random.uniform(0, slot_seconds)
+            )
+
+            # min_gap floor enforce karo — lekin apne slot se bahar mat jao.
+            if previous is not None:
+                earliest = previous + timedelta(seconds=min_gap)
+                if candidate < earliest:
+                    candidate = min(earliest, slot_end)
+
+            if candidate >= shift_end:
+                break
+
+            timestamps.append(candidate)
+            previous = candidate
 
         timestamps.sort()
 
-        LoggerService.log(
-            f"ScreenshotManager: {len(timestamps)} screenshots scheduled for shift "
-            f"{shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')}"
-        )
+        if timestamps:
+            LoggerService.log(
+                f"ScreenshotManager: {len(timestamps)} screenshots scheduled across "
+                f"shift {shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')} "
+                f"(first {timestamps[0].strftime('%H:%M')}, "
+                f"last {timestamps[-1].strftime('%H:%M')})"
+            )
+        else:
+            LoggerService.log(
+                f"ScreenshotManager: no screenshots scheduled for shift "
+                f"{shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')}"
+            )
         return timestamps
 
     @classmethod

@@ -402,7 +402,15 @@ class DashboardWindow(BaseWindow):
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=2,
+                # BUG FIX: timeout=2 tha. Employee ka laptop internet ke
+                # through VPS se baat karta hai — 2 second bahut aggressive
+                # hai, normal latency/packet-loss pe bhi request timeout ho
+                # jaati thi aur dashboard chupchaap local DB fallback pe
+                # chala jaata tha (isi wajah se "recent activity sync nahi
+                # ho rahi" wala symptom aata tha). Ye call ab background
+                # QThread me hota hai, is liye bada timeout UI ko freeze
+                # nahi karta.
+                timeout=10,
             )
             return response.json()
 
@@ -525,7 +533,7 @@ class DashboardWindow(BaseWindow):
             response = requests.get(
                 f"{API_BASE_URL}/logs/all",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=2,
+                timeout=10,   # BUG FIX: 2s tha — dekho load_dashboard_stats()
             )
             return response.json()
 
@@ -537,11 +545,20 @@ class DashboardWindow(BaseWindow):
 
     def _on_recent_logs_loaded(self, result):
         try:
-            all_logs = result.get("data", [])
+            all_logs = result.get("data", []) if isinstance(result, dict) else []
             # Filter: sirf meaningful logs dikhao
             noise = ['ConfigSyncManager', 'SchedulerService', 'SyncManager', 'ScreenshotManager']
             logs = [l for l in all_logs if not any(n in l.get('activity','') for n in noise)][:15]
-            self.activity_list.clear()
+
+            # BUG FIX: agar server ne success to diya lekin list KHAALI hai
+            # (ya sab kuch noise filter me nikal gaya), to pehle feed
+            # bilkul blank reh jaata tha — na koi row, na koi placeholder.
+            # Ab aise case me local DB fallback dikhate hain, taaki
+            # employee ko apni offline-buffered activity to dikhe.
+            if not logs:
+                self._load_logs_from_local_db()
+                return
+
             self._populate_activity_list(logs)
         except Exception as error:
             print("[API LOGS ERROR]", error)
@@ -551,12 +568,15 @@ class DashboardWindow(BaseWindow):
         try:
             conn = Database.connect()
             cur  = conn.cursor()
+            # BUG FIX: pehle yahan employee filter nahi tha — shared machine
+            # pe pichhle employee ke buffered logs bhi dikh jaate the.
             cur.execute("""
-                SELECT id, activity
+                SELECT id, activity, timestamp
                 FROM pending_logs
+                WHERE employee_id = ?
                 ORDER BY id DESC
                 LIMIT 15
-                """)
+                """, (SessionManager.employee_id,))
             rows = cur.fetchall()
             conn.close()
 
@@ -568,7 +588,25 @@ class DashboardWindow(BaseWindow):
                 self.feed_count_label.setText("0 events")
                 return
 
-            logs = [{"created_at": "", "activity": r[1]} for r in rows]
+            # BUG FIX: pehle yahan `"created_at": ""` hardcoded tha, jabki
+            # pending_logs me `timestamp` column already maujood hai. Isi
+            # wajah se jab bhi dashboard local fallback pe jaata (slow
+            # network pe aksar hota tha), HAR row bina time ke dikhti thi —
+            # "📸 · Screenshot Captured" with a blank timestamp.
+            #
+            # `local_time` flag zaroori hai: pending_logs.timestamp LOCAL
+            # time me likha jaata hai (LoggerService datetime.now() use
+            # karta hai) jabki server ka created_at UTC hota hai. Dono ko
+            # ek jaisa treat karne se local rows 5:30 ghante aage shift ho
+            # jaati thin.
+            logs = [
+                {
+                    "created_at": r[2] or "",
+                    "activity":   r[1],
+                    "local_time": True,
+                }
+                for r in rows
+            ]
             self._populate_activity_list(logs)
         except Exception as e:
             print("[LOCAL LOGS ERROR]", e)
@@ -604,33 +642,57 @@ class DashboardWindow(BaseWindow):
 
             ts = str(log.get("created_at", "") or log.get("timestamp", "") or "")
             time_part = ""
+            is_local = bool(log.get("local_time"))
 
-            # 🔥 FIX: Dynamic Timezone parser from UTC to local IST (Asia/Kolkata)
+            # BUG FIX: pehle ISO ("T" wali) branch me `time_part` SIRF us
+            # nested `if` ke andar assign hota tha jo 6 se zyada digit ke
+            # microseconds handle karta hai. Yaani har NORMAL ISO string
+            # ("2026-08-02T09:30:00Z", "...00.123Z", "...00.123456Z") ke
+            # liye time_part khaali reh jaata tha aur feed me time hi nahi
+            # dikhta tha. Abhi ye is liye chhupa hua tha kyunki server/db.js
+            # timestamps ko raw string ("2026-08-02 09:30:00") bhejta hai jo
+            # doosri branch me jaata hai — pg driver ka type-parser badalte
+            # hi poora feed bina time ke ho jaata.
+            #
+            # Ab dono formats ek hi jagah, ek hi tarike se parse hote hain.
             if ts:
                 try:
                     from zoneinfo import ZoneInfo
                     IST = ZoneInfo("Asia/Kolkata")
 
-                    # Normalize ISO strings formats
-                    if "T" in ts:
-                        ts_clean = ts.replace("Z", "+00:00")
-                        # Handle microsecond trimming if necessary for fromisoformat
-                        if "." in ts_clean and len(ts_clean.split(".")[1].split("+")[0]) > 6:
-                            parts = ts_clean.split(".")
-                            subparts = parts[1].split("+")
-                            ts_clean = f"{parts[0]}.{subparts[0][:6]}+{subparts[1]}"
-                            dt = datetime.fromisoformat(ts_clean)
-                            time_part = dt.astimezone(IST).strftime("%H:%M")
-                    else:
-                        # Clean raw datetime formats from DB strings
-                        ts_clean = ts.split(".")[0] if "." in ts else ts
-                        dt = datetime.strptime(ts_clean, "%Y-%m-%d %H:%M:%S")
-                        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-                        time_part = dt.astimezone(IST).strftime("%H:%M")
+                    ts_clean = ts.strip().replace("Z", "+00:00")
+                    if "T" not in ts_clean:
+                        ts_clean = ts_clean.replace(" ", "T", 1)
+
+                    # fromisoformat 6 se zyada fractional digits accept nahi
+                    # karta — extra digits trim kar do.
+                    if "." in ts_clean:
+                        head, frac = ts_clean.split(".", 1)
+                        offset = ""
+                        for marker in ("+", "-"):
+                            if marker in frac:
+                                idx = frac.index(marker)
+                                frac, offset = frac[:idx], frac[idx:]
+                                break
+                        ts_clean = f"{head}.{frac[:6]}{offset}"
+
+                    dt = datetime.fromisoformat(ts_clean)
+
+                    if dt.tzinfo is None:
+                        # Naive string: local DB rows already local time me
+                        # hain, server rows UTC me. Galat assume karne se
+                        # 5:30 ghante ka shift aa jaata hai.
+                        dt = dt.replace(
+                            tzinfo=datetime.now().astimezone().tzinfo
+                            if is_local else ZoneInfo("UTC")
+                        )
+
+                    time_part = dt.astimezone(IST).strftime("%H:%M")
                 except Exception as e:
                     print(f"[TIMEZONE PARSE DEBUG ERROR] string was: {ts}, error: {e}")
                     time_part = ts[11:16] if len(ts) >= 16 else ts[:5]
-    
+
+
             icon, color, label = "◾", "#94a3b8", log.get("activity", "Event")
             for key, (ic, col, lbl) in icon_map.items():
                 if key in activity_raw:

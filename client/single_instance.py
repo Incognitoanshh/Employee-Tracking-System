@@ -1,48 +1,124 @@
+"""
+Single-instance guard — ek waqt me app ki sirf EK copy chalni chahiye.
+
+BUG FIX (production blocker): pehle ye module top-level pe `import fcntl`
+karta tha. `fcntl` sirf Unix pe exist karta hai — Windows ke Python me ye
+module hai hi nahi. main.py isko module level pe import karta hai, is liye
+WINDOWS BUILD launch hote hi ModuleNotFoundError se crash ho jaati thi
+(app kabhi khulti hi nahi thi). Ab dono platforms handle hote hain:
+Windows pe `msvcrt.locking`, macOS/Linux pe `fcntl.flock`.
+
+Doosra fix: debug log path pehle hardcoded macOS path tha
+("~/Library/Application Support/ETS/..."), is liye Windows/Linux pe
+single-instance ka koi diagnostic kabhi likha hi nahi jaata tha. Ab wahi
+STORAGE_DIR use hota hai jo baaki poori app use karti hai.
+"""
+
+import atexit
 import os
 import sys
-import fcntl
-import atexit
 from datetime import datetime
 
-LOCK_FILE = os.path.join(os.path.expanduser("~"), ".ets_app.lock")
-DEBUG_LOG = os.path.expanduser("~/Library/Application Support/ETS/storage/app.log")
+from client.core.config import STORAGE_DIR
+
+if sys.platform.startswith("win"):
+    import msvcrt
+else:
+    import fcntl
+
+LOCK_FILE = os.path.join(STORAGE_DIR, "ets_app.lock")
+DEBUG_LOG = os.path.join(STORAGE_DIR, "app.log")
 
 _lock_fd = None
 
+
 def _debug(msg):
     try:
-        with open(DEBUG_LOG, "a") as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] SingleInstanceLock: {msg}\n")
+        os.makedirs(STORAGE_DIR, exist_ok=True)
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"SingleInstanceLock: {msg}\n"
+            )
     except Exception:
         pass
+
+
+def _try_acquire(fd) -> bool:
+    """Non-blocking exclusive lock. True = mil gaya, False = koi aur hold kiye hai."""
+    try:
+        if sys.platform.startswith("win"):
+            # msvcrt byte-RANGE pe lock karta hai, poori file pe nahi —
+            # isliye ek fixed byte (offset 0) lock karte hain. Process exit
+            # hote hi OS ye lock automatically release kar deta hai, to
+            # crash ke baad bhi stale lock nahi rehta.
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (IOError, OSError):
+        return False
+
+
+def _release(fd) -> None:
+    try:
+        if sys.platform.startswith("win"):
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+
 
 def ensure_single_instance():
     global _lock_fd
     pid = os.getpid()
     _debug(f"attempt by PID {pid}, lock file = {LOCK_FILE}")
 
-    _lock_fd = open(LOCK_FILE, "a+")
     try:
-        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError) as e:
-        _debug(f"PID {pid} BLOCKED — another instance holds the lock ({e}). Exiting.")
+        os.makedirs(STORAGE_DIR, exist_ok=True)
+        _lock_fd = open(LOCK_FILE, "a+")
+    except Exception as e:
+        # Agar lock file hi na khul paaye (permissions / read-only disk) to
+        # app ko block mat karo — single-instance ek convenience hai, hard
+        # requirement nahi. Warna employee ke liye app poori tarah dead ho
+        # jaati aur tracking hi band ho jaati.
+        _debug(f"PID {pid} could not open lock file ({e}) — continuing without lock.")
+        return
+
+    if not _try_acquire(_lock_fd):
+        _debug(f"PID {pid} BLOCKED — another instance holds the lock. Exiting.")
+        try:
+            _lock_fd.close()
+        except Exception:
+            pass
+        _lock_fd = None
         sys.exit(0)
 
-    _lock_fd.seek(0)
-    _lock_fd.truncate()
-    _lock_fd.write(str(pid))
-    _lock_fd.flush()
-    _debug(f"PID {pid} ACQUIRED lock — proceeding as primary instance.")
+    try:
+        # Windows pe byte 0 abhi locked hai — usse AAGE likho, warna apne hi
+        # locked byte ko overwrite karne pe error aa jaayega.
+        _lock_fd.seek(1)
+        _lock_fd.truncate(1)
+        _lock_fd.write(str(pid))
+        _lock_fd.flush()
+    except Exception:
+        pass
 
+    _debug(f"PID {pid} ACQUIRED lock — proceeding as primary instance.")
     atexit.register(_release_lock)
+
 
 def _release_lock():
     global _lock_fd
     pid = os.getpid()
     if _lock_fd:
+        _release(_lock_fd)
         try:
-            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
             _lock_fd.close()
         except Exception:
             pass
+        _lock_fd = None
     _debug(f"PID {pid} released lock on exit.")

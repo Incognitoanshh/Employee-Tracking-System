@@ -24,10 +24,23 @@ class SchedulerService(QObject):
         self._sync_interval = 60
         self._sync_failures = 0
         self._config_sync: ConfigSyncManager | None = None
+        # Jab tak ka schedule already bana hua hai. Iske baad `_sync_tick`
+        # apne aap agle din ka schedule bana deta hai (neeche dekho).
+        self._scheduled_until: datetime | None = None
+        self._rollover_counter = 0
+        self._started = False
 
 
     def start(self):
         """Login ke baad call karo — schedule generate karo aur timers lagao."""
+        # BUG FIX: start() do baar call ho sakta hai (jaise admin panel se
+        # wapas aane par). Pehle har call ek NAYA ConfigSyncManager thread
+        # bana deta tha bina purane ko stop kiye — har baar ek leaked
+        # background thread jo server ko duplicate config requests bhejta
+        # rehta tha.
+        if self._started:
+            return
+        self._started = True
         self._schedule_shift_screenshots()
         self._sync_timer.start(1000)   # har second — sync retry counter ke liye
         self._start_config_sync()
@@ -39,15 +52,18 @@ class SchedulerService(QObject):
         LoggerService.log("SchedulerService: started (shift-based mode)")
 
     def stop(self):
+        self._started = False
         self._sync_timer.stop()
 
         for t in self._pending_timers:
             t.stop()
 
         self._pending_timers.clear()
+        self._scheduled_until = None
 
         if self._config_sync:
             self._config_sync.stop()
+            self._config_sync = None
         LoggerService.log("SchedulerService: stopped")
 
     def _schedule_shift_screenshots(self):
@@ -110,10 +126,30 @@ class SchedulerService(QObject):
             shift_start = shift_start.replace(tzinfo=None)
         if shift_end.tzinfo is not None:
             shift_end = shift_end.replace(tzinfo=None)
+
+        # BUG FIX (overnight shifts): upar hum shift ki date hamesha AAJ ki
+        # date se replace karte hain. Overnight shift (e.g. 22:00–06:00) me
+        # agar abhi 00:30 baje hain, to employee KAL raat shuru hui shift ke
+        # BEECH me hai — lekin normalized window "aaj 22:00 → kal 06:00"
+        # ban jaata hai, jo abhi se ~21 ghante door hai. Result: chal rahi
+        # overnight shift ke liye ek bhi screenshot schedule nahi hota.
+        # Fix: agar pichhle din ka window `now` ko contain karta hai, to
+        # usi window ko use karo.
+        if now < shift_start:
+            previous_start = shift_start - timedelta(days=1)
+            previous_end = shift_end - timedelta(days=1)
+            if previous_start <= now < previous_end:
+                shift_start, shift_end = previous_start, previous_end
+
         effective_start = max(shift_start, now)
         if effective_start >= shift_end:
             LoggerService.log_verbose("SchedulerService: shift already ended, no screenshots scheduled")
+            # Agle din ki shift start hone par dobara try karo — warna app
+            # raat bhar chalti rahe to kal ek bhi screenshot nahi hoga.
+            self._scheduled_until = shift_start + timedelta(days=1)
             return
+
+        self._scheduled_until = shift_end
         timestamps = ScreenshotManager.generate_random_schedule(effective_start, shift_end)
 
         for ts in timestamps:
@@ -137,6 +173,7 @@ class SchedulerService(QObject):
 
 
     def _sync_tick(self):
+        self._check_shift_rollover()
         self._sync_counter += 1
         if self._sync_counter >= self._sync_interval:
             try:
@@ -151,9 +188,40 @@ class SchedulerService(QObject):
                 self._sync_interval = min(60 * (2 ** self._sync_failures), 600)
             self._sync_counter = 0
 
+    def _check_shift_rollover(self):
+        """
+        BUG FIX: `_schedule_shift_screenshots()` sirf login ke waqt EK BAAR
+        chalta tha. Real-world me employee apna laptop band nahi karta —
+        app din-raat chalti rehti hai. Uss case me pehle din ke baad kabhi
+        naya schedule generate hi nahi hota tha, yaani AGLE DIN SE ZERO
+        SCREENSHOTS (jab tak employee manually logout/login na kare).
+        Ab jaise hi current shift window khatam hota hai, agle din ka
+        schedule khud ban jaata hai.
+
+        Har second call hota hai (sync timer se) — isliye actual check
+        sirf har minute karte hain, warna bekaar ka kaam hota rahega.
+        """
+        self._rollover_counter += 1
+        if self._rollover_counter < 60:
+            return
+        self._rollover_counter = 0
+
+        if not self._scheduled_until:
+            return
+
+        if datetime.now() >= self._scheduled_until:
+            LoggerService.log("SchedulerService: shift window over — rescheduling for next shift")
+            self.reschedule()
+
     def _start_config_sync(self):
         if not SessionManager.is_authenticated:
             return
+
+        # Purana sync thread pehle band karo — warna har start() pe ek
+        # naya thread leak hota hai.
+        if self._config_sync:
+            self._config_sync.stop()
+            self._config_sync = None
 
         interval = int(
             SettingsService.get_setting("upload_interval_minutes", "5")
