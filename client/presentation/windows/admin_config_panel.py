@@ -616,11 +616,20 @@ class StatCard(QFrame):
         self.setStyleSheet(
             f"QFrame {{ background: {C['bg_surface']}; border: 1px solid {C['border']}; border-radius: 14px; }}"
         )
-        self.setMinimumHeight(100)
+        # BUG: minimumHeight 100 tha, lekin card ke andar badge (36) + value
+        # (24px font) + label + subtitle + spacing + margins milkar 157px
+        # maangte hain — aur sparkline ke saath 207px. Layout compress hota
+        # tha aur value ka upar ka hissa kat jaata tha (dashboard ke neeche
+        # wali strip me "97" aur "19464" aadhe dikhte the).
+        #
+        # Hardcoded number likhne ke bajaye layout ko hi height decide karne
+        # dete hain, taaki font ya padding badalne pe ye dobara na tootey.
+        self.setMinimumHeight(0)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 16, 18, 16)
         lay.setSpacing(8)
+        lay.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
         badge = QLabel(icon)
         badge.setFixedSize(36, 36)
@@ -2449,7 +2458,27 @@ class _EmployeesTab(QWidget):
         self._table.setHorizontalHeaderLabels([
             "Employee ID", "Username", "Role", "Status", "Last Seen", "Actions"
         ])
-        self._table.horizontalHeader().setStretchLastSection(True)
+        # BUG: yahan koi column width set hi nahi thi, is liye har column
+        # Qt ke default 100px pe rehta tha. Nateeja: header "Employee ID"
+        # khud "EMPLOYEE II" pe kat jaata tha, "Amazeinternet" -> "Amazein…",
+        # "👑 Super Admin" -> "👑 Supe…", aur date "01 Jul 20…".
+        #
+        # Actions column sabse buri thi: usme View (68px) + Manage (96px) +
+        # spacing/margins = ~184px chahiye, lekin stretch ke baad use sirf
+        # 138px milte the — Manage button seedha kat jaata tha.
+        hdr = self._table.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        widths = {0: 120, 1: 190, 2: 150, 3: 110, 4: 150, 5: 220}
+        for col, w in widths.items():
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self._table.setColumnWidth(col, w)
+        # Username ko bachi hui jagah lene do — sabse zyada variable hai.
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        # Action buttons 30px ke hain + 4px upar-neeche margin = 38px. 42px
+        # ki default row me wo thik se saans nahi le pate.
+        self._table.verticalHeader().setDefaultSectionSize(48)
+
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         root.addWidget(self._table, 1)
@@ -2629,10 +2658,10 @@ class _EmployeesTab(QWidget):
             actions_layout.setContentsMargins(6, 4, 6, 4)
             actions_layout.setSpacing(8)
 
-            view_btn = _btn("View", variant="secondary", height=30, width=68)
+            view_btn = _btn("View", variant="secondary", height=30, width=88)
             view_btn.clicked.connect(lambda _=False, e=emp: self._open_details(e))
 
-            manage_btn = _btn("Manage  ▾", variant="secondary", height=30, width=96)
+            manage_btn = _btn("Manage  ▾", variant="secondary", height=30, width=108)
             menu = QMenu(manage_btn)
             menu.setStyleSheet(
                 "QMenu{background:#111827;border:1px solid #1e2a42;border-radius:8px;"
