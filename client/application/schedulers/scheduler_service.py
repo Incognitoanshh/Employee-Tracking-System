@@ -111,9 +111,6 @@ class SchedulerService(QObject):
                 shift_end = shift_end.replace(
                     year=today.year, month=today.month, day=today.day
                 )
-                if shift_end <= shift_start:
-                    # Overnight shift (e.g. 22:00-06:00) — end agle din maano
-                    shift_end += timedelta(days=1)
             except Exception:
                 # Fallback: aaj ki date pe HH:MM format
                 try:
@@ -137,6 +134,27 @@ class SchedulerService(QObject):
             shift_start = shift_start.replace(tzinfo=None)
         if shift_end.tzinfo is not None:
             shift_end = shift_end.replace(tzinfo=None)
+
+        # ── OVERNIGHT (NIGHT SHIFT) NORMALISATION ─────────────────────────
+        #
+        # BUG (production me night-shift employees ko poora blind kar deta
+        # tha): ye adjustment pehle SIRF ISO-parse wali branch ke andar tha.
+        # Lekin config_sync_manager hamesha plain "HH:MM" store karta hai
+        # (wo `start_ist` wali ISO value ko overwrite kar deta hai), aur
+        # `datetime.fromisoformat("22:00")` ValueError deti hai — yaani
+        # asal me HAMESHA neeche wali strptime fallback branch chalti thi,
+        # jisme ye adjustment tha hi nahi.
+        #
+        # Nateeja: 22:00–06:00 shift ka window "aaj 22:00 → aaj 06:00" ban
+        # jaata tha, yaani MINUS 16 ghante. Negative window me koi slot fit
+        # nahi hota, is liye night-shift employee ka ek bhi screenshot
+        # schedule nahi hota tha. Day shift (09:00–18:00) theek chalti thi,
+        # is liye ye kabhi pakda nahi gaya.
+        #
+        # Ab ye dono branches ke BAAD ek hi jagah lagta hai. Jahan end pehle
+        # se start ke aage hai (normal day shift) wahan ye no-op hai.
+        if shift_end <= shift_start:
+            shift_end += timedelta(days=1)
 
         # BUG FIX (overnight shifts): upar hum shift ki date hamesha AAJ ki
         # date se replace karte hain. Overnight shift (e.g. 22:00–06:00) me
