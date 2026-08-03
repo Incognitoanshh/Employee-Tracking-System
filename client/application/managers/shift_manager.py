@@ -28,10 +28,29 @@ class ShiftManager:
 
     @staticmethod
     def start_shift():
+        """Local write + server sync. Purane callers ke liye jaisa tha waisa."""
+        login_time = ShiftManager.start_shift_local()
+        if login_time:
+            ShiftManager.start_shift_remote(login_time)
+
+    @staticmethod
+    def start_shift_local():
+        """Sirf local SQLite write — turant lautta hai.
+
+        Ye network wale hisse se alag isliye kiya gaya hai: employee panel
+        apne __init__ me `shifts` ki latest row padhta hai (Session Duration
+        wahin se aati hai). Jab poora start_shift() background thread pe
+        gaya, to panel row likhe jaane se PEHLE padh leta tha aur Session
+        Duration hamesha 00:00:00 dikhati thi.
+
+        Local write millisecond ka kaam hai — use UI thread pe rakhna
+        bilkul theek hai. Sirf network calls ko background me bhejna tha.
+
+        Returns: login_time string, ya None agar session hi nahi hai.
+        """
         employee_id = getattr(SessionManager, 'employee_id', None)
-        auth_token  = getattr(SessionManager, 'auth_token', None)
         if not employee_id:
-            return
+            return None
 
         login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -52,6 +71,16 @@ class ShiftManager:
             connection.close()
         except Exception:
             pass
+
+        return login_time
+
+    @staticmethod
+    def start_shift_remote(login_time):
+        """Server pe attendance record karo — dheema hissa, background ke liye."""
+        employee_id = getattr(SessionManager, 'employee_id', None)
+        auth_token  = getattr(SessionManager, 'auth_token', None)
+        if not employee_id or not login_time:
+            return
 
         # Server pe check — agar already open session hai toh naya login mat bhejo
         if ShiftManager._has_open_server_session(employee_id, auth_token):
