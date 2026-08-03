@@ -79,7 +79,13 @@ jobs:
 
       - name: Build Mac Executable
         run: |
-          pyinstaller --onefile --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --name="Amaze ETS" client/main.py
+          # --onedir (onefile nahi): onefile har launch pe poora 62MB bundle
+          # temp folder me extract karta hai — isi wajah se app khulne me
+          # kai second lagte the aur user ko 3-4 baar click karna padta tha.
+          # onedir me libraries seedha .app/Contents/ me rehti hain, koi
+          # extraction nahi. DMG me waise bhi .app hi jaata hai, is liye
+          # distribution bilkul same rehta hai.
+          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --name="Amaze ETS" client/main.py
 
       - name: Create DMG Installer
         run: |
