@@ -9,44 +9,43 @@ const authController = require(
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BUG FIX (production lockout risk):
+//  There used to be a single limiter: 10 login attempts / 15 min / IP.
+//  express-rate-limit counts per IP — and every employee in a company sits
+//  behind the same office NAT, i.e. one public IP.
 //
-//  Pehle sirf EK limiter tha: 10 login attempts / 15 min / IP.
-//  express-rate-limit IP ke hisaab se count karta hai — aur ek company ke
-//  saare employees ek hi office NAT ke peechhe, EK hi public IP se aate hain.
-//  Matlab: subah 9 baje 10 employees login kar lein, aur 11th employee ko
-//  15 minute ke liye "Too many login attempts" mil jaata — chahe usne apna
-//  password bilkul sahi daala ho. Bade office me ye har subah ek outage
-//  banta, aur employees ko lagta app hi kharab hai.
+//  So: ten people log in at 9am, and the eleventh gets "Too many login
+//  attempts" for 15 minutes even with the correct password. In a large
+//  office that is an outage every morning, and it looks to staff like the
+//  app itself is broken.
 //
-//  Ab do alag layers:
-//    1. PER-USERNAME (asli brute-force defence) — ek account pe 10 FAILED
-//       attempts / 15 min. `skipSuccessfulRequests` ki wajah se successful
-//       logins count hi nahi hote, is liye normal use kabhi limit nahi
-//       chhuता. Attacker ek account pe password guess kare to 10 pe ruk
-//       jaayega, chahe wo kitne bhi IPs se aaye.
-//    2. PER-IP (sirf DoS ceiling) — ek network se 300 requests / 15 min.
-//       Itna ooncha ki poora office aaram se login kare, lekin ek machine
-//       se automated flood phir bhi ruke.
+//  Now there are two separate layers:
+//    1. PER-USERNAME (the real brute-force defence) — 10 FAILED attempts
+//       per account / 15 min. `skipSuccessfulRequests` means successful
+//       logins are not counted at all, so normal use never approaches the
+//       limit. An attacker guessing one account's password is stopped at
+//       10 attempts no matter how many IPs they come from.
+//    2. PER-IP (a DoS ceiling only) — 300 requests / 15 min per network.
+//       High enough for a whole office to log in comfortably, low enough
+//       to stop an automated flood from a single machine.
 //
-//  NOTE: default MemoryStore process-local hai. ecosystem.config.js me
-//  `instances: 1` hai is liye abhi theek hai — agar kabhi cluster mode pe
-//  jao to shared store (Redis) chahiye hoga, warna har worker ka apna
-//  alag counter hoga.
+//  NOTE: the default MemoryStore is process-local. ecosystem.config.js sets
+//  `instances: 1`, so this is fine today — moving to cluster mode would
+//  need a shared store (Redis), otherwise each worker keeps its own count.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Layer 1 — asli brute-force protection, username pe keyed.
+// Layer 1 — the real brute-force protection, keyed on username.
 const loginUserLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
     standardHeaders: true,
     legacyHeaders: false,
-    // Sirf FAILED attempts count karo — roz ka normal login kabhi limit
-    // ke paas bhi nahi pahunchega.
+    // Count only FAILED attempts — ordinary daily logins never come
+    // anywhere near the limit.
     skipSuccessfulRequests: true,
     keyGenerator: (req) =>
         `user:${String(req.body?.username || "").trim().toLowerCase() || "unknown"}`,
-    // keyGenerator IP return nahi karta (hamesha username), is liye library
-    // ka IPv6-normalisation check yahan lagu nahi hota.
+    // keyGenerator never returns an IP (always the username), so the
+    // library's IPv6-normalisation check does not apply here.
     validate: { keyGeneratorIpFallback: false },
     message: {
         success: false,
@@ -54,7 +53,7 @@ const loginUserLimiter = rateLimit({
     },
 });
 
-// Layer 2 — network-level flood ceiling. Poore office ke liye generous.
+// Layer 2 — network-level flood ceiling. Generous enough for a whole office.
 const loginIpLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
@@ -68,9 +67,9 @@ const loginIpLimiter = rateLimit({
 
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    // BUG FIX: 100/15min bhi shared office IP pe kam tha — /refresh har
-    // client apne auto-login pe maarta hai, aur /logout har session end pe.
-    // 50 employees ka office in dono ko aaram se 100 ke paar le jaata.
+    // BUG FIX: even 100/15min was too low for a shared office IP —
+    // every client hits /refresh on auto-login and /logout at session end.
+    // An office of 50 pushes past 100 without trying.
     limit: 1000,
     standardHeaders: true,
     legacyHeaders: false,

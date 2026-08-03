@@ -6,39 +6,39 @@ types.setTypeParser(1114, (val) => val); // timestamp without time zone
 types.setTypeParser(1184, (val) => val); // timestamp with time zone
 
 // BUG FIX (attendance times off by hours):
-// `attendance.login_time` / `logout_time` `TIMESTAMP WITHOUT TIME ZONE`
-// columns hain, aur inme `NOW()` (jo timestamptz hai) insert hota hai.
-// Postgres us conversion ke liye SESSION ki timezone use karta hai. Yaani
-// stored value chupchaap us TZ pe depend karti hai jo DB/OS pe set ho.
-// Poora client code (attendance_window.py, logs_window.py, dashboard) in
-// values ko UTC MAAN kar IST me convert karta hai — agar server ki TZ UTC
-// nahi hui to har login/logout time ghanton shift ho jaata hai aur
-// Today/Week/Month buckets galat din me chale jaate hain.
+// `attendance.login_time` / `logout_time` are TIMESTAMP WITHOUT TIME ZONE
+// columns, and NOW() (a timestamptz) is inserted into them. Postgres uses
+// the SESSION timezone for that conversion, so the stored value silently
+// depends on whatever TZ the database or OS happens to have.
 //
-// Har connection pe explicitly UTC set karke ye ambiguity poori tarah
-// khatam kar dete hain — ab ye VPS/OS/postgresql.conf ki setting pe
-// depend nahi karta.
+// The whole client (attendance_window.py, logs_window.py, dashboard)
+// treats these values as UTC and converts them to IST. If the server TZ
+// is not UTC, every login/logout time shifts by hours and the
+// Today/Week/Month buckets land on the wrong day.
+//
+// Setting UTC explicitly on every connection removes the ambiguity — this
+// no longer depends on the VPS, the OS, or postgresql.conf.
 // ── POOL SIZING (1000+ employees) ────────────────────────────────────────
-//  node-pg ke defaults production ke liye khatarnak hain:
-//    max                     = 10   (bahut kam)
-//    connectionTimeoutMillis = 0    (pool bharne pe request HAMESHA ke liye
-//                                    HANG — error bhi nahi, silent freeze)
+//  node-pg's defaults are dangerous in production:
+//    max                     = 10   (far too low)
+//    connectionTimeoutMillis = 0    (when the pool is full a request HANGS
+//                                    forever — no error, just a silent freeze)
 //
-//  Load: 1000 employees har 5s /config/sync maarte hain = ~200 req/s. Aur
-//  /dashboard/me ka Promise.all EK SAATH 4 connections maangta hai — max 10
-//  pe sirf 2 concurrent requests ban paati thin, baaki queue me atak jaatin.
+//  Load: 1000 employees hitting /config/sync every 5s is ~200 req/s, and
+//  the Promise.all in /dashboard/me asks for 4 connections at once. At
+//  max 10 only 2 requests could run concurrently; the rest queued.
 //
-//  Ab max 25 (Postgres default max_connections 100 hai; 25 ek instance ke
-//  liye safe hai aur pm2 cluster me bhi jagah chhodta hai), aur 5s ka
-//  connection timeout taaki overload pe request FAIL ho — hang na kare
-//  (hang hone se client 30s tak baitha rehta aur retry storm ban jaata).
+//  Now max 25 (Postgres defaults to max_connections 100; 25 is safe for one
+//  instance and leaves room for a pm2 cluster), plus a 5s connection
+//  timeout so an overloaded request FAILS instead of hanging — a hang keeps
+//  the client waiting 30s and turns into a retry storm.
 // ─────────────────────────────────────────────────────────────────────────
 const pool = new Pool({
 
     max: parseInt(process.env.DB_POOL_MAX || "25", 10),
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
-    statement_timeout: 15000,      // ek slow query poore pool ko na roke
+    statement_timeout: 15000,      // stop one slow query from blocking the pool
 
     options: "-c timezone=UTC",
 
@@ -54,9 +54,9 @@ const pool = new Pool({
 
 });
 
-// Pool-level errors (idle client ka connection toot jaana) — bina handler
-// ke ye `error` event process crash kar deta hai. PM2 restart kar dega
-// lekin us waqt ki saari requests fail ho jaayengi.
+// Pool-level errors (an idle client losing its connection). Without a
+// handler this `error` event crashes the process. PM2 would restart it,
+// but every in-flight request fails in the meantime.
 pool.on("error", (err) => {
     console.error("[DB POOL] idle client error:", err.message);
 });
