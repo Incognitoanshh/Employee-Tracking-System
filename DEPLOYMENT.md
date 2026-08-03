@@ -300,3 +300,78 @@ screenshot permanently unreadable. It lives in GitHub Actions secrets and in
 - [ ] Stage 1 passed on real Windows
 - [ ] Stage 2 shows screenshots spread across the shift
 - [ ] Rollback artifact and DB dump identified and reachable
+
+---
+
+## Windows Defender false positive
+
+Windows Defender quarantines the build ("Threats found", app disappears
+from the folder). Confirmed on Windows Server 2022 with the 2026-08-03
+build.
+
+This is a false positive, not a compromised binary — but it is a
+rollout blocker, because it will happen on every employee machine.
+
+### Why it happens
+
+Nothing in the code is malicious. The build trips heuristics because it
+looks exactly like what heuristics are designed to catch:
+
+- unsigned executable from an unknown publisher (no reputation)
+- PyInstaller self-extracting stub (`--onefile` unpacks itself to
+  `%TEMP%` at launch — the same behaviour malware packers use)
+- captures the screen on a timer
+- registers itself for autostart in the Run key
+- uploads data to a hardcoded IP over plain HTTP
+
+Any one of these is fine. Together they read as spyware to a scanner
+that has never seen this binary before.
+
+A quarantine mid-run also produces a confusing secondary symptom: the
+app is still running, but its own executable is gone, so the next lazy
+import fails with `[Errno 22] Invalid argument: '...\Amaze ETS.exe'`.
+That error surfaces at the login screen and looks like a login bug. It
+is not — it is the quarantine.
+
+### What has already been done
+
+- `--noupx` in the Windows build. PyInstaller compresses with UPX when
+  available, and UPX packing is one of the strongest AV signals.
+  Removing it costs a few MB.
+
+This lowers the odds. It does not solve it.
+
+### The actual fix, in order of preference
+
+1. **Code-signing certificate** (recommended). An OV certificate
+   removes "unknown publisher". An EV certificate additionally grants
+   immediate SmartScreen reputation, which an OV cert has to build up
+   over time and downloads. Sign `Amaze ETS.exe` as a build step.
+   This is the only option that fixes the problem for machines outside
+   your control.
+
+2. **Defender exclusion pushed by policy.** Since these are company
+   machines, an exclusion for the install path can be deployed via GPO
+   or Intune. Works immediately and costs nothing, but only covers
+   managed machines, and a path exclusion is a real reduction in
+   endpoint security — scope it to the install directory, never to
+   `%TEMP%` or the whole user profile.
+
+3. **Submit the binary to Microsoft as a false positive**
+   (https://www.microsoft.com/en-us/wdsi/filesubmission). Free, usually
+   resolved in a few days. The catch: the verdict is tied to that exact
+   file hash, so every new build needs resubmitting. Practical for
+   tagged releases, not for routine builds.
+
+### Do not
+
+- Tell employees to disable Defender, or to add a blanket exclusion for
+  their whole Downloads folder or user profile. That trades a cosmetic
+  problem for a real one.
+
+### Until this is resolved
+
+Do not roll out to employee machines. Every install will need manual
+intervention, and asking staff to click through a malware warning to
+install monitoring software is a bad position to be in — both for
+security posture and for how the rollout is received.

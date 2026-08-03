@@ -40,32 +40,40 @@ jobs:
           echo API_BASE_URL=http://65.21.212.85:8000/api >> client\.env
           echo SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }} >> client\.env
 
-      - name: Build Windows App
+      - name: Build Windows EXE
         run: |
-          # --onedir (onefile nahi): onefile har launch pe poora ~62MB bundle
-          # %TEMP% me extract karta tha — isi wajah se app khulne me kai
-          # second lagte the aur 3-4 baar click karna padta tha. onedir me
-          # DLLs folder me hi rehte hain, koi extraction nahi.
+          # Back to --onedir? No: reverted to --onefile on request.
           #
-          # Trade-off: ab ek akela .exe nahi, ek folder hai. GitHub artifact
-          # waise bhi zip hota hai, is liye download ka experience wahi rehta
-          # hai — bas user zip extract karke andar wala exe chalayega.
-          pyinstaller --onedir --windowed --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze ETS" client/main.py
+          # onefile extracts the ~62MB bundle to %TEMP% on every launch,
+          # which is why startup was slow. onedir avoided that, but the
+          # folder layout is a bigger change to how the app is distributed.
+          #
+          # --noupx: PyInstaller uses UPX to compress the binary when UPX
+          # is on PATH. UPX-packed executables are one of the strongest
+          # signals AV heuristics look for, because real malware uses the
+          # same packer to hide its payload. Disabling it costs a few MB
+          # and removes one concrete reason to flag us.
+          #
+          # NOTE: this reduces the false-positive rate but does not fix it.
+          # An unsigned binary that screenshots the desktop and installs
+          # itself at startup will keep tripping heuristics. The only real
+          # fix is a code-signing certificate — see DEPLOYMENT.md.
+          pyinstaller --onefile --windowed --noupx --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze ETS" client/main.py
 
-      - name: Verify Windows build layout
+      - name: Verify Windows build output
         shell: bash
         run: |
-          # Build silently galat jagah output kar de to artifact khaali chala
-          # jaata hai aur pata build ke baad hi chalta hai.
-          test -f "dist/Amaze ETS/Amaze ETS.exe" || { echo "❌ exe nahi mila"; ls -R dist | head -40; exit 1; }
-          echo "✅ dist/Amaze ETS/Amaze ETS.exe maujood hai"
-          du -sh "dist/Amaze ETS"
+          # Catch a silently misplaced build here rather than after someone
+          # downloads an empty artifact.
+          test -f "dist/Amaze ETS.exe" || { echo "exe not found"; ls -R dist | head -40; exit 1; }
+          echo "OK: dist/Amaze ETS.exe"
+          du -h "dist/Amaze ETS.exe"
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ETS-Windows-App
-          path: "dist/Amaze ETS/"
+          name: ETS-Windows-EXE
+          path: "dist/Amaze ETS.exe"
 
   build-mac:
     runs-on: macos-latest
