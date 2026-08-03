@@ -6,8 +6,9 @@ from datetime import date, datetime
 from datetime import datetime, timezone, timedelta
 from PySide6.QtCore    import Qt, QThread, Signal, QDate, QTimer
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
-from PySide6.QtGui     import QFont, QColor
+from PySide6.QtGui     import QFont, QColor, QAction, QIcon
 from PySide6.QtWidgets import (
+    QSystemTrayIcon,
     QMenu,
     QScrollArea,
     QButtonGroup,
@@ -371,6 +372,20 @@ def _shadow(widget, blur=28, dy=8, alpha=70):
 
 
 _CARD_UID = [0]
+
+
+def _app_icon() -> QIcon | None:
+    """assets/icon.png — frozen build me bundle ke andar, dev me repo root se."""
+    import os
+    import sys
+    if getattr(sys, "frozen", False):
+        base = os.path.join(sys._MEIPASS, "assets")
+    else:
+        base = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))))), "assets")
+    path = os.path.join(base, "icon.png")
+    return QIcon(path) if os.path.exists(path) else None
 
 
 def _card(padding: int = 0) -> QFrame:
@@ -3091,10 +3106,11 @@ class AdminConfigPanel(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ETS — Admin Panel")
+        self.setWindowTitle("Amaze ETS — Control Center")
         self.setMinimumSize(1080, 680)
         self.resize(1300, 820)
         self._logging_out = False  # Guard flag to prevent recursion
+        self._force_close = False  # True = asli exit (tray se), minimise nahi
         self.setStyleSheet(_global_stylesheet())
 
         central = QWidget()
@@ -3198,6 +3214,8 @@ class AdminConfigPanel(QMainWindow):
 
         self.idle_tracker = IdleTracker()
         self.idle_tracker.start()
+
+        self._setup_tray()
 
     def _refresh_current_page(self):
         """Header ka Refresh — jo page khula hai usi ka data reload."""
@@ -3380,6 +3398,17 @@ class AdminConfigPanel(QMainWindow):
         except Exception as e:
             pass
 
+        # Tray hata do — warna logout ke baad bhi icon padha rehta hai aur
+        # uska menu ek band ho chuke panel ko point karta hai.
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            try:
+                tray.hide()
+                tray.deleteLater()
+            except Exception:
+                pass
+            self.tray = None
+
         SessionManager.clear_session()
 
         self.login_window = LoginWindow()
@@ -3388,10 +3417,95 @@ class AdminConfigPanel(QMainWindow):
         QMainWindow.close(self)
 
     def closeEvent(self, event):
-       
-        if self._logging_out:
+
+        if self._logging_out or self._force_close:
             event.accept()
             return
+
+        # MINIMISE TO TRAY — pehle admin panel band karte hi poora app quit
+        # ho jaata tha (QApplication.setQuitOnLastWindowClosed(True) hai).
+        # Employee panel me ye pehle se tha, admin me chhoot gaya tha.
+        #
+        # Admin ke liye ye zaroori hai kyunki panel band karne par background
+        # services (scheduler, config sync) bhi ruk jaati thin — admin ko
+        # dobara pura login karna padta tha sirf ek employee dekhne ke liye.
+        if getattr(self, "tray", None) is not None and self.tray.isVisible():
+            event.ignore()
+            self.hide()
+            if not getattr(self, "_tray_hint_shown", False):
+                self._tray_hint_shown = True
+                self.tray.showMessage(
+                    "Amaze ETS",
+                    "Panel background me chal raha hai. Tray icon se wapas kholein.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    4000,
+                )
+            return
+
+        # Tray available nahi (kuch Linux desktops) — purana behaviour
         self._stop_background_services()
         event.accept()
+
+    # ── SYSTEM TRAY ──────────────────────────────────────────────────────
+
+    def _setup_tray(self):
+        """Admin panel ka tray icon.
+
+        Employee wali `SystemTray` yahan reuse nahi ki kyunki uska menu
+        employee ke windows kholta hai (View Logs / Settings) aur uska
+        Exit employee ka session end karta hai — admin ke liye galat.
+        """
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setIcon(_app_icon() or self.windowIcon())
+        self.tray.setToolTip("Amaze ETS — Control Center")
+
+        menu = QMenu()
+        act_open = QAction("🖥  Open Control Center", menu)
+        act_open.triggered.connect(self._restore_from_tray)
+        menu.addAction(act_open)
+
+        act_refresh = QAction("↻  Refresh Current Page", menu)
+        act_refresh.triggered.connect(self._refresh_current_page)
+        menu.addAction(act_refresh)
+
+        menu.addSeparator()
+
+        act_logout = QAction("↪  Logout", menu)
+        act_logout.triggered.connect(self.logout)
+        menu.addAction(act_logout)
+
+        act_quit = QAction("🚪  Quit Amaze ETS", menu)
+        act_quit.triggered.connect(self._quit_from_tray)
+        menu.addAction(act_quit)
+
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        # macOS single-click (Trigger) deta hai, Windows aksar DoubleClick —
+        # dono handle karna padta hai warna ek platform pe icon dead lagta hai.
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self.show()
+        self.setWindowState(
+            self.windowState() & ~Qt.WindowState.WindowMinimized
+            | Qt.WindowState.WindowActive
+        )
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self):
+        self._force_close = True
+        self._stop_background_services()
+        if getattr(self, "tray", None) is not None:
+            self.tray.hide()
+        QApplication.quit()
 
