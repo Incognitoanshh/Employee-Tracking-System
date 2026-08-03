@@ -45,13 +45,12 @@ def _debug(msg):
 
 
 def _try_acquire(fd) -> bool:
-    """Non-blocking exclusive lock. True = mil gaya, False = koi aur hold kiye hai."""
+    """Non-blocking exclusive lock. True if acquired, False if held elsewhere."""
     try:
         if sys.platform.startswith("win"):
-            # msvcrt byte-RANGE pe lock karta hai, poori file pe nahi —
-            # isliye ek fixed byte (offset 0) lock karte hain. Process exit
-            # hote hi OS ye lock automatically release kar deta hai, to
-            # crash ke baad bhi stale lock nahi rehta.
+            # msvcrt locks a byte RANGE, not the whole file, so we lock a
+            # fixed byte (offset 0). The OS releases the lock as soon as the
+            # process exits, so a crash never leaves a stale lock behind.
             fd.seek(0)
             msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
         else:
@@ -81,10 +80,10 @@ def ensure_single_instance():
         os.makedirs(STORAGE_DIR, exist_ok=True)
         _lock_fd = open(LOCK_FILE, "a+")
     except Exception as e:
-        # Agar lock file hi na khul paaye (permissions / read-only disk) to
-        # app ko block mat karo — single-instance ek convenience hai, hard
-        # requirement nahi. Warna employee ke liye app poori tarah dead ho
-        # jaati aur tracking hi band ho jaati.
+        # If the lock file cannot be opened at all (permissions, read-only
+        # disk), do not block the app. Single-instance is a convenience, not
+        # a hard requirement — failing here would leave the employee with a
+        # completely dead app and no tracking at all.
         _debug(f"PID {pid} could not open lock file ({e}) — continuing without lock.")
         return
 
@@ -98,8 +97,8 @@ def ensure_single_instance():
         sys.exit(0)
 
     try:
-        # Windows pe byte 0 abhi locked hai — usse AAGE likho, warna apne hi
-        # locked byte ko overwrite karne pe error aa jaayega.
+        # On Windows byte 0 is currently locked, so write past it —
+        # overwriting our own locked byte would raise an error.
         _lock_fd.seek(1)
         _lock_fd.truncate(1)
         _lock_fd.write(str(pid))

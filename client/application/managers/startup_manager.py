@@ -9,12 +9,12 @@ APP_NAME = "ETS"
 
 class StartupManager:
     """
-    OS boot/login pe app ko automatically launch karne ke liye register
-    karta hai (Windows Registry Run key / macOS LaunchAgent).
+    Registers the app to launch automatically at OS boot/login
+    (Windows Registry Run key / macOS LaunchAgent).
 
-    Sirf PyInstaller se bane (frozen) executable ke liye kaam karta hai —
-    dev mode (`python client/main.py`) me silently skip ho jata hai, warna
-    galti se python interpreter hi startup me register ho jaata.
+    Only does anything for a frozen PyInstaller executable — in dev mode
+    (`python client/main.py`) it silently skips, otherwise the Python
+    interpreter itself would get registered at startup by mistake.
     """
 
     @staticmethod
@@ -123,29 +123,29 @@ class StartupManager:
         plist_path = StartupManager._macos_plist_path()
         exe_path = sys.executable
 
-        # BUG FIX (upgrade pe autostart chup-chaap band ho jaata tha):
-        # pehle yahan sirf `if os.path.exists(plist_path): return` tha —
-        # yaani plist file maujood hone par path check kiye bina hi return.
+        # BUG FIX (autostart silently stopped working after an upgrade):
+        # this used to be just `if os.path.exists(plist_path): return`, i.e.
+        # it returned as soon as the plist existed, without checking where
+        # that plist pointed.
         #
-        # App ka naya version install hone par (ya app rename/move hone par)
-        # executable ka path badal jaata hai, lekin purana plist waise ka
-        # waisa pada rehta tha — delete ho chuke binary ko point karta hua.
-        # launchd use load karne ki koshish karta, binary milta nahi, aur
-        # app boot pe start hona band ho jaata. Koi error kahin nahi dikhta,
-        # is liye pata bhi nahi chalta.
+        # Installing a new version (or renaming/moving the app) changes the
+        # executable path, but the old plist stayed exactly as it was —
+        # pointing at a binary that no longer exists. launchd tried to load
+        # it, found nothing, and the app stopped starting at boot. No error
+        # appeared anywhere, so nobody noticed.
         #
-        # Windows branch me ye bug nahi hai kyunki `SetValueEx` har baar
-        # value overwrite kar deta hai. macOS ko wahi behaviour chahiye.
+        # The Windows branch does not have this bug because SetValueEx
+        # overwrites the value every time. macOS needs the same behaviour.
         if os.path.exists(plist_path):
             try:
                 with open(plist_path) as f:
                     existing = f.read()
                 if f"<string>{exe_path}</string>" in existing:
-                    return  # already correct — kuch karne ki zarurat nahi
+                    return  # already correct, nothing to do
             except Exception:
-                pass  # padha nahi ja saka to neeche dobara likh denge
+                pass  # unreadable — fall through and rewrite it below
 
-            # Stale ya corrupt — purana unload karke naya likho
+            # Stale or corrupt — unload the old one and write a fresh plist
             try:
                 import subprocess
                 subprocess.run(["launchctl", "unload", plist_path],
@@ -153,7 +153,7 @@ class StartupManager:
             except Exception:
                 pass
             LoggerService.log(
-                "StartupManager: stale macOS LaunchAgent mila, refresh kar rahe hain"
+                "StartupManager: stale macOS LaunchAgent found, refreshing"
             )
 
         os.makedirs(os.path.dirname(plist_path), exist_ok=True)
@@ -181,7 +181,7 @@ class StartupManager:
             import subprocess
             subprocess.run(["launchctl", "load", plist_path], timeout=5, check=False)
         except Exception:
-            pass  # plist file agli login/boot pe automatically load ho jayega
+            pass  # the plist loads automatically at the next login/boot anyway
 
         LoggerService.log("StartupManager: macOS LaunchAgent registered")
 
