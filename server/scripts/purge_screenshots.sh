@@ -53,7 +53,7 @@ fi
 KEEP="$(mktemp)"; ORPHANS="$(mktemp)"
 trap 'rm -f "$KEEP" "$ORPHANS"' EXIT
 
-echo "=== Screenshot file purge  ($(date -Is)) ==="
+echo "=== Screenshot file purge  ($(date "+%Y-%m-%dT%H:%M:%S%z")) ==="
 echo "uploads : $UPLOAD_DIR"
 echo "database: $DB_NAME"
 

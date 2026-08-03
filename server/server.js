@@ -39,6 +39,31 @@ if (isProduction && !allowedOrigin) {
     process.exit(1);
 }
 
+// ── TRUST PROXY ──────────────────────────────────────────────────────────
+// Express reads the client address from the socket unless told otherwise.
+// Put nginx in front and every request arrives from 127.0.0.1, so the
+// per-IP rate limiter in auth.routes.js buckets the ENTIRE company into a
+// single 300-requests/15-min budget — a thousand employees exhaust that in
+// seconds and nobody can log in. That is precisely the office-wide lockout
+// the two-layer limiter was written to prevent, reintroduced by the proxy.
+//
+// This is NOT unconditional, because trusting X-Forwarded-For while port
+// 8000 is still reachable from the internet lets an attacker forge that
+// header and get a fresh rate-limit bucket per request, defeating the
+// limiter from the other direction. Both behaviours were verified.
+//
+// So: enable TRUST_PROXY=1 in .env at the same time as putting nginx in
+// front AND firewalling port 8000 to localhost. Not before.
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy) {
+    // A number means "trust this many hops", which is what one nginx in
+    // front needs. `true` would trust any forwarded chain, including a
+    // forged one.
+    const hops = Number.parseInt(trustProxy, 10);
+    app.set("trust proxy", Number.isNaN(hops) ? 1 : hops);
+    console.log(`[BOOT] trust proxy enabled (${Number.isNaN(hops) ? 1 : hops} hop)`);
+}
+
 app.use(cors({
     // Dev: keep permissive behavior unless operator provided a stricter value.
     // Prod: wildcard is blocked above; only explicit origin allowed.
