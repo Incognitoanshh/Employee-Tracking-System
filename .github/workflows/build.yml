@@ -40,15 +40,32 @@ jobs:
           echo API_BASE_URL=http://65.21.212.85:8000/api >> client\.env
           echo SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }} >> client\.env
 
-      - name: Build Windows EXE
+      - name: Build Windows App
         run: |
-          pyinstaller --onefile --windowed --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze ETS" client/main.py
+          # --onedir (onefile nahi): onefile har launch pe poora ~62MB bundle
+          # %TEMP% me extract karta tha — isi wajah se app khulne me kai
+          # second lagte the aur 3-4 baar click karna padta tha. onedir me
+          # DLLs folder me hi rehte hain, koi extraction nahi.
+          #
+          # Trade-off: ab ek akela .exe nahi, ek folder hai. GitHub artifact
+          # waise bhi zip hota hai, is liye download ka experience wahi rehta
+          # hai — bas user zip extract karke andar wala exe chalayega.
+          pyinstaller --onedir --windowed --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze ETS" client/main.py
+
+      - name: Verify Windows build layout
+        shell: bash
+        run: |
+          # Build silently galat jagah output kar de to artifact khaali chala
+          # jaata hai aur pata build ke baad hi chalta hai.
+          test -f "dist/Amaze ETS/Amaze ETS.exe" || { echo "❌ exe nahi mila"; ls -R dist | head -40; exit 1; }
+          echo "✅ dist/Amaze ETS/Amaze ETS.exe maujood hai"
+          du -sh "dist/Amaze ETS"
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ETS-Windows-EXE
-          path: "dist/Amaze ETS.exe"
+          name: ETS-Windows-App
+          path: "dist/Amaze ETS/"
 
   build-mac:
     runs-on: macos-latest
