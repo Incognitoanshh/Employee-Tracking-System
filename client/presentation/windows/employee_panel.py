@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QAbstractItemView,
 )
 
-from client.core.config import API_BASE_URL, STORAGE_DIR
+from client.core.config import API_BASE_URL, STORAGE_DIR, APP_VERSION
 from client.presentation.theme import C, R, R_SM, app_style, button, table_style, scrollbar
 from client.presentation.widgets.panel_widgets import (
     ActivityRow, Card, NavButton, PageHeader, StatCard,
@@ -48,7 +48,6 @@ from client.presentation.tray.system_tray import SystemTray
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "2.1.0"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1453,7 +1452,64 @@ class EmployeePanel(QWidget):
         event.ignore()
         self.hide()
 
+    def _drain_workers(self, timeout_ms: int = 3000) -> int:
+        """
+        Saare pages ke chal rahe network workers ka intezaar karo.
+
+        BUG FIX: pehle logout pe sirf timers/scheduler band hote the; chal
+        rahe QThread workers ko chhod diya jaata tha. Qt me agar QThread
+        object destroy ho jaye jab thread abhi chal raha ho, to Qt
+        "QThread: Destroyed while thread is still running" ke saath
+        std::terminate() call karta hai — app turant crash. Slow ya down
+        server pe (jahan request 10-30s tak latak sakti hai) logout dabate
+        hi crash ka poora chance banta tha.
+
+        Ab har worker ko bounded wait dete hain. Timeout ke baad bhi na ruke
+        to usse chhod dete hain (terminate() nahi karte — wo aur khatarnak
+        hai); us waqt tak uske callbacks disconnect ho chuke hote hain.
+        """
+        pending = []
+        for page in getattr(self, "pages", {}).values():
+            pending.extend(getattr(page, "_workers", []) or [])
+        for attr in ("_net_worker", "_shot_worker", "_sync_worker"):
+            worker = getattr(self, attr, None)
+            if worker is not None:
+                pending.append(worker)
+
+        still_running = 0
+        for worker in pending:
+            try:
+                if not worker.isRunning():
+                    continue
+                # Callbacks pehle kaato — warna finished/error signal ek
+                # aadhe-destroyed widget pe pahunch sakta hai.
+                for signal in ("done", "fail", "finished", "error"):
+                    sig = getattr(worker, signal, None)
+                    if sig is not None:
+                        try:
+                            sig.disconnect()
+                        except (RuntimeError, TypeError):
+                            pass
+                worker.requestInterruption()
+                if not worker.wait(timeout_ms):
+                    still_running += 1
+            except RuntimeError:
+                # Worker already delete ho chuka — koi baat nahi.
+                pass
+        return still_running
+
     def _stop_everything(self):
+        # Workers pehle — timers/scheduler band karne se pehle, taaki koi
+        # naya worker start na ho aur chal rahe complete ho jayen.
+        for timer in getattr(self, "_timers", []):
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        leftover = self._drain_workers()
+        if leftover:
+            print(f"[PANEL] {leftover} worker(s) timeout ke baad bhi chal rahe hain")
+
         for timer in getattr(self, "_timers", []):
             try:
                 timer.stop()

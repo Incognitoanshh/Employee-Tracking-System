@@ -40,7 +40,7 @@ from client.application.managers.session_manager import SessionManager
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
-from client.core.config import API_BASE_URL
+from client.core.config import API_BASE_URL, APP_VERSION
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -318,12 +318,20 @@ def _track_worker(workers_list: list, w) -> None:
     """
     workers_list.append(w)
 
-    def _cleanup(*_args):
-        if w in workers_list:
-            workers_list.remove(w)
+    # RACE FIX: cleanup ko QThread ke BUILT-IN `finished` se jodte hain, aur
+    # remove karne ke liye deleteLater() ka intezaar karte hain — taaki
+    # main thread pe queued `result` delivery ke waqt worker zinda rahe.
+    # Pehle cleanup custom `finished` pe tha aur worker turant list se hat
+    # jaata tha; GC use uda deta tha aur pending slot call drop ho jaati.
+    def _cleanup():
+        def _drop():
+            if w in workers_list:
+                workers_list.remove(w)
+        # Ek event-loop turn ke baad hataao — tab tak `result`/`error`
+        # deliver ho chuka hoga.
+        QTimer.singleShot(0, _drop)
 
     w.finished.connect(_cleanup)
-    w.error.connect(_cleanup)
 
 
 def _btn(text: str, variant: str = "secondary", height: int = 36, width: int | None = None) -> QPushButton:
@@ -545,8 +553,19 @@ def _export_to_csv(filename: str, headers: list[str], rows: list[list]) -> bool:
 
 
 class _FetchWorker(QThread):
-    finished = Signal(dict)
-    error    = Signal(str)
+    # RACE FIX: pehle is signal ka naam `finished` tha, jo QThread ke
+    # BUILT-IN `finished` signal ko shadow karta tha. `_track_worker()` bhi
+    # `finished` pe hi cleanup connect karta hai — to sequence banti thi:
+    #   run() -> self.finished.emit(data)   [main thread pe QUEUE hota hai]
+    #   run() return -> QThread apna finished emit karta hai
+    #   _cleanup chalta hai -> worker list se hat jaata hai
+    #   koi reference nahi bachta -> Python worker ko GC kar deta hai
+    #   ...aur queued `_populate(data)` call CHUP-CHAAP DROP ho jaati hai.
+    # Nateeja: table khali, koi error nahi, koi log nahi. Kaunsa tab khali
+    # rahega ye GC timing pe depend karta tha — production me ye "kabhi
+    # kabhi Screenshots tab khali aata hai" jaisa random bug banta.
+    result = Signal(dict)
+    error  = Signal(str)
 
     def __init__(self, url: str, params: dict | None = None):
         super().__init__()
@@ -561,14 +580,14 @@ class _FetchWorker(QThread):
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=10,
             )
-            self.finished.emit(r.json())
+            self.result.emit(r.json())
         except Exception as e:
             self.error.emit(str(e))
 
 
 class _PostWorker(QThread):
-    finished = Signal(dict)
-    error    = Signal(str)
+    result = Signal(dict)      # QThread.finished ko shadow na karo (upar dekho)
+    error  = Signal(str)
 
     def __init__(self, url: str, body: dict):
         super().__init__()
@@ -583,7 +602,7 @@ class _PostWorker(QThread):
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=10,
             )
-            self.finished.emit(r.json())
+            self.result.emit(r.json())
         except Exception as e:
             self.error.emit(str(e))
 
@@ -597,8 +616,8 @@ class _ExportWorker(QThread):
     Ab ye worker saare pages ghoom kar poora filtered data laata hai
     (sane cap ke saath, taaki 10,000 employees pe browser/DB na mare).
     """
-    finished = Signal(list)
-    error    = Signal(str)
+    result = Signal(list)      # QThread.finished ko shadow na karo
+    error  = Signal(str)
 
     MAX_ROWS = 5000
 
@@ -625,14 +644,14 @@ class _ExportWorker(QThread):
                 if len(batch) < self._page_size or len(rows) >= total:
                     break
                 page += 1
-            self.finished.emit(rows[: self.MAX_ROWS])
+            self.result.emit(rows[: self.MAX_ROWS])
         except Exception as e:
             self.error.emit(str(e))
 
 
 class _DeleteWorker(QThread):
-    finished = Signal(dict)
-    error = Signal(str)
+    result = Signal(dict)      # QThread.finished ko shadow na karo
+    error  = Signal(str)
 
     def __init__(self, url: str):
         super().__init__()
@@ -649,7 +668,7 @@ class _DeleteWorker(QThread):
             data = r.json()
 
             if r.ok:
-                self.finished.emit(data)
+                self.result.emit(data)
             else:
                 self.error.emit(
                     data.get("message", "Delete failed")
@@ -806,7 +825,7 @@ class _ConfigTab(QWidget):
     def _load_employees(self):
         self._status_label.setText("Employees load ho rahe hain…")
         w = _FetchWorker(f"{API_BASE_URL}/admin/employees")
-        w.finished.connect(self._on_employees_loaded)
+        w.result.connect(self._on_employees_loaded)
         w.error.connect(lambda e: self._status_label.setText(f"Error: {e}"))
         _track_worker(self._workers, w)
         w.start()
@@ -829,7 +848,7 @@ class _ConfigTab(QWidget):
     def _on_employee_changed(self):
         emp_id = self._emp_combo.currentData() or "global"
         w = _FetchWorker(f"{API_BASE_URL}/admin/config/{emp_id}")
-        w.finished.connect(self._populate_form)
+        w.result.connect(self._populate_form)
         w.error.connect(lambda e: self._status_label.setText(f"Config load error: {e}"))
         _track_worker(self._workers, w)
         w.start()
@@ -892,7 +911,7 @@ class _ConfigTab(QWidget):
         self._save_btn.setText("Saving…")
         w = _PostWorker(f"{API_BASE_URL}/admin/config", body)
 
-        w.finished.connect(self._on_save_done)
+        w.result.connect(self._on_save_done)
         w.error.connect(lambda e: (
             self._status_label.setText(f"❌ Error: {e}"),
             self._save_btn.setEnabled(True),
@@ -927,7 +946,7 @@ class _ConfigTab(QWidget):
             return
 
         w = _PostWorker(f"{API_BASE_URL}/admin/force-logout", {"employee_id": emp_id})
-        w.finished.connect(lambda d: self._status_label.setText(
+        w.result.connect(lambda d: self._status_label.setText(
             "✅ Force logout set!" if d.get("success") else f"❌ {d.get('error')}"
         ))
         w.error.connect(lambda e: self._status_label.setText(f"❌ {e}"))
@@ -1031,7 +1050,7 @@ class _ScreenshotsTab(QWidget):
             dt = self._date_filter.date().toString("yyyy-MM-dd")
             params["date"] = dt
         w = _FetchWorker(f"{API_BASE_URL}/admin/screenshots", params)
-        w.finished.connect(self._populate)
+        w.result.connect(self._populate)
         w.error.connect(lambda e: print("Screenshots error:", e))
         _track_worker(self._workers, w)
         w.start()
@@ -1274,7 +1293,7 @@ class _DashboardTab(QWidget):
 
     def _load_charts(self):
         w = _FetchWorker(f"{API_BASE_URL}/dashboard/charts")
-        w.finished.connect(self._on_charts)
+        w.result.connect(self._on_charts)
         w.error.connect(lambda e: print("Charts error:", e))
         _track_worker(self._workers, w)
         w.start()
@@ -1323,7 +1342,7 @@ class _DashboardTab(QWidget):
         url = f"{API_BASE_URL}/dashboard/summary"
         w = _FetchWorker(url)
 
-        w.finished.connect(self._on_summary)
+        w.result.connect(self._on_summary)
         w.error.connect(lambda e: print("[SUMMARY ERROR]", e))
         _track_worker(self._workers, w)
         w.start()
@@ -1331,7 +1350,7 @@ class _DashboardTab(QWidget):
     def _load_feed(self):
         w = _FetchWorker(f"{API_BASE_URL}/dashboard/recent-activity", params={"limit": 50})
 
-        w.finished.connect(self._on_feed)
+        w.result.connect(self._on_feed)
         w.error.connect(lambda e: print("Dashboard feed error:", e))
         _track_worker(self._workers, w)
         w.start()
@@ -1520,7 +1539,7 @@ class _LogsTab(QWidget):
             params["date"] = dt
 
         w = _FetchWorker(f"{API_BASE_URL}/admin/logs", params)
-        w.finished.connect(self._populate)
+        w.result.connect(self._populate)
         w.error.connect(lambda e: print("Logs error:", e))
         _track_worker(self._workers, w)
         w.start()
@@ -1579,7 +1598,7 @@ class _LogsTab(QWidget):
             QMessageBox.warning(self, "Export failed", str(e))
 
         w = _ExportWorker(f"{API_BASE_URL}/admin/logs", params, page_size=50)
-        w.finished.connect(_done)
+        w.result.connect(_done)
         w.error.connect(_fail)
         _track_worker(self._workers, w)
         w.start()
@@ -1697,7 +1716,7 @@ class _AttendanceTab(QWidget):
         if self._user_searched:
             params["date"] = self._date_filter.date().toString("yyyy-MM-dd")
         w = _FetchWorker(f"{API_BASE_URL}/attendance/all", params)
-        w.finished.connect(self._populate)
+        w.result.connect(self._populate)
         w.error.connect(lambda e: print("Attendance error:", e))
         _track_worker(self._workers, w)
         w.start()
@@ -1801,7 +1820,7 @@ class _AttendanceTab(QWidget):
             QMessageBox.warning(self, "Export failed", str(e))
 
         w = _ExportWorker(f"{API_BASE_URL}/attendance/all", params, page_size=50)
-        w.finished.connect(_done)
+        w.result.connect(_done)
         w.error.connect(_fail)
         _track_worker(self._workers, w)
         w.start()
@@ -1930,7 +1949,7 @@ class EmployeeDetailsDialog(QDialog):
 
         url = f"{API_BASE_URL}/admin/employee/{emp_id}"
         w = _FetchWorker(url)
-        w.finished.connect(self._on_details)
+        w.result.connect(self._on_details)
         # Guard to prevent popup spam on worker errors
         def _on_worker_error(e: str):
             if self._token_error_shown:
@@ -2161,7 +2180,7 @@ class _EmployeesTab(QWidget):
         if self._search_text:
             params["search"] = self._search_text
         w = _FetchWorker(f"{API_BASE_URL}/admin/employees", params)
-        w.finished.connect(self._on_employees_loaded)
+        w.result.connect(self._on_employees_loaded)
         w.error.connect(lambda e: print("Employees load error:", e))
         _track_worker(self._workers, w)
         w.start()
@@ -2404,7 +2423,7 @@ class _EmployeesTab(QWidget):
             return
 
         w = _PostWorker(f"{API_BASE_URL}/admin/force-logout", {"employee_id": emp_id})
-        w.finished.connect(lambda d: QMessageBox.information(
+        w.result.connect(lambda d: QMessageBox.information(
             self,
             "Force Logout",
             "✅ Force logout set!" if d.get('success') else f"❌ {d.get('error')}"
@@ -2424,7 +2443,7 @@ class _EmployeesTab(QWidget):
             f"{API_BASE_URL}/admin/toggle-verbose-logging",
             {"employee_id": emp_id, "verbose_logging": new_state}
         )
-        w.finished.connect(lambda d: (
+        w.result.connect(lambda d: (
             self._load_employees() if d.get("success")
             else QMessageBox.warning(self, "Error", f"❌ {d.get('error', 'Toggle failed')}")
         ))
@@ -2469,7 +2488,7 @@ class _EmployeesTab(QWidget):
                     d.get("message") or d.get("error") or "Unknown error"
                 )
 
-        w.finished.connect(_done)
+        w.result.connect(_done)
         w.error.connect(lambda e: QMessageBox.warning(self, "Role change failed", str(e)))
         _track_worker(self._workers, w)
         w.start()
@@ -2506,7 +2525,7 @@ class _EmployeesTab(QWidget):
                     d.get("message") or d.get("error") or "Unknown error"
                 )
 
-        w.finished.connect(_on_deleted)
+        w.result.connect(_on_deleted)
         w.error.connect(lambda e: QMessageBox.warning(self, "Delete failed", str(e)))
 
         _track_worker(self._workers, w)
@@ -2596,7 +2615,7 @@ class _EmployeesTab(QWidget):
                         d.get("message") or d.get("error") or "Unknown error"
                     )
 
-            worker.finished.connect(_on_created)
+            worker.result.connect(_on_created)
 
             worker.error.connect(
                 lambda e: QMessageBox.warning(
@@ -2699,16 +2718,30 @@ class _Sidebar(QFrame):
 
         role_row = QHBoxLayout()
         role_row.setSpacing(10)
-        avatar = QLabel("A")
+        # BUG FIX: pehle yahan "A" / "Administrator" / "Full Access"
+        # HARDCODED tha — chahe koi bhi login kare, sidebar hamesha yehi
+        # dikhata tha. Header chip me sahi values (EMP001 / Super Admin)
+        # aati thin, to ek hi screen pe do alag identities dikhti thin.
+        # Ab asli session se.
+        display_name = (getattr(SessionManager, "full_name", None)
+                        or getattr(SessionManager, "employee_id", None)
+                        or "Administrator")
+        actual_role = getattr(SessionManager, "role", "admin")
+        role_text = {
+            "super_admin": "Super Admin  ·  Full Access",
+            "admin": "Admin  ·  Employee Management",
+        }.get(actual_role, "Admin")
+
+        avatar = QLabel(display_name[:1].upper())
         avatar.setFixedSize(32, 32)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet(f"background:{C['accent']}; color:white; border-radius:16px; font-weight:700;")
 
         role_col = QVBoxLayout()
         role_col.setSpacing(0)
-        name = QLabel("Administrator")
+        name = QLabel(display_name)
         name.setStyleSheet(f"color:{C['text_primary']}; font-size:12px; font-weight:700; background:transparent;")
-        role = QLabel("Full Access")
+        role = QLabel(role_text)
         role.setStyleSheet(f"color:{C['text_muted']}; font-size:10px; background:transparent;")
         role_col.addWidget(name)
         role_col.addWidget(role)
@@ -2897,6 +2930,11 @@ class AdminConfigPanel(QMainWindow):
         self._screenshots_tab = _ScreenshotsTab()
         self._logs_tab        = _LogsTab()
 
+        # Workers ka intezaar timers band karne ke baad, destroy se pehle.
+        leftover = self._drain_workers()
+        if leftover:
+            print(f"[ADMIN] {leftover} worker(s) timeout ke baad bhi chal rahe hain")
+
         for tab in (
             self._dashboard_tab,
             self._config_tab,
@@ -2917,7 +2955,7 @@ class AdminConfigPanel(QMainWindow):
         )
         sb = QHBoxLayout(status)
         sb.setContentsMargins(28, 0, 28, 0)
-        ver = QLabel("ETS Admin Console v2.1.0")
+        ver = QLabel(f"ETS Admin Console v{APP_VERSION}")
         ver.setStyleSheet(f"color:{C['text_muted']};font-size:11px;border:none;background:transparent;")
         self._status_server = QLabel("●  Connected to Production Server")
         self._status_server.setStyleSheet(
@@ -3008,7 +3046,7 @@ class AdminConfigPanel(QMainWindow):
             QMessageBox.warning(self, "Sync failed", str(error))
 
         worker = _FetchWorker(f"{API_BASE_URL}/health")
-        worker.finished.connect(ok)
+        worker.result.connect(ok)
         worker.error.connect(fail)
         _track_worker(getattr(self, "_workers", []), worker)
         self._workers = getattr(self, "_workers", [])
@@ -3021,6 +3059,42 @@ class AdminConfigPanel(QMainWindow):
 
     def capture_screenshot(self):
         result = ScreenshotManager.capture_screenshot()
+
+    def _drain_workers(self, timeout_ms: int = 3000) -> int:
+        """
+        Chal rahe network workers ka bounded intezaar (logout se pehle).
+
+        BUG FIX: Qt me chalte hue QThread ka object destroy hone par
+        "QThread: Destroyed while thread is still running" -> std::terminate
+        -> app crash. Admin panel har tab pe workers banata hai; slow server
+        pe logout dabate hi ye crash trigger ho sakta tha.
+        """
+        pending = []
+        for attr in ("_dashboard_tab", "_config_tab", "_employees_tab",
+                     "_attendance_tab", "_screenshots_tab", "_logs_tab"):
+            tab = getattr(self, attr, None)
+            if tab is not None:
+                pending.extend(getattr(tab, "_workers", []) or [])
+        pending.extend(getattr(self, "_workers", []) or [])
+
+        still_running = 0
+        for worker in pending:
+            try:
+                if not worker.isRunning():
+                    continue
+                for signal in ("finished", "error"):
+                    sig = getattr(worker, signal, None)
+                    if sig is not None:
+                        try:
+                            sig.disconnect()
+                        except (RuntimeError, TypeError):
+                            pass
+                worker.requestInterruption()
+                if not worker.wait(timeout_ms):
+                    still_running += 1
+            except RuntimeError:
+                pass
+        return still_running
 
     def _stop_background_services(self):
         """Sirf timers/threads/workers rokta hai — session ko touch nahi

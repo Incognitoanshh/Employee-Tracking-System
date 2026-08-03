@@ -42,13 +42,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from client.core.config import API_BASE_URL, STORAGE_DIR
+from client.core.config import API_BASE_URL, STORAGE_DIR, APP_VERSION
 from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
 
 IST = timezone(timedelta(hours=5, minutes=30))
-APP_VERSION = "1.0"
 
 
 # ---------------------------------------------------------------------------

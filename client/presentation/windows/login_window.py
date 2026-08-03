@@ -182,7 +182,15 @@ class LoginWindow(BaseWindow):
 
         # ── Version ──────────────────────────────────────────
         card_layout.addSpacing(10)
-        version_label = QLabel("v1.0  ·  Windows  ·  IST")
+        # BUG FIX: "Windows" hardcoded tha — macOS pe bhi "Windows" dikhta
+        # tha, aur version "v1.0" tha jabki client v2.1.0 hai. Support ticket
+        # pe employee jo version batata, wo hamesha galat hota.
+        import platform as _platform
+        _os = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}.get(
+            _platform.system(), _platform.system()
+        )
+        from client.core.config import APP_VERSION
+        version_label = QLabel(f"v{APP_VERSION}  ·  {_os}  ·  IST")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setStyleSheet(
             "color: #334155; font-size: 11px; background: transparent;"

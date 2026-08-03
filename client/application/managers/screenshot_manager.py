@@ -6,6 +6,7 @@ import uuid
 
 import pyautogui
 import requests
+from PIL import Image
 
 from client.application.managers.session_manager import SessionManager
 from client.application.managers.sync_manager import SyncManager
@@ -202,9 +203,35 @@ class ScreenshotManager:
             # Encrypted (.enc) version hi local disk pe save hoti hai, aur wahi
             # (.enc) server ko bhi upload hoti hai. Decrypt sirf app se open
             # karte waqt hota hai (screenshot_preview_window.py).
+            # ── STORAGE FIX ────────────────────────────────────────────
+            #  Pehle har capture full-resolution PNG me save hoti thi.
+            #  Production pe measure kiya: average .enc file 3.5 MB.
+            #      12 screenshots/din  = 41 MB per employee per din
+            #      1 saal              = ~10 GB har employee ke laptop pe
+            #      1000 employees      = ~41 GB/din server pe
+            #
+            #  Monitoring ke liye full 4K PNG ki zarurat hai hi nahi — screen
+            #  padhne laayak honi chahiye, bas. Ab: lambi side ko
+            #  SCREENSHOT_MAX_WIDTH tak scale karke JPEG me save karte hain.
+            #  Preview window QPixmap se load karta hai jo format khud
+            #  detect kar leta hai, to decrypt/display bina badle chalta hai.
+            # ───────────────────────────────────────────────────────────
             screenshot = pyautogui.screenshot()
+
+            max_width = int(os.getenv("SCREENSHOT_MAX_WIDTH", "1920"))
+            quality   = int(os.getenv("SCREENSHOT_JPEG_QUALITY", "75"))
+            if max_width > 0 and screenshot.width > max_width:
+                ratio = max_width / float(screenshot.width)
+                screenshot = screenshot.resize(
+                    (max_width, max(1, int(screenshot.height * ratio))),
+                    Image.LANCZOS,
+                )
+
             buf = io.BytesIO()
-            screenshot.save(buf, format="PNG")
+            # JPEG ko RGB chahiye — macOS/Windows kabhi RGBA deta hai.
+            if screenshot.mode not in ("RGB", "L"):
+                screenshot = screenshot.convert("RGB")
+            screenshot.save(buf, format="JPEG", quality=quality, optimize=True)
             png_bytes = buf.getvalue()
 
             # Encrypted file local storage pe save karo
@@ -212,7 +239,10 @@ class ScreenshotManager:
             enc_filepath = os.path.join(cls.STORAGE_PATH, enc_filename)
             CryptoEngine.save_encrypted(png_bytes, enc_filepath)
 
-            LoggerService.log(f"SCREENSHOT CAPTURED : {enc_filepath}")
+            LoggerService.log(
+                f"SCREENSHOT CAPTURED : {enc_filepath} "
+                f"({len(png_bytes) // 1024} KB)"
+            )
 
             # Local DB mein record karo
             connection = Database.connect()
