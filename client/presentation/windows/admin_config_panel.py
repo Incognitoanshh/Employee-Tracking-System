@@ -122,7 +122,20 @@ def _parse_server_ts(ts) -> datetime | None:
                 i = frac.index(marker)
                 frac, offset = frac[:i], frac[i:]
                 break
-        cleaned = f"{head}.{frac[:6]}{offset}"
+        # BUG FIX (tables me kuch timestamps raw dikhte the):
+        # Python 3.10 ka `fromisoformat` sirf 3 ya 6 fractional digits
+        # accept karta hai — 3.11+ lenient hai. Postgres trailing zeros
+        # trim kar deta hai, to values aksar 5 digit ki aati hain
+        # (jaise "2026-08-03 06:48:13.34181"). Build 3.10 pe hota hai,
+        # is liye un rows pe parse fail hoti thi aur _fmt_ts raw string
+        # laut deta tha — usi table me kuch rows "03 Aug 2026 09:44 PM"
+        # aur kuch "2026-08-03 06:48:13.34181" dikhte the.
+        #
+        # Dev machines pe 3.11+ hone ki wajah se ye kabhi reproduce nahi
+        # hota tha, sirf built app me dikhta tha.
+        #
+        # Sirf truncate karna kaafi nahi — 6 tak PAD karna zaroori hai.
+        cleaned = f"{head}.{frac[:6].ljust(6, '0')}{offset}"
     try:
         dt = datetime.fromisoformat(cleaned)
     except Exception:
@@ -230,15 +243,29 @@ def _global_stylesheet() -> str:
         selection-background-color: {C['accent_soft']};
         selection-color: {C['text_primary']};
     }}
-    QTableWidget::item {{ padding: 6px 10px; border-bottom: 1px solid {C['border']}; }}
-    QHeaderView::section {{
-        background: {C['bg_surface_alt']};
-        color: {C['text_secondary']};
-        padding: 10px 10px;
+    /* Row separator halka rakha hai — border wali line har row pe bahut
+       loud lagti thi. Zebra striping (alternate-background) hi structure
+       de deti hai, uske upar full-contrast line shor banti hai. */
+    QTableWidget::item {{
+        padding: 10px 12px;
         border: none;
-        border-bottom: 1px solid {C['border']};
-        font-weight: 600;
-        font-size: 12px;
+        border-bottom: 1px solid {C['bg_surface_alt']};
+    }}
+    QTableWidget::item:selected {{
+        background: {C['accent_soft']};
+        color: {C['text_primary']};
+    }}
+    QTableWidget::item:hover {{ background: {C['bg_elevated']}; }}
+    QHeaderView::section {{
+        background: {C['bg_app']};
+        color: {C['text_muted']};
+        padding: 12px 12px;
+        border: none;
+        border-bottom: 1px solid {C['border_light']};
+        font-weight: 700;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
     }}
     QTableCornerButton::section {{ background: {C['bg_surface_alt']}; border: none; }}
 
@@ -386,6 +413,63 @@ def _app_icon() -> QIcon | None:
                 os.path.dirname(os.path.abspath(__file__))))), "assets")
     path = os.path.join(base, "icon.png")
     return QIcon(path) if os.path.exists(path) else None
+
+
+def _tune_table(table: "QTableWidget"):
+    """Har tab ki table pe ek jaisa polish.
+
+    Pehle har tab apni table alag alag configure karti thi, is liye row
+    height, grid aur focus-rectangle teeno pages pe alag dikhte the.
+    """
+    table.setAlternatingRowColors(True)
+    table.setShowGrid(False)
+    table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(42)   # rows tang lag rahi thin
+    table.setFocusPolicy(Qt.FocusPolicy.NoFocus)       # dotted focus box hata do
+    table.setWordWrap(False)
+    table.horizontalHeader().setHighlightSections(False)
+    table.horizontalHeader().setFixedHeight(40)
+    # Header default center-aligned hota hai lekin cells left-aligned hain —
+    # dono match karne chahiye, warna column ka text header se khisak kar
+    # dikhta hai.
+    table.horizontalHeader().setDefaultAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    return table
+
+
+def _cell(text: str, *, mono: bool = False, muted: bool = False,
+          align_right: bool = False, tooltip: str | None = None):
+    """Ek styled read-only cell."""
+    item = QTableWidgetItem(text)
+    if mono:
+        f = QFont("SF Mono, Menlo, Consolas, monospace")
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        f.setPointSize(11)
+        item.setFont(f)
+    if muted:
+        item.setForeground(QColor(C["text_muted"]))
+    if align_right:
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    else:
+        item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    if tooltip:
+        item.setToolTip(tooltip)
+    return item
+
+
+def _short_filename(name: str) -> str:
+    """EMP002-1785773657379-1263bfcf-....enc -> '1263bfcf'
+
+    Poora encrypted filename column me padha hi nahi jaata tha — 60+
+    characters ka UUID blob. Employee prefix bhi bekaar hai kyunki
+    Employee ka apna column hai. Sirf chhota unique handle dikhate hain;
+    poora naam tooltip me rehta hai (aur download UserRole se hota hai).
+    """
+    stem = name[:-4] if name.endswith(".enc") else name
+    parts = stem.split("-")
+    if len(parts) >= 3:
+        return parts[2][:8]
+    return stem[:32]
 
 
 def _card(padding: int = 0) -> QFrame:
@@ -1211,22 +1295,18 @@ class _ScreenshotsTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["ID", "Employee", "File", "Timestamp"])
+        self._table = _tune_table(QTableWidget(0, 4))
+        self._table.setHorizontalHeaderLabels(["ID", "Employee", "File", "Captured"])
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 120)
-        self._table.setColumnWidth(1, 100)
-        self._table.setColumnWidth(3, 200)
+        self._table.setColumnWidth(0, 70)
+        self._table.setColumnWidth(1, 110)
+        self._table.setColumnWidth(3, 210)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setAlternatingRowColors(True)
-        self._table.setShowGrid(False)
-        self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(38)
         self._table.cellDoubleClicked.connect(self._open_preview)
         root.addWidget(self._table, 1)
 
@@ -1273,15 +1353,17 @@ class _ScreenshotsTab(QWidget):
         total = data.get("total", 0)
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
-            self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
-            item = QTableWidgetItem(row.get("file_name", ""))
-            item.setData( Qt.ItemDataRole.UserRole,row.get("file_name", ""))
+            fname = row.get("file_name", "")
+            self._table.setItem(i, 0, _cell(str(row.get("id", "")), mono=True, muted=True))
+            self._table.setItem(i, 1, _cell(row.get("employee_id", ""), mono=True))
+            # Poora .enc naam tooltip me — column me chhota handle.
+            item = _cell(_short_filename(fname), mono=True, tooltip=fname)
+            item.setData(Qt.ItemDataRole.UserRole, fname)
             self._table.setItem(i, 2, item)
             # BUG FIX: pehle yahan `ts = ...` assignment `if dt.tzinfo is
             # None:` block ke ANDAR thi — tz-aware timestamp par timestamp
             # kabhi format hi nahi hota tha. Ab shared helper.
-            self._table.setItem(i, 3, QTableWidgetItem(_fmt_ts(row.get("created_at"))))
+            self._table.setItem(i, 3, _cell(_fmt_ts(row.get("created_at")), muted=True))
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 20 < total)
@@ -1311,7 +1393,13 @@ class _ScreenshotsTab(QWidget):
 
         screenshot_id = id_item.text()
         employee_id = emp_item.text() if emp_item else "?"
-        filename = file_item.text() if file_item else "?"
+        # File column ab chhota handle dikhata hai ("1263bfcf"), poora
+        # naam UserRole me hai. Preview window ko ASLI filename chahiye —
+        # display text bhejne se wo galat file maangta.
+        filename = "?"
+        if file_item:
+            filename = (file_item.data(Qt.ItemDataRole.UserRole)
+                        or file_item.text())
         timestamp = ts_item.text() if ts_item else "?"
 
         self.preview_window = ScreenshotPreviewWindow(
@@ -1702,22 +1790,18 @@ class _LogsTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = QTableWidget(0, 4)
+        self._table = _tune_table(QTableWidget(0, 4))
         self._table.setHorizontalHeaderLabels(["ID", "Employee", "Activity", "Timestamp"])
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 60)
-        self._table.setColumnWidth(1, 90)
-        self._table.setColumnWidth(3, 200)
+        self._table.setColumnWidth(0, 80)   # 60 pe 4-digit ID "27…" ho jaati thi
+        self._table.setColumnWidth(1, 110)
+        self._table.setColumnWidth(3, 210)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setAlternatingRowColors(True)
-        self._table.setShowGrid(False)
-        self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(38)
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
@@ -1764,10 +1848,12 @@ class _LogsTab(QWidget):
         total = data.get("total", 0)
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
-            self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
-            self._table.setItem(i, 2, QTableWidgetItem(row.get("activity", "")))
-            self._table.setItem(i, 3, QTableWidgetItem(_fmt_ts(row.get("created_at"))))
+            activity = row.get("activity", "")
+            self._table.setItem(i, 0, _cell(str(row.get("id", "")), mono=True, muted=True))
+            self._table.setItem(i, 1, _cell(row.get("employee_id", ""), mono=True))
+            # Lambi activity lines column me kat jaati thin — poori tooltip me.
+            self._table.setItem(i, 2, _cell(activity, tooltip=activity))
+            self._table.setItem(i, 3, _cell(_fmt_ts(row.get("created_at")), muted=True))
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 50 < total)
@@ -1873,7 +1959,7 @@ class _AttendanceTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = QTableWidget(0, 5)
+        self._table = _tune_table(QTableWidget(0, 5))
         self._table.setHorizontalHeaderLabels(["ID", "Employee", "Login Time", "Logout Time", "Total Hours"])
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -1881,15 +1967,11 @@ class _AttendanceTab(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 70)
-        self._table.setColumnWidth(1, 90)
-        self._table.setColumnWidth(4, 110)
+        self._table.setColumnWidth(0, 80)
+        self._table.setColumnWidth(1, 110)
+        self._table.setColumnWidth(4, 120)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setAlternatingRowColors(True)
-        self._table.setShowGrid(False)
-        self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(38)
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
@@ -1944,19 +2026,24 @@ class _AttendanceTab(QWidget):
         self._next_btn.setEnabled(self._page * 50 < total)
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
-            self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
+            self._table.setItem(i, 0, _cell(str(row.get("id", "")), mono=True, muted=True))
+            self._table.setItem(i, 1, _cell(row.get("employee_id", ""), mono=True))
+            self._table.setItem(i, 2, _cell(_fmt_ts(row.get("login_time")), muted=True))
 
-            self._table.setItem(i, 2, QTableWidgetItem(_fmt_ts(row.get("login_time"))))
+            if row.get("logout_time"):
+                self._table.setItem(i, 3, _cell(_fmt_ts(row.get("logout_time")), muted=True))
+            else:
+                # Abhi chal raha session — emoji ki jagah rang, jo baaki
+                # status indicators se match karta hai.
+                active = _cell("● ACTIVE")
+                active.setForeground(QColor(C["success"]))
+                self._table.setItem(i, 3, active)
 
-            logout_ts = (
-                _fmt_ts(row.get("logout_time"))
-                if row.get("logout_time") else "🟢 ACTIVE"
-            )
-            self._table.setItem(i, 3, QTableWidgetItem(logout_ts))
-
-            total_hours = self._format_total_hours(row.get("total_hours"))
-            self._table.setItem(i, 4, QTableWidgetItem(total_hours))
+            # Duration right-align — numbers ko align hona chahiye, warna
+            # column me zigzag dikhta hai.
+            self._table.setItem(i, 4, _cell(
+                self._format_total_hours(row.get("total_hours")),
+                mono=True, align_right=True))
 
     def _format_total_hours(self, value):
         """Backend may send None, an HH:MM:SS string, or a dict-like
@@ -2121,7 +2208,7 @@ class EmployeeDetailsDialog(QDialog):
         feed_title.setStyleSheet(f"color:{C['text_primary']}; font-weight:700; font-size:13px; background:transparent;")
         root.addWidget(feed_title)
 
-        self._logs_table = QTableWidget(0, 2)
+        self._logs_table = _tune_table(QTableWidget(0, 2))
         self._logs_table.setHorizontalHeaderLabels(["Time", "Activity"])
         self._logs_table.horizontalHeader().setStretchLastSection(True)
         self._logs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -2153,8 +2240,8 @@ class EmployeeDetailsDialog(QDialog):
             t = row.get('created_at', row.get('time', '—')) if isinstance(row, dict) else '—'
             a = row.get('activity', row.get('message', str(row))) if isinstance(row, dict) else str(row)
             # BUG FIX: raw UTC string dikh rahi thi, baaki poore panel me IST hai.
-            self._logs_table.setItem(i, 0, QTableWidgetItem(_fmt_ts(t)))
-            self._logs_table.setItem(i, 1, QTableWidgetItem(str(a)))
+            self._logs_table.setItem(i, 0, _cell(_fmt_ts(t), muted=True))
+            self._logs_table.setItem(i, 1, _cell(str(a), tooltip=str(a)))
 
     def _load_details(self):
         emp_id = self._employee.get('employee_id')
@@ -2349,17 +2436,13 @@ class _EmployeesTab(QWidget):
         summary_row.addStretch()
         root.addLayout(summary_row)
 
-        self._table = QTableWidget(0, 6)
+        self._table = _tune_table(QTableWidget(0, 6))
         self._table.setHorizontalHeaderLabels([
             "Employee ID", "Username", "Role", "Status", "Last Seen", "Actions"
         ])
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setAlternatingRowColors(True)
-        self._table.setShowGrid(False)
-        self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(48)
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
@@ -2498,8 +2581,8 @@ class _EmployeesTab(QWidget):
             # dikhta hi nahi tha.
             last_seen = _fmt_relative(emp.get("last_seen"))
 
-            self._table.setItem(i, 0, QTableWidgetItem(str(emp_id)))
-            self._table.setItem(i, 1, QTableWidgetItem(str(username)))
+            self._table.setItem(i, 0, _cell(str(emp_id), mono=True))
+            self._table.setItem(i, 1, _cell(str(username)))
             self._table.setItem(i, 2, QTableWidgetItem(self._role_label(role)))
 
             st_item = QTableWidgetItem(status_text)
@@ -2509,7 +2592,7 @@ class _EmployeesTab(QWidget):
             st_item.setFont(font)
             self._table.setItem(i, 3, st_item)
 
-            self._table.setItem(i, 4, QTableWidgetItem(str(last_seen)))
+            self._table.setItem(i, 4, _cell(str(last_seen), muted=True))
 
             # ── Actions ───────────────────────────────────────────────
             #
