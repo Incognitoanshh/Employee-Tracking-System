@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QLabel,
@@ -19,6 +19,94 @@ from client.presentation.windows.employee_panel import EmployeePanel
 from client.presentation.windows.admin_config_panel import AdminConfigPanel
 from client.application.services.auth_service import AuthService
 from client.application.managers.session_manager import SessionManager
+
+
+# Login ke UI thread se hate hue kaam.
+#
+# PROBLEM: pehle handle_login() sab kuch main thread pe SYNCHRONOUSLY
+# karta tha —
+#
+#     AuthService.login()            timeout  5s
+#     LoggerService.log("LOGIN ...") timeout  5s   (server pe upload)
+#     ShiftManager.start_shift()     timeout 10s   (open-session check)
+#              ...aur uske andar     timeout 10s   (attendance POST)
+#
+# Yaani worst case 30 second, jis dauran poori window jami rehti thi —
+# na spinner chalta tha, na window move hoti thi, macOS use "not
+# responding" dikhata tha. Achhe network pe ye milliseconds me nikal
+# jaata tha is liye kabhi pakda nahi gaya; slow ya lossy link pe har
+# call apna poora timeout kha jaati hai.
+#
+# In chaar me se sirf PEHLI ka result UI ko chahiye. Baaki teen
+# fire-and-forget hain — unke liye user ko intezaar karwana bekaar hai.
+_BG_WORKERS: list = []
+
+
+def drain_login_workers(timeout_ms: int = 3000):
+    """App band hote waqt chal rahe login workers ka intezaar karo.
+
+    Agar user login ke turant baad app quit kar de, to post-login worker
+    (attendance/shift calls) abhi chal raha ho sakta hai. Us waqt Qt
+    thread object destroy hone se std::terminate() aata hai — app crash
+    ke saath band hota hai. Bounded wait ke baad chhod dete hain;
+    terminate() nahi karte, wo aur khatarnak hai.
+    """
+    for worker in list(_BG_WORKERS):
+        try:
+            if worker.isRunning():
+                worker.wait(timeout_ms)
+        except RuntimeError:
+            pass
+    _BG_WORKERS.clear()
+
+
+def _track(worker):
+    """Worker ka reference rakho jab tak wo chal raha hai.
+
+    Iske bina Python use garbage-collect kar deta hai jab thread abhi
+    chal raha hota hai — Qt tab std::terminate() call karta hai (wahi
+    "QThread: Destroyed while thread is still running" wala crash).
+    """
+    _BG_WORKERS.append(worker)
+    worker.finished.connect(lambda: _BG_WORKERS.remove(worker)
+                            if worker in _BG_WORKERS else None)
+
+
+class _LoginWorker(QThread):
+    """Sirf authentication — iska result UI ko chahiye."""
+    done = Signal(dict)
+
+    def __init__(self, username, password):
+        super().__init__()
+        self._u, self._p = username, password
+
+    def run(self):
+        try:
+            self.done.emit(AuthService.login(self._u, self._p) or {})
+        except Exception as e:
+            self.done.emit({"success": False, "message": str(e)})
+
+
+class _PostLoginWorker(QThread):
+    """Login ke baad ka kaam — UI ko iska intezaar nahi karna chahiye."""
+
+    def __init__(self, username):
+        super().__init__()
+        self._username = username
+
+    def run(self):
+        # Har step alag try me — ek fail ho to baaki phir bhi chalein.
+        # Pehle ye ek hi sequence me the, to attendance ka timeout
+        # LOGIN SUCCESS log ko bhi le dubta tha.
+        for fn in (
+            lambda: LoggerService.log(f"LOGIN SUCCESS : {self._username}"),
+            ShiftManager.start_shift,
+            SessionLogManager.start_session,
+        ):
+            try:
+                fn()
+            except Exception:
+                pass
 
 
 class LoginWindow(BaseWindow):
@@ -228,7 +316,14 @@ class LoginWindow(BaseWindow):
             self.login_button.setText("Sign In")
             return
 
-        result = AuthService.login(username, password)
+        # Auth background thread pe — UI responsive rehti hai.
+        self._login_worker = _LoginWorker(username, password)
+        self._login_worker.done.connect(self._on_login_result)
+        _track(self._login_worker)
+        self._login_worker.start()
+
+    def _on_login_result(self, result: dict):
+        username = self.username_input.text().strip()
 
         if result.get("success"):
             # BUG FIX: `LOGIN SUCCESS` pehle create_session() se PEHLE log
@@ -255,14 +350,15 @@ class LoginWindow(BaseWindow):
                 full_name=result.get("full_name"),
                 designation=result.get("designation"),
             )
-            LoggerService.log(f"LOGIN SUCCESS : {username}")
+            # LOGIN log + attendance/shift start ab background me. Ye
+            # teeno server calls hain aur inme se kisi ka result panel
+            # kholne ke liye nahi chahiye — session already ban chuki hai
+            # aur shift times login response se aa chuke hain.
+            post = _PostLoginWorker(username)
+            _track(post)
+            post.start()
 
             role = result.get("role", "employee")
-
-            # Attendance tracking (source of truth for admin online/offline)
-            # Previously only non-admin employees started shift + attendance.
-            ShiftManager.start_shift()
-            SessionLogManager.start_session()
 
             if role in ("admin", "super_admin"):
                 self.next_window = AdminConfigPanel()

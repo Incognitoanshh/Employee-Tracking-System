@@ -48,6 +48,11 @@ def main():
 
     app.setQuitOnLastWindowClosed(True)
 
+    # Quit pe login/post-login workers ka intezaar — warna chal rahe
+    # QThread destroy hone se app crash ke saath band hota hai.
+    from client.presentation.windows.login_window import drain_login_workers
+    app.aboutToQuit.connect(drain_login_workers)
+
 
     auto_login_result = AutoLoginManager.try_auto_login()
 
