@@ -10,6 +10,8 @@ class SessionManager:
     employee_id = None
     auth_token = None
     device_id = None   # BUG FIX: Pehle "_generate_device_id = None" tha - typo tha
+    full_name = None
+    designation = None
     shift_start = None
     shift_end = None
     is_authenticated = False
@@ -54,12 +56,16 @@ class SessionManager:
         return time.time() > exp
 
     @classmethod
-    def create_session(cls, employee_id, auth_token, role="employee", shift_start=None, shift_end=None):
+    def create_session(cls, employee_id, auth_token, role="employee", shift_start=None,
+                       shift_end=None, full_name=None, designation=None):
         cls.employee_id = employee_id
         cls.auth_token = auth_token
         cls.role = role
         cls.shift_start = shift_start
         cls.shift_end = shift_end
+        # Naye employee panel ke header ke liye (naam + designation).
+        cls.full_name = full_name
+        cls.designation = designation
         cls.is_authenticated = True
         cls.get_device_id()
 
@@ -68,6 +74,8 @@ class SessionManager:
         cls.employee_id = None
         cls.auth_token = None
         cls.role = "employee"
+        cls.full_name = None
+        cls.designation = None
         cls.shift_start = None
         cls.shift_end = None
         cls.is_authenticated = False

@@ -20,7 +20,7 @@ class LogService:
         if not headers:
             return None
         role = getattr(SessionManager, 'role', 'employee')
-        if role == "admin":
+        if role in ("admin", "super_admin"):
             endpoint = f"{API_BASE_URL}/admin/logs"
             params = {"page": 1, "limit": 500}
         else:

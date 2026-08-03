@@ -125,6 +125,11 @@ exports.login = async (req, res) => {
             success: true,
             employee_id: employee.employee_id,
             role: employee.role,
+            // Naye employee panel ke header ke liye — naam na ho to username.
+            full_name:   employee.full_name || employee.username,
+            designation: employee.designation
+                || (employee.role === "super_admin" ? "Administrator"
+                    : employee.role === "admin" ? "Manager" : "Employee"),
             token,
             shift_start: shiftStart,
             shift_end:   shiftEnd,

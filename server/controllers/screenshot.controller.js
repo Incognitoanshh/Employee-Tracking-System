@@ -1,4 +1,10 @@
 const pool = require("../config/db");
+
+// super_admin ko har jagah admin ke barabar (ya usse upar) treat karo.
+// BUG: ye checks pehle sirf "admin" dekhte the, is liye super_admin ko
+// sirf apna hi data dikhta — poori company ka nahi.
+const isElevated = (role) => role === "admin" || role === "super_admin";
+
 const path = require("path");
 const fs = require("fs");
 
@@ -60,7 +66,7 @@ exports.getScreenshots = async (req, res) => {
         let query = '';
         let params = [];
 
-        if (role === 'admin') {
+        if (isElevated(role)) {
             // Admin sees all screenshots
             query = `SELECT * FROM screenshots ORDER BY id DESC LIMIT 100`;
         } else {
@@ -105,7 +111,7 @@ exports.downloadScreenshot = async (req, res) => {
         const { employee_id: ownerId, file_name, created_at } = result.rows[0];
 
         // ACCESS CHECK: Only owner or admin can download
-        if (ownerId !== requestingEmployee && role !== 'admin') {
+        if (ownerId !== requestingEmployee && !isElevated(role)) {
             return res.status(403).json({
                 success: false,
                 error: "Access denied. You can only download your own screenshots."

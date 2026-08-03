@@ -15,7 +15,7 @@ from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.services.logger_service import LoggerService
 from client.presentation.windows.base_window import BaseWindow
-from client.presentation.windows.dashboard_window import DashboardWindow
+from client.presentation.windows.employee_panel import EmployeePanel
 from client.presentation.windows.admin_config_panel import AdminConfigPanel
 from client.application.services.auth_service import AuthService
 from client.application.managers.session_manager import SessionManager
@@ -223,14 +223,31 @@ class LoginWindow(BaseWindow):
         result = AuthService.login(username, password)
 
         if result.get("success"):
-            LoggerService.log(f"LOGIN SUCCESS : {username}")
+            # BUG FIX: `LOGIN SUCCESS` pehle create_session() se PEHLE log
+            # hota tha. LoggerService.log() shuru me hi ye check karta hai:
+            #
+            #     employee_id = SessionManager.employee_id
+            #     if not employee_id: return
+            #
+            # ...aur pichhle logout ne session clear kar di hoti hai, to us
+            # waqt employee_id None hota tha. Result: LOGIN event sirf local
+            # app.log file me jaata tha — na local DB me, na server pe.
+            # Isi liye logout karke wapas login karne par employee dashboard
+            # ka "Recent Activity" purane events pe hi atka dikhta tha, naya
+            # "Login Successful" kabhi aata hi nahi tha.
+            #
+            # Ab session pehle banti hai, phir log — to employee_id maujood
+            # hota hai aur log server tak jaata hai.
             SessionManager.create_session(
                 employee_id=result["employee_id"],
                 auth_token=result["token"],
                 role=result.get("role", "employee"),
                 shift_start=result.get("shift_start"),
                 shift_end=result.get("shift_end"),
+                full_name=result.get("full_name"),
+                designation=result.get("designation"),
             )
+            LoggerService.log(f"LOGIN SUCCESS : {username}")
 
             role = result.get("role", "employee")
 
@@ -239,12 +256,12 @@ class LoginWindow(BaseWindow):
             ShiftManager.start_shift()
             SessionLogManager.start_session()
 
-            if role == "admin":
+            if role in ("admin", "super_admin"):
                 self.next_window = AdminConfigPanel()
                 self.next_window.show()
                 self.close()
             else:
-                self.next_window = DashboardWindow()
+                self.next_window = EmployeePanel()
                 self.next_window.show()
                 self.close()
         else:

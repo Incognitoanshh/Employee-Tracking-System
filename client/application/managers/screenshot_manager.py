@@ -75,7 +75,12 @@ class ScreenshotManager:
         # `count` binding constraint hai, isliye log kar dete hain taaki
         # admin ko dikhe ki uska max-interval effective nahi ho raha.
         if slot_seconds > _max_gap:
-            LoggerService.log(
+            # log_verbose: ye ek DIAGNOSTIC hai, user-facing event nahi.
+            # LoggerService.log() sab kuch server ke activity_logs me daal
+            # deta hai, aur wahi table employee dashboard ka "Recent
+            # Activity" feed banata hai — is liye plain log() se ye internal
+            # message employee ko dikhne lagta tha.
+            LoggerService.log_verbose(
                 f"ScreenshotManager: screenshot_count={count} is shift ke liye "
                 f"~{int(slot_seconds // 60)} min ka gap deta hai, jo configured "
                 f"max interval ({_max_gap // 60} min) se zyada hai. Poori shift "
@@ -108,21 +113,79 @@ class ScreenshotManager:
         timestamps.sort()
 
         if timestamps:
-            LoggerService.log(
+            LoggerService.log_verbose(
                 f"ScreenshotManager: {len(timestamps)} screenshots scheduled across "
                 f"shift {shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')} "
                 f"(first {timestamps[0].strftime('%H:%M')}, "
                 f"last {timestamps[-1].strftime('%H:%M')})"
             )
         else:
-            LoggerService.log(
+            LoggerService.log_verbose(
                 f"ScreenshotManager: no screenshots scheduled for shift "
                 f"{shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')}"
             )
         return timestamps
 
     @classmethod
+    def generate_interval_schedule(
+        cls, window_start: datetime, window_end: datetime
+    ) -> list:
+        """
+        OFF-SHIFT coverage — jab employee apni shift window ke BAHAR logged in ho.
+
+        BUG: pehle scheduler sirf [shift_start, shift_end] ke andar hi
+        screenshots schedule karta tha. Agar employee shift se bahar login
+        karta (jaise raat 12:40 baje, jabki shift 09:00–23:59 hai), to
+        `effective_start` seedha shift_start (agli subah 09:00) ban jaata —
+        yaani 8+ GHANTE ka kaam bilkul unmonitored. Production me exactly
+        yehi hua: EMP002 raat 12:40 se subah 09:12 tak logged in tha aur ek
+        bhi screenshot nahi hua.
+
+        Yahan `count` slot-based nahi hai (window kitna lamba hoga wo pata
+        nahi — employee kabhi bhi logout kar sakta hai), is liye configured
+        min–max interval pe hi captures lagate hain. Isse off-shift kaam bhi
+        cover hota hai aur cadence wahi rehti hai jo admin ne set ki.
+        """
+        min_gap = int(SettingsService.get_setting(
+            "screenshot_min_minutes", str(Settings.SCREENSHOT_MIN_INTERVAL // 60)
+        )) * 60
+        max_gap = int(SettingsService.get_setting(
+            "screenshot_max_minutes", str(Settings.SCREENSHOT_MAX_INTERVAL // 60)
+        )) * 60
+        if max_gap < min_gap:
+            min_gap, max_gap = max_gap, min_gap
+        if min_gap <= 0:
+            min_gap = 60
+        if max_gap <= 0:
+            max_gap = min_gap
+
+        timestamps: list[datetime] = []
+        current = window_start
+        # Safety cap — bahut lambi window pe hazaaron QTimer na ban jayen.
+        while len(timestamps) < 200:
+            current = current + timedelta(seconds=random.randint(min_gap, max_gap))
+            if current >= window_end:
+                break
+            timestamps.append(current)
+
+        LoggerService.log_verbose(
+            f"ScreenshotManager: {len(timestamps)} OFF-SHIFT screenshots between "
+            f"{window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')}"
+        )
+        return timestamps
+
+    @classmethod
     def capture_screenshot(cls):
+        # Super admin ko monitor NAHI kiya jaata — wo company ka owner/manager
+        # hai, tracked employee nahi. Ye guard scheduler ke guard ke alawa
+        # defence-in-depth hai (agar kabhi koi aur code path capture trigger
+        # kare to bhi super admin safe rahe).
+        if getattr(SessionManager, "role", "") == "super_admin":
+            LoggerService.log_verbose(
+                "ScreenshotManager: super admin — screenshot skipped"
+            )
+            return None
+
         screenshot_id = str(uuid.uuid4())
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

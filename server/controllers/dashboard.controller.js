@@ -82,7 +82,7 @@ exports.getAdminSummary = async (req, res) => {
             FROM attendance a
             JOIN employees e ON e.employee_id = a.employee_id
             WHERE a.logout_time IS NULL
-              AND a.login_time > NOW()::timestamp - INTERVAL '16 hours'
+              AND a.login_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '16 hours'
               AND e.role = 'employee'
         `);
 
@@ -239,6 +239,132 @@ exports.getChartsData = async (req, res) => {
                 attendance_per_day: attendance.rows,
                 activity_per_day: activity.rows
             }
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: error.message });
+    }
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  GET /api/dashboard/me  — employee ka APNA aaj ka summary
+//
+//  Naya employee panel ("Today's Overview") ke liye. Ab tak saare dashboard
+//  endpoints admin-scoped the (poori company ke counts) — employee ke apne
+//  aaj ke numbers ke liye koi endpoint tha hi nahi, is liye panel ko sab kuch
+//  local SQLite se guess karna padta (jo device badalne par galat ho jaata).
+//
+//  Sab kuch IST din ke hisaab se, aur SIRF requesting employee ka —
+//  employee_id kabhi client se nahi liya jaata, hamesha JWT se.
+// ──────────────────────────────────────────────────────────────────────────────
+exports.getMySummary = async (req, res) => {
+    const employeeId = req.employee?.employee_id;
+    if (!employeeId) {
+        return res.status(401).json({ success: false, message: "Unauthenticated" });
+    }
+
+    try {
+        const IST_DAY = `DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+                         = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')`;
+
+        const [shots, logs, session, totals] = await Promise.all([
+            pool.query(
+                `SELECT COUNT(*) FROM screenshots WHERE employee_id = $1 AND ${IST_DAY}`,
+                [employeeId]
+            ),
+            pool.query(
+                `SELECT COUNT(*) FROM activity_logs WHERE employee_id = $1 AND ${IST_DAY}`,
+                [employeeId]
+            ),
+            pool.query(
+                `SELECT login_time, logout_time
+                 FROM attendance
+                 WHERE employee_id = $1
+                 ORDER BY id DESC LIMIT 1`,
+                [employeeId]
+            ),
+            pool.query(
+                `SELECT
+                     COALESCE(SUM(
+                         COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) - login_time
+                     ), interval '0') AS today_worked
+                 FROM attendance
+                 WHERE employee_id = $1
+                   AND DATE((login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+                       = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')`,
+                [employeeId]
+            ),
+        ]);
+
+        // ── Aaj ka ACTIVE vs IDLE time ──
+        //
+        //  Employee panel ke "Today's Summary" me Active Time / Idle Time
+        //  dikhta hai. Ye sirf ASLI attendance sessions ke andar count hota
+        //  hai — app band rehne ka time kabhi nahi judta (wahi bug jo
+        //  getEmployeeDetails me 801 ghante dikha raha tha).
+        const todaySessions = await pool.query(
+            `SELECT login_time,
+                    COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) AS end_time
+             FROM attendance
+             WHERE employee_id = $1
+               AND DATE((login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+                   = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+             ORDER BY login_time ASC`,
+            [employeeId]
+        );
+        const todayEvents = await pool.query(
+            `SELECT created_at, activity
+             FROM activity_logs
+             WHERE employee_id = $1
+               AND (UPPER(activity) LIKE '%USER ACTIVE%' OR UPPER(activity) LIKE '%USER IDLE%')
+               AND DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+                   = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+             ORDER BY created_at ASC
+             LIMIT 20000`,
+            [employeeId]
+        );
+
+        const utc = (s) => new Date(String(s).replace(" ", "T") + "Z").getTime();
+        const evts = todayEvents.rows
+            .map(r => ({
+                t: utc(r.created_at),
+                s: String(r.activity).toUpperCase().includes("USER IDLE") ? "IDLE" : "ACTIVE",
+            }))
+            .filter(e => Number.isFinite(e.t));
+
+        let activeMs = 0, idleMs = 0;
+        for (const sess of todaySessions.rows) {
+            const start = utc(sess.login_time);
+            const end   = utc(sess.end_time);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+            let cursor = start, state = "ACTIVE";
+            for (const e of evts.filter(x => x.t >= start && x.t <= end)) {
+                const dt = e.t - cursor;
+                if (dt > 0) { if (state === "ACTIVE") activeMs += dt; else idleMs += dt; }
+                state = e.s; cursor = e.t;
+            }
+            const tail = end - cursor;
+            if (tail > 0) { if (state === "ACTIVE") activeMs += tail; else idleMs += tail; }
+        }
+
+        // Upload health — kitna data abhi tak sync ho chuka hai.
+        const pending = await pool.query(
+            `SELECT COUNT(*) FROM screenshots WHERE employee_id = $1 AND ${IST_DAY}`,
+            [employeeId]
+        );
+
+        const row = session.rows[0] || {};
+        return res.json({
+            success: true,
+            data: {
+                screenshots_today: Number(shots.rows[0].count),
+                logs_today:        Number(logs.rows[0].count),
+                session_start:     row.login_time || null,
+                session_open:      Boolean(row.login_time && !row.logout_time),
+                today_worked:      totals.rows[0].today_worked,
+                active_seconds:    Math.round(activeMs / 1000),
+                idle_seconds:      Math.round(idleMs / 1000),
+                synced_today:      Number(pending.rows[0].count),
+            },
         });
     } catch (error) {
         return res.status(500).json({ success: false, error: error.message });

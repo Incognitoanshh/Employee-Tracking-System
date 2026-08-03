@@ -214,7 +214,16 @@ class AttendanceWindow(BaseWindow):
                 if duration.startswith("{"):
                 
                     d = ast.literal_eval(duration)
+                    # BUG FIX: `days` field ignore ho raha tha. Postgres
+                    # INTERVAL 24 ghante se lambi duration ko days me todta
+                    # hai — e.g. 26 ghante ki session {'days': 1, 'hours': 2}
+                    # aati hai. Pehle sirf hours/minutes/seconds jode jaate
+                    # the, to wo session 26h ki jagah 2h count hoti thi.
+                    # Ye tab hota hai jab employee ka app crash ho jaye aur
+                    # session agle login tak khuli reh jaye — yaani Today/
+                    # Week/Month totals silently kam dikhte the.
                     total_sec = (
+                        d.get("days", 0) * 86400 +
                         d.get("hours", 0) * 3600 +
                         d.get("minutes", 0) * 60 +
                         d.get("seconds", 0)

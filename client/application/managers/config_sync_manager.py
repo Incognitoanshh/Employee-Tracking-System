@@ -160,3 +160,11 @@ class ConfigSyncManager:
         if config.get("shift_end"):
             val = str(config["shift_end"])[:5]
             SettingsService.save_setting("shift_end_ist", val)
+
+        # Employee ko dikhane ke liye — "aapki settings kab tak ki hain".
+        # Iske bina employee ko pata hi nahi chalta ki admin ne jo abhi
+        # badla wo uske app tak pahuncha ya nahi.
+        from datetime import datetime as _dt
+        SettingsService.save_setting(
+            "config_last_synced", _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        )

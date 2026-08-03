@@ -3,7 +3,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from client.presentation.windows.login_window import LoginWindow
-from client.presentation.windows.dashboard_window import DashboardWindow
+from client.presentation.windows.employee_panel import EmployeePanel
 from client.presentation.windows.admin_config_panel import AdminConfigPanel
 
 from client.infrastructure.database.database import Database
@@ -28,10 +28,10 @@ def main():
     auto_login_result = AutoLoginManager.try_auto_login()
 
     if auto_login_result:
-        if auto_login_result["role"] == "admin":
+        if auto_login_result["role"] in ("admin", "super_admin"):
             window = AdminConfigPanel()
         else:
-            window = DashboardWindow()
+            window = EmployeePanel()
     else:
         Database.cleanup_stale_sessions_and_shifts()
         window = LoginWindow()

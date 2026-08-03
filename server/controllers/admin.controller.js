@@ -1,4 +1,66 @@
 const pool = require("../config/db");
+const {
+    canManage,
+    ROLE_SUPER_ADMIN,
+    ROLE_ADMIN,
+} = require("../middleware/admin.middleware");
+
+const VALID_ROLES = ["employee", ROLE_ADMIN, ROLE_SUPER_ADMIN];
+
+// Company ke role limits — business rule, code me enforce.
+//   super_admin : max 3   (owner-level, sab kuch kar sakte hain)
+//   admin       : max 20  (employees manage karte hain)
+//   employee    : unlimited
+const ROLE_LIMITS = { [ROLE_SUPER_ADMIN]: 3, [ROLE_ADMIN]: 20 };
+
+/** Kitne log is role pe hain (optional: ek employee ko chhod ke). */
+async function countRole(role, excludeId = null) {
+    const result = excludeId
+        ? await pool.query(
+            `SELECT COUNT(*) FROM employees WHERE role = $1 AND employee_id <> $2`,
+            [role, excludeId])
+        : await pool.query(`SELECT COUNT(*) FROM employees WHERE role = $1`, [role]);
+    return Number(result.rows[0].count);
+}
+
+/**
+ * Kya `actorRole` wala user `targetRole` ka account bana sakta hai?
+ * Allowed ho to null, warna error message.
+ *
+ * RULES:
+ *   super_admin -> super_admin, admin, employee  (sab kuch)
+ *   admin       -> employee HI                   (admins ko admin banane ka
+ *                                                 haq sirf super admin ke paas)
+ */
+function canCreateRole(actorRole, targetRole) {
+    if (actorRole === ROLE_SUPER_ADMIN) return null;
+    if (actorRole === ROLE_ADMIN && targetRole === "employee") return null;
+    return targetRole === ROLE_SUPER_ADMIN
+        ? "Only a super admin can create another super admin."
+        : "Only a super admin can create admin accounts. Admins can create employees.";
+}
+
+/**
+ * Target employee pe action allowed hai ya nahi — role hierarchy ke hisaab se.
+ * Allowed ho to true, warna response bhej ke false return karta hai.
+ */
+async function assertCanManage(req, res, targetId) {
+    if (!targetId) return true;
+    const r = await pool.query(
+        `SELECT role FROM employees WHERE employee_id = $1`, [targetId]
+    );
+    if (r.rows.length === 0) {
+        res.status(404).json({ success: false, message: "Employee not found" });
+        return false;
+    }
+    const denial = canManage(req.employee, targetId, r.rows[0].role);
+    if (denial) {
+        res.status(403).json({ success: false, message: denial });
+        return false;
+    }
+    return true;
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  FIX #3/#4: getEmployees
@@ -11,92 +73,132 @@ const pool = require("../config/db");
 //    FIX: return NULL for online users (client shows "Online" from status column),
 //    and for offline users return the most recent activity_log timestamp or last logout.
 // ──────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+//  SCALE FIX (1000+ employees)
+//
+//  Purani query har request pe SAARE employees laati thi, aur har row ke liye
+//  4 correlated subqueries chalati thi (2× attendance EXISTS, 1× MAX(logout),
+//  1× MAX(activity_logs.created_at), 1× config lookup). 1000 employees +
+//  20 lakh activity_logs pe measure kiya gaya:
+//
+//      bina indexes ke : 55  second
+//      indexes ke saath: 117 second
+//
+//  ...aur admin panel ka Employees tab ye HAR 5 SECOND maarta hai. 20 admins
+//  ke saath ye database ko poori tarah bitha deta. 10,000 employees pe to
+//  ye kabhi complete hi na hota.
+//
+//  Do cheezein badli:
+//   1. PAGINATION — pehle sirf ek page ke employees select hote hain, phir
+//      unhi ke liye lookups hote hain (1000 ki jagah 50 lookups).
+//   2. LATERAL + "ORDER BY created_at DESC LIMIT 1" — MAX() ki jagah, taaki
+//      Postgres seedha index se latest row uthaye (MAX() us index ko use
+//      nahi kar paata tha).
+//
+//  Search bhi ab server-side hai — pehle client 1000 rows download karke
+//  memory me filter karta tha.
+// ──────────────────────────────────────────────────────────────────────────────
 exports.getEmployees = async (req, res) => {
     try {
+        const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
+        let   limit  = parseInt(req.query.limit, 10);
+        if (!Number.isFinite(limit) || limit < 1) limit = 50;
+        if (limit > 200) limit = 200;
+        const offset = (page - 1) * limit;
+        const search = String(req.query.search || "").trim();
+
+        const searchWhere = search
+            ? `WHERE (employee_id ILIKE $1 OR username ILIKE $1 OR role ILIKE $1)`
+            : "";
+        const searchVals = search ? [`%${search}%`] : [];
+        const p = searchVals.length;
+
         const result = await pool.query(`
             SELECT
                 e.employee_id,
                 e.username,
                 e.role,
-
-                -- Status: attendance open session = online (agar recent hai)
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM attendance a
-                        WHERE a.employee_id = e.employee_id
-                          AND a.logout_time IS NULL
-                          AND a.login_time > NOW()::timestamp - INTERVAL '16 hours'
-                    )
-                    THEN 'online'
-                    ELSE 'offline'
-                END AS status,
-
-                -- FIX #4: last_seen
-                --   Online users: NULL (frontend will show "Active now" based on status)
-                --   Offline users: max(last logout, last activity log)
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM attendance a
-                        WHERE a.employee_id = e.employee_id
-                          AND a.logout_time IS NULL
-                          AND a.login_time > NOW()::timestamp - INTERVAL '16 hours'
-                    )
-                    THEN NULL
-                    ELSE (
-                        SELECT GREATEST(
-                            COALESCE(
-                                (SELECT MAX(a2.logout_time)
-                                 FROM attendance a2
-                                 WHERE a2.employee_id = e.employee_id
-                                   AND a2.logout_time IS NOT NULL),
-                                '1970-01-01'::timestamptz
-                            ),
-                            COALESCE(
-                                (SELECT MAX(al.created_at)
-                                 FROM activity_logs al
-                                 WHERE al.employee_id = e.employee_id),
-                                '1970-01-01'::timestamptz
-                            )
-                        )
-                    )
+                e.full_name,
+                e.designation,
+                CASE WHEN oa.hit IS NOT NULL THEN 'online' ELSE 'offline' END AS status,
+                CASE WHEN oa.hit IS NOT NULL THEN NULL
+                     ELSE GREATEST(
+                         COALESCE(la.last_logout, '1970-01-01'::timestamp),
+                         COALESCE(ll.last_log,    '1970-01-01'::timestamp)
+                     )
                 END AS last_seen,
-
-                -- Verbose logging flag (employee-specific config se)
-                COALESCE(
-                    (SELECT ec.verbose_logging
-                     FROM employee_configs ec
-                     WHERE ec.employee_id = e.employee_id
-                     ORDER BY ec.updated_at DESC LIMIT 1),
-                    false
-                ) AS verbose_logging
-
-            FROM employees e
+                COALESCE(ec.verbose_logging, false) AS verbose_logging
+            FROM (
+                SELECT employee_id, username, role, full_name, designation
+                FROM employees
+                ${searchWhere}
+                ORDER BY employee_id ASC
+                LIMIT $${p + 1} OFFSET $${p + 2}
+            ) e
+            LEFT JOIN LATERAL (
+                SELECT 1 AS hit
+                FROM attendance a
+                WHERE a.employee_id = e.employee_id
+                  AND a.logout_time IS NULL
+                  AND a.login_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '16 hours'
+                LIMIT 1
+            ) oa ON true
+            LEFT JOIN LATERAL (
+                SELECT a2.logout_time AS last_logout
+                FROM attendance a2
+                WHERE a2.employee_id = e.employee_id
+                  AND a2.logout_time IS NOT NULL
+                ORDER BY a2.logout_time DESC
+                LIMIT 1
+            ) la ON true
+            LEFT JOIN LATERAL (
+                SELECT al.created_at AS last_log
+                FROM activity_logs al
+                WHERE al.employee_id = e.employee_id
+                ORDER BY al.created_at DESC
+                LIMIT 1
+            ) ll ON true
+            LEFT JOIN employee_configs ec ON ec.employee_id = e.employee_id
             ORDER BY e.employee_id ASC
-        `);
+        `, [...searchVals, limit, offset]);
+
+        const countResult = await pool.query(
+            `SELECT COUNT(*) FROM employees ${searchWhere}`, searchVals
+        );
+
+        // Role counts + limits — admin panel inhe "2 / 3 super admins"
+        // jaisa dikhata hai, taaki add karne se PEHLE pata chale ki jagah hai.
+        const roleCounts = await pool.query(
+            `SELECT role, COUNT(*)::int AS n FROM employees GROUP BY role`
+        );
+        const counts = Object.fromEntries(roleCounts.rows.map(r => [r.role, r.n]));
 
         return res.json({
             success: true,
             data: result.rows.map(row => ({
                 ...row,
-                // If last_seen is epoch (no real activity), return null — UI shows "Never"
                 last_seen: row.last_seen && new Date(row.last_seen).getFullYear() > 1970
                     ? row.last_seen
-                    : (row.status === "online" ? null : null)
-            }))
+                    : null
+            })),
+            total: Number(countResult.rows[0].count),
+            page,
+            limit,
+            role_counts: counts,
+            role_limits: ROLE_LIMITS,
         });
 
     } catch (err) {
-        return res.status(500).json({
-            success: false,
-            error: err.message
-        });
+        return res.status(500).json({ success: false, error: err.message });
     }
 };
 
+
 exports.createEmployee = async (req, res) => {
-    const { employee_id, username, password, role = "employee" } = req.body;
+    const {
+        employee_id, username, password, role = "employee",
+        full_name = null, designation = null,
+    } = req.body;
 
     // BUG FIX: pehle empty/missing fields directly DB tak pahunch jaate the.
     if (!employee_id || !username || !password) {
@@ -106,14 +208,46 @@ exports.createEmployee = async (req, res) => {
         });
     }
 
+    if (!VALID_ROLES.includes(role)) {
+        return res.status(400).json({
+            success: false,
+            message: `role must be one of: ${VALID_ROLES.join(", ")}`
+        });
+    }
+
+    // Kaun kis role ka account bana sakta hai
+    const denial = canCreateRole(req.employee?.role, role);
+    if (denial) {
+        return res.status(403).json({ success: false, message: denial });
+    }
+
+    // Role caps — super_admin max 3, admin max 20
+    if (ROLE_LIMITS[role]) {
+        const current = await countRole(role);
+        if (current >= ROLE_LIMITS[role]) {
+            return res.status(409).json({
+                success: false,
+                message: `Limit reached — a maximum of ${ROLE_LIMITS[role]} `
+                       + `${role === ROLE_SUPER_ADMIN ? "super admins" : "admins"} `
+                       + `are allowed (currently ${current}). `
+                       + `Remove one before adding another.`,
+            });
+        }
+    }
+
     try {
         const bcrypt = require("bcryptjs");
         const hashedPassword = await bcrypt.hash(password, 10);
 
         await pool.query(
-            `INSERT INTO employees (employee_id, username, password, role)
-             VALUES ($1, $2, $3, $4)`,
-            [employee_id, username, hashedPassword, role]
+            `INSERT INTO employees (employee_id, username, password, role, full_name, designation)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+                employee_id, username, hashedPassword, role,
+                full_name || username,
+                designation || (role === "super_admin" ? "Administrator"
+                                : role === "admin" ? "Manager" : "Employee"),
+            ]
         );
 
         return res.json({ success: true, message: "Employee created" });
@@ -151,10 +285,30 @@ exports.getConfig = async (req, res) => {
             idle_threshold_seconds:  60,
             force_logout:            false,
             verbose_logging:         false,
+            shift_start:             null,
+            shift_end:               null,
         };
 
-        const row    = result.rows[0] || {};
-        const config = { ...DEFAULT, ...row };
+        // BUG FIX: jis employee ka apna config row nahi hai, uske liye pehle
+        // seedha hardcoded DEFAULT return hota tha — GLOBAL config nahi.
+        // Matlab admin panel me us employee ke liye 3/10/3/60/60 dikhta tha,
+        // jabki asal me wo employee /config/sync se GLOBAL values pe chal
+        // raha hota tha. Admin ko galat values dikhtin, aur Save dabate hi
+        // wahi galat values us employee pe permanently likh jaatin (global
+        // se inherit karna band ho jaata). Ab global row pe fall back karte
+        // hain — bilkul waise hi jaise config.controller karta hai.
+        let row = result.rows[0];
+        if (!row && !isGlobal) {
+            const globalResult = await pool.query(
+                `SELECT * FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
+            );
+            row = globalResult.rows[0];
+        }
+
+        const config = { ...DEFAULT, ...(row || {}) };
+        // employee_id hamesha wahi rakho jo maanga gaya tha — warna global
+        // row se NULL leak ho ke UI confuse ho jaata hai.
+        config.employee_id = isGlobal ? null : employee_id;
 
         return res.json({ success: true, config });
     } catch (err) {
@@ -163,7 +317,7 @@ exports.getConfig = async (req, res) => {
 };
 
 exports.saveConfig = async (req, res) => {
-    const {
+    let {
         employee_id = null,
         screenshot_min_minutes = 3,
         screenshot_max_minutes = 10,
@@ -176,6 +330,23 @@ exports.saveConfig = async (req, res) => {
         shift_end = undefined,
     } = req.body;
 
+
+    // BUG FIX: getConfig `"global"` ko global-default ke liye sentinel maanta
+    // hai (GET /admin/config/global), lekin saveConfig sirf `null` ko global
+    // maanta tha. Jo bhi caller `{"employee_id":"global"}` bhejta (deploy.sh
+    // yehi bhejta hai) uske liye ek asli employee row ban jaati thi — ek aise
+    // employee_id ke naam pe jo employees table me exist hi nahi karta — aur
+    // asli global config kabhi update hi nahi hoti thi. Ab dono endpoints ek
+    // hi sentinel samajhte hain.
+    if (employee_id === "global" || employee_id === "") {
+        employee_id = null;
+    }
+
+    // ROLE GUARD: baaki endpoints (delete / force-logout / verbose) pe ye
+    // check tha lekin saveConfig pe REH GAYA tha — ek admin doosre admin
+    // (ya super_admin) ka config badal sakta tha. Global config (employee_id
+    // null) sab admins ke liye allowed hai.
+    if (employee_id !== null && !(await assertCanManage(req, res, employee_id))) return;
 
     // Range validation
     const min_ss = parseInt(screenshot_min_minutes);
@@ -194,12 +365,46 @@ exports.saveConfig = async (req, res) => {
         return res.status(400).json({ success: false, message: "screenshot_count must be 1–20" });
     if (isNaN(upload) || upload < 1 || upload > 1440)
         return res.status(400).json({ success: false, message: "upload_interval_minutes must be 1–1440" });
-    if (isNaN(idle) || idle < 10 || idle > 3600)
-        return res.status(400).json({ success: false, message: "idle_threshold_seconds must be 10–3600" });
+    // Idle threshold ab 10–150 sec (admin panel spinbox ke saath match karta
+    // hai). Pehle server 3600 tak allow karta tha jabki UI 600 tak — dono
+    // out of sync the aur dono hi requirement se zyada the.
+    if (isNaN(idle) || idle < 10 || idle > 150)
+        return res.status(400).json({ success: false, message: "idle_threshold_seconds must be 10–150" });
 
     try {
-        const shiftStartStr = shift_start !== undefined ? String(shift_start).trim().slice(0, 5) : undefined;
-        const shiftEndStr   = shift_end   !== undefined ? String(shift_end).trim().slice(0, 5) : undefined;
+        // BUG FIX: shift_start/shift_end pehle bina kisi validation ke seedha
+        // Postgres ko TIME column me chale jaate the. "25:99", "abcde", "9"
+        // jaisi value pe Postgres apna RAW error phenk deta tha, jo client
+        // tak pahunch jaata:
+        //     "invalid input syntax for type time: \"abcde\""
+        //     "date/time field value out of range: \"25:99\""
+        // Do problem: (1) admin ko samajh na aane wala technical error,
+        // (2) internal DB type/schema ka detail leak hota hai.
+        // Ab pehle hi HH:MM format check karke saaf 400 dete hain.
+        const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+        const normaliseTime = (value, label) => {
+            if (value === undefined) return undefined;
+            const text = String(value).trim().slice(0, 5);
+            if (!TIME_RE.test(text)) {
+                const error = new Error(
+                    `${label} must be a 24-hour time in HH:MM format (00:00–23:59).`
+                );
+                error.userFacing = true;
+                throw error;
+            }
+            return text;
+        };
+
+        let shiftStartStr, shiftEndStr;
+        try {
+            shiftStartStr = normaliseTime(shift_start, "Shift start time");
+            shiftEndStr   = normaliseTime(shift_end,   "Shift end time");
+        } catch (error) {
+            if (error.userFacing) {
+                return res.status(400).json({ success: false, message: error.message });
+            }
+            throw error;
+        }
 
         if (employee_id === null) {
             const existing = await pool.query(
@@ -270,6 +475,8 @@ exports.toggleVerboseLogging = async (req, res) => {
         return res.status(400).json({ success: false, message: "employee_id required" });
     }
 
+    if (!(await assertCanManage(req, res, employee_id))) return;
+
     try {
         await pool.query(
             `INSERT INTO employee_configs (employee_id, verbose_logging, updated_at)
@@ -292,6 +499,29 @@ exports.forceLogout = async (req, res) => {
 
     if (!employee_id) {
         return res.status(400).json({ success: false, message: "employee_id required" });
+    }
+
+    // FORCE LOGOUT ka rule baaki actions se ALAG hai:
+    //   - admin KISI KO BHI force logout kar sakta hai (admin ho ya employee)
+    //   - sirf super_admin protected hai (use koi nahi nikaal sakta)
+    // Ye jaan-boojh kar `assertCanManage()` use nahi karta, kyunki wo admin ko
+    // doosre admin pe action lene se rokta hai — jo yahan nahi chahiye.
+    try {
+        const target = await pool.query(
+            `SELECT role FROM employees WHERE employee_id = $1`, [employee_id]
+        );
+        if (target.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+        if (target.rows[0].role === ROLE_SUPER_ADMIN
+            && req.employee?.role !== ROLE_SUPER_ADMIN) {
+            return res.status(403).json({
+                success: false,
+                message: "The super admin cannot be force logged out."
+            });
+        }
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
     }
 
     try {
@@ -476,7 +706,7 @@ exports.getEmployeeDetails = async (req, res) => {
         const attendance = await pool.query(
             `SELECT 1 FROM attendance
              WHERE employee_id = $1 AND logout_time IS NULL
-               AND login_time > NOW()::timestamp - INTERVAL '16 hours' LIMIT 1`,
+               AND login_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '16 hours' LIMIT 1`,
             [employee_id]
         );
 
@@ -487,12 +717,47 @@ exports.getEmployeeDetails = async (req, res) => {
             [employee_id]
         );
 
+        // ─────────────────────────────────────────────────────────────────
+        //  ACTIVE / IDLE TIME — session-bounded
+        //
+        //  BUG: pehle ye SAARE USER ACTIVE/IDLE events le kar consecutive
+        //  events ka gap jod deta tha — bina ye dekhe ki beech me app band
+        //  thi ya nahi. Matlab agar employee ne shukravar 6 baje app band
+        //  ki aur somvar 10 baje kholi, to beech ke 64 GHANTE bhi "active
+        //  time" me jud jaate the.
+        //
+        //  Production data pe iska asar: EMP001 ka Active Time 801:14:31
+        //  (33 din) dikh raha tha — jo asal me uske pehle log se ab tak ka
+        //  poora wall-clock time tha, kaam ka time nahi.
+        //
+        //  Ab time sirf ASLI ATTENDANCE SESSIONS ke andar hi count hota hai
+        //  (login se logout tak). Session ke bahar ka koi bhi gap ignore.
+        //  Har employee ka apna data, apni sessions — kisi ke saath
+        //  naainsafi nahi.
+        // ─────────────────────────────────────────────────────────────────
+        const WINDOW_DAYS = 90;
+
+        const sessions = await pool.query(
+            `SELECT login_time,
+                    COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) AS end_time
+             FROM attendance
+             WHERE employee_id = $1
+               AND login_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '${WINDOW_DAYS} days'
+             ORDER BY login_time ASC`,
+            [employee_id]
+        );
+
+        // SCALE FIX: pehle is query pe koi LIMIT nahi thi. Ek bhaari user ke
+        // laakhon events Node ki memory me aa jaate — aur ye dialog har 10
+        // second refresh hota hai.
         const events = await pool.query(
             `SELECT created_at, activity
              FROM activity_logs
              WHERE employee_id = $1
                AND (UPPER(activity) LIKE '%USER ACTIVE%' OR UPPER(activity) LIKE '%USER IDLE%')
-             ORDER BY id ASC`,
+               AND created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '${WINDOW_DAYS} days'
+             ORDER BY created_at ASC
+             LIMIT 50000`,
             [employee_id]
         );
 
@@ -506,48 +771,42 @@ exports.getEmployeeDetails = async (req, res) => {
             return null;
         };
 
-        // BUG FIX: created_at DB se raw string (jaise "2026-07-03 11:33:27")
-        // aati hai (db.js mein timestamp type-parser identity rakha gaya
-        // hai). `new Date(str)` is string ko Node process ki AMBIENT
-        // timezone ke hisaab se parse karta hai — agar kabhi PM2/server
-        // ki TZ UTC se badal jaye (abhi UTC hai isliye chal raha hai),
-        // to active/idle time silently GALAT ho jayenge (timezone-shifted).
-        // parseUtc() se hum string ko explicitly UTC maan ke parse karte
-        // hain, chahe process ki TZ kuch bhi ho.
-        const parseUtc = (s) => new Date(String(s).replace(" ", "T") + "Z");
+        // created_at raw string aati hai (db.js identity type-parser).
+        // `new Date(str)` process ki ambient TZ use karta — explicitly UTC.
+        const parseUtc = (s) => new Date(String(s).replace(" ", "T") + "Z").getTime();
 
-        for (let i = 0; i < events.rows.length - 1; i++) {
-            const cur  = events.rows[i];
-            const next = events.rows[i + 1];
-            const state = normalizeState(cur.activity);
-            if (!state) continue;
+        const evts = events.rows
+            .map(r => ({ t: parseUtc(r.created_at), s: normalizeState(r.activity) }))
+            .filter(e => e.s && Number.isFinite(e.t));
 
-            const dt = parseUtc(next.created_at).getTime() - parseUtc(cur.created_at).getTime();
-            if (!Number.isFinite(dt) || dt < 0) continue;
+        for (const row of sessions.rows) {
+            const sStart = parseUtc(row.login_time);
+            const sEnd   = parseUtc(row.end_time);
+            if (!Number.isFinite(sStart) || !Number.isFinite(sEnd) || sEnd <= sStart) continue;
 
-            if (state === "ACTIVE") activeMs += dt;
-            if (state === "IDLE")   idleMs   += dt;
-        }
+            // Is session ke andar ke events
+            const inSession = evts.filter(e => e.t >= sStart && e.t <= sEnd);
 
-        // Add currently running session tail
-        if (isOnline && events.rows.length > 0) {
-            let latestState     = null;
-            let latestEventTime = null;
+            // Session start se pehle event tak — employee abhi abhi login
+            // hua hai, use ACTIVE maano.
+            let cursor = sStart;
+            let state  = "ACTIVE";
 
-            for (let i = events.rows.length - 1; i >= 0; i--) {
-                const st = normalizeState(events.rows[i].activity);
-                if (!st) continue;
-                latestState     = st;
-                latestEventTime = parseUtc(events.rows[i].created_at).getTime();
-                break;
+            for (const e of inSession) {
+                const dt = e.t - cursor;
+                if (dt > 0) {
+                    if (state === "ACTIVE") activeMs += dt;
+                    else                    idleMs   += dt;
+                }
+                state  = e.s;
+                cursor = e.t;
             }
 
-            if (latestState && Number.isFinite(latestEventTime)) {
-                const extraMs = Date.now() - latestEventTime;
-                if (Number.isFinite(extraMs) && extraMs > 0) {
-                    if (latestState === "ACTIVE") activeMs += extraMs;
-                    if (latestState === "IDLE")   idleMs   += extraMs;
-                }
+            // Aakhri event se session end tak
+            const tail = sEnd - cursor;
+            if (tail > 0) {
+                if (state === "ACTIVE") activeMs += tail;
+                else                    idleMs   += tail;
             }
         }
 
@@ -582,6 +841,41 @@ exports.getEmployeeDetails = async (req, res) => {
 
 exports.deleteEmployee = async (req, res) => {
     const { employee_id } = req.params;
+
+    // super_admin ko koi delete nahi kar sakta; admin doosre admin ko nahi.
+    if (!(await assertCanManage(req, res, employee_id))) return;
+
+    if (req.employee?.employee_id === employee_id) {
+        return res.status(400).json({
+            success: false,
+            message: req.employee?.role === ROLE_SUPER_ADMIN
+                ? "You cannot delete your own super admin account. Promote another "
+                  + "admin to super admin first, then they can remove you."
+                : "You cannot delete your own account."
+        });
+    }
+
+    // Aakhri super admin kabhi delete na ho — warna koi bhi role manage
+    // karne wala nahi bachega aur system permanently lock ho jayega.
+    try {
+        const target = await pool.query(
+            `SELECT role FROM employees WHERE employee_id = $1`, [employee_id]
+        );
+        if (target.rows[0]?.role === ROLE_SUPER_ADMIN) {
+            const supers = await pool.query(
+                `SELECT COUNT(*) FROM employees WHERE role = $1`, [ROLE_SUPER_ADMIN]
+            );
+            if (Number(supers.rows[0].count) <= 1) {
+                return res.status(403).json({
+                    success: false,
+                    message: "This is the only super admin. Promote another admin to "
+                           + "super admin before deleting this account."
+                });
+            }
+        }
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
+    }
 
     const client = await pool.connect();
 
@@ -693,6 +987,120 @@ exports.saveShift = async (req, res) => {
             [employee_id, startStr, endStr]
         );
         return res.json({ success: true, message: "Shift saved" });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
+    }
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Role management — SIRF super_admin
+//
+//  super_admin ("god" role) company ka owner/manager hai:
+//    - kisi ka bhi role badal sakta hai (employee <-> admin)
+//    - uske upar koi rule nahi lagta
+//    - use koi doosra demote/delete/modify NAHI kar sakta — is liye kisi bhi
+//      super_admin ka role badalna yahan poori tarah blocked hai (chahe
+//      request khud super_admin hi kyun na bheje). Super admin ko badalna ho
+//      to wo DB pe deliberate action hona chahiye, ek API call se nahi.
+// ──────────────────────────────────────────────────────────────────────────────
+exports.changeRole = async (req, res) => {
+    const { employee_id } = req.params;
+    const { role } = req.body;
+
+    if (!employee_id || !role) {
+        return res.status(400).json({
+            success: false,
+            message: "employee_id and role are required"
+        });
+    }
+
+    if (!VALID_ROLES.includes(role)) {
+        return res.status(400).json({
+            success: false,
+            message: `role must be one of: ${VALID_ROLES.join(", ")}`
+        });
+    }
+
+    try {
+        const target = await pool.query(
+            `SELECT role FROM employees WHERE employee_id = $1`, [employee_id]
+        );
+        if (target.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+
+        // ── Super admin ko demote karne ke rules ──
+        //
+        //  1. Koi bhi super admin KHUD ko demote nahi kar sakta. Pehle kisi
+        //     doosre admin ko super admin banao (power transfer), phir wo
+        //     aapko hata sakta hai.
+        //  2. AAKHRI super admin ko kabhi demote nahi kiya ja sakta — warna
+        //     company ke paas koi super admin bachega hi nahi aur role
+        //     management hamesha ke liye lock ho jayega (koi promote karne
+        //     wala hi nahi bachega).
+        if (target.rows[0].role === ROLE_SUPER_ADMIN) {
+            if (employee_id === req.employee?.employee_id) {
+                return res.status(403).json({
+                    success: false,
+                    message: "You cannot remove your own super admin role. "
+                           + "Promote another admin to super admin first, then they can do it."
+                });
+            }
+
+            const supers = await pool.query(
+                `SELECT COUNT(*) FROM employees WHERE role = $1`, [ROLE_SUPER_ADMIN]
+            );
+            if (Number(supers.rows[0].count) <= 1) {
+                return res.status(403).json({
+                    success: false,
+                    message: "This is the only super admin. Promote another admin to "
+                           + "super admin before removing this one."
+                });
+            }
+        }
+
+        // Sirf super_admin kisi ko promote kar sakta hai (route pehle se
+        // superAdminOnly hai — ye defence-in-depth).
+        if (role !== "employee" && req.employee?.role !== ROLE_SUPER_ADMIN) {
+            return res.status(403).json({
+                success: false,
+                message: "Only a super admin can promote someone to admin or super admin."
+            });
+        }
+
+        // Promotion pe bhi wahi caps lagte hain jo creation pe. Target ko
+        // count se chhod dete hain — warna same role pe "promote" karna bhi
+        // limit hit kar deta.
+        if (ROLE_LIMITS[role]) {
+            const current = await countRole(role, employee_id);
+            if (current >= ROLE_LIMITS[role]) {
+                return res.status(409).json({
+                    success: false,
+                    message: `Limit reached — a maximum of ${ROLE_LIMITS[role]} `
+                           + `${role === ROLE_SUPER_ADMIN ? "super admins" : "admins"} `
+                           + `are allowed (currently ${current}).`,
+                });
+            }
+        }
+
+        await pool.query(
+            `UPDATE employees SET role = $1 WHERE employee_id = $2`,
+            [role, employee_id]
+        );
+
+        // Role badalne par uska current session turant revoke karo — warna
+        // purana JWT (jisme purana role embedded hai) apni 24h expiry tak
+        // purane privileges ke saath chalta rehta.
+        await pool.query(
+            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+            [employee_id]
+        );
+
+        return res.json({
+            success: true,
+            message: `${employee_id} is now ${role}. They must sign in again.`
+        });
+
     } catch (err) {
         return res.status(500).json({ success: false, error: err.message });
     }
