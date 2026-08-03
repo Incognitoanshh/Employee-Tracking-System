@@ -298,17 +298,25 @@ exports.getConfig = async (req, res) => {
         // se inherit karna band ho jaata). Ab global row pe fall back karte
         // hain — bilkul waise hi jaise config.controller karta hai.
         let row = result.rows[0];
+        // `inherited` = ye values employee ka apna override NAHI hai, global
+        // default se aa rahi hain. Response me ye flag pehle nahi tha, is
+        // liye admin panel me dono cases bilkul ek jaise dikhte the — admin
+        // ko pata hi nahi chalta tha ki wo employee-specific value dekh raha
+        // hai ya sabki common value. Ab UI banner me saaf likha jaata hai.
+        let inherited = false;
         if (!row && !isGlobal) {
             const globalResult = await pool.query(
                 `SELECT * FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
             );
             row = globalResult.rows[0];
+            inherited = true;
         }
 
         const config = { ...DEFAULT, ...(row || {}) };
         // employee_id hamesha wahi rakho jo maanga gaya tha — warna global
         // row se NULL leak ho ke UI confuse ho jaata hai.
         config.employee_id = isGlobal ? null : employee_id;
+        config.inherited   = isGlobal ? false : inherited;
 
         return res.json({ success: true, config });
     } catch (err) {
