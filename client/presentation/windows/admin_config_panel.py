@@ -1922,6 +1922,15 @@ class _AttendanceTab(QWidget):
         self._build_ui()
         self._load()
 
+        # BUG: is tab me refresh timer tha hi nahi — baaki paanchon tabs me
+        # hai. Attendance panel khulte waqt ek baar load hoti thi aur uske
+        # baad kabhi khud se update nahi hoti thi; naya login/logout dekhne
+        # ke liye Refresh dabana padta tha.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(30000)
+        self._refresh_timer.timeout.connect(lambda: self._load(self._page))
+        self._refresh_timer.start()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
@@ -3303,15 +3312,7 @@ class AdminConfigPanel(QMainWindow):
     def _refresh_current_page(self):
         """Header ka Refresh — jo page khula hai usi ka data reload."""
         self.header.set_busy(True, "refresh")
-        page = self.stack.currentWidget()
-        for method in ("_load_all", "_load", "_load_employees", "refresh"):
-            fn = getattr(page, method, None)
-            if callable(fn):
-                try:
-                    fn()
-                except TypeError:
-                    fn(1)
-                break
+        self._refresh_page(self.stack.currentWidget())
         QTimer.singleShot(900, lambda: self.header.set_busy(False))
 
     def _export_current_page(self):
@@ -3365,6 +3366,30 @@ class AdminConfigPanel(QMainWindow):
         self.stack.setCurrentIndex(idx)
         page = PAGES[idx]
         self.header.set_page(page["icon"], page["title"], page["subtitle"])
+
+        # Saari tabs panel khulte waqt EK BAAR load hoti hain. Uske baad tab
+        # switch karne pe kuch nahi hota tha — Attendance pe jaate to wahi
+        # data dikhta jo panel khulte waqt aaya tha, jab tak 30s ka timer na
+        # chale (aur Attendance me to timer tha hi nahi). Isi liye lagta tha
+        # ki data sirf Refresh dabane pe aata hai.
+        #
+        # Ab har baar tab kholne pe uska data taaza hota hai — sirf US page
+        # ka jo khula hai, saare tabs ka nahi.
+        self._refresh_page(self.stack.currentWidget())
+
+    @staticmethod
+    def _refresh_page(page):
+        """Jo bhi load method us tab pe maujood ho, use call karo."""
+        for method in ("_load_all", "_load", "_load_employees", "refresh"):
+            fn = getattr(page, method, None)
+            if callable(fn):
+                try:
+                    fn()
+                except TypeError:
+                    fn(1)
+                except Exception:
+                    pass
+                break
 
     def capture_screenshot(self):
         result = ScreenshotManager.capture_screenshot()

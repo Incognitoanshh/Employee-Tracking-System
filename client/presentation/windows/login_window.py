@@ -90,9 +90,10 @@ class _LoginWorker(QThread):
 class _PostLoginWorker(QThread):
     """Login ke baad ka kaam — UI ko iska intezaar nahi karna chahiye."""
 
-    def __init__(self, username):
+    def __init__(self, username, login_time):
         super().__init__()
         self._username = username
+        self._login_time = login_time
 
     def run(self):
         # Har step alag try me — ek fail ho to baaki phir bhi chalein.
@@ -100,7 +101,7 @@ class _PostLoginWorker(QThread):
         # LOGIN SUCCESS log ko bhi le dubta tha.
         for fn in (
             lambda: LoggerService.log(f"LOGIN SUCCESS : {self._username}"),
-            ShiftManager.start_shift,
+            lambda: ShiftManager.start_shift_remote(self._login_time),
             SessionLogManager.start_session,
         ):
             try:
@@ -350,11 +351,19 @@ class LoginWindow(BaseWindow):
                 full_name=result.get("full_name"),
                 designation=result.get("designation"),
             )
-            # LOGIN log + attendance/shift start ab background me. Ye
-            # teeno server calls hain aur inme se kisi ka result panel
-            # kholne ke liye nahi chahiye — session already ban chuki hai
-            # aur shift times login response se aa chuke hain.
-            post = _PostLoginWorker(username)
+            # Shift ka LOCAL row abhi likho — millisecond ka kaam hai.
+            #
+            # BUG (maine hi introduce kiya tha jab login async banaya):
+            # poora start_shift() background me chala gaya tha, lekin
+            # EmployeePanel apne __init__ me `shifts` ki latest row padhta
+            # hai (Session Duration wahin se banti hai). Panel row likhe
+            # jaane se PEHLE padh leta tha, is liye Session Duration
+            # hamesha 00:00:00 dikhati thi.
+            login_time = ShiftManager.start_shift_local()
+
+            # Baaki (LOGIN log, attendance POST, session start) ab bhi
+            # background me — inka result panel kholne ke liye nahi chahiye.
+            post = _PostLoginWorker(username, login_time)
             _track(post)
             post.start()
 
