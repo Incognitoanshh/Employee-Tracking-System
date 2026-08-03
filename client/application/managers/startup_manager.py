@@ -121,11 +121,42 @@ class StartupManager:
     @staticmethod
     def _enable_macos():
         plist_path = StartupManager._macos_plist_path()
+        exe_path = sys.executable
+
+        # BUG FIX (upgrade pe autostart chup-chaap band ho jaata tha):
+        # pehle yahan sirf `if os.path.exists(plist_path): return` tha —
+        # yaani plist file maujood hone par path check kiye bina hi return.
+        #
+        # App ka naya version install hone par (ya app rename/move hone par)
+        # executable ka path badal jaata hai, lekin purana plist waise ka
+        # waisa pada rehta tha — delete ho chuke binary ko point karta hua.
+        # launchd use load karne ki koshish karta, binary milta nahi, aur
+        # app boot pe start hona band ho jaata. Koi error kahin nahi dikhta,
+        # is liye pata bhi nahi chalta.
+        #
+        # Windows branch me ye bug nahi hai kyunki `SetValueEx` har baar
+        # value overwrite kar deta hai. macOS ko wahi behaviour chahiye.
         if os.path.exists(plist_path):
-            return  # already registered
+            try:
+                with open(plist_path) as f:
+                    existing = f.read()
+                if f"<string>{exe_path}</string>" in existing:
+                    return  # already correct — kuch karne ki zarurat nahi
+            except Exception:
+                pass  # padha nahi ja saka to neeche dobara likh denge
+
+            # Stale ya corrupt — purana unload karke naya likho
+            try:
+                import subprocess
+                subprocess.run(["launchctl", "unload", plist_path],
+                               timeout=5, check=False)
+            except Exception:
+                pass
+            LoggerService.log(
+                "StartupManager: stale macOS LaunchAgent mila, refresh kar rahe hain"
+            )
 
         os.makedirs(os.path.dirname(plist_path), exist_ok=True)
-        exe_path = sys.executable
         plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
