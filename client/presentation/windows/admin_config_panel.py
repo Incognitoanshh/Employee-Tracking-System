@@ -194,6 +194,23 @@ def _global_stylesheet() -> str:
     }}
     QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: none; }}
 
+    /* BUG FIX: QCheckBox::indicator ka koi rule tha hi nahi. Native indicator
+       is dark theme pe bilkul dikhta hi nahi tha — "Verbose logging" ke aage
+       khaali jagah dikhti thi aur pata hi nahi chalta tha ki wo ON hai ya OFF. */
+    QCheckBox {{ background: transparent; spacing: 8px; }}
+    QCheckBox::indicator {{
+        width: 20px; height: 20px;
+        border: 1px solid {C['border_light']};
+        border-radius: 6px;
+        background: {C['bg_surface_alt']};
+    }}
+    QCheckBox::indicator:hover {{ border: 1px solid {C['accent']}; }}
+    QCheckBox::indicator:checked {{
+        background: {C['accent']};
+        border: 1px solid {C['accent']};
+        image: none;
+    }}
+
     QCalendarWidget QWidget {{ background: {C['bg_surface']}; color: {C['text_primary']}; }}
     QCalendarWidget QToolButton {{ background: transparent; color: {C['text_primary']}; padding: 4px; }}
     QCalendarWidget QAbstractItemView:enabled {{
@@ -353,10 +370,29 @@ def _shadow(widget, blur=28, dy=8, alpha=70):
     return eff
 
 
+_CARD_UID = [0]
+
+
 def _card(padding: int = 0) -> QFrame:
+    """Ek surface card.
+
+    BUG FIX: pehle stylesheet plain `QFrame { ... }` tha. Qt me aisa selector
+    sirf is widget pe nahi, iske ANDAR ke har QFrame child pe bhi apply hota
+    hai. Card ke andar rakhi har `_divider()` (jo khud QFrame hai) ko card ka
+    `border: 1px solid` + `border-radius: 14px` mil jaata tha — 1px ki patli
+    line chaaron taraf border wala chamakta box ban jaati thi. Screenshot me
+    yehi "white white lines" dikh rahi thi.
+
+    Ab har card ka apna objectName hai aur selector `QFrame#cardN` — is se
+    style sirf usi card pe lagta hai, children bilkul untouched rehte hain.
+    """
+    _CARD_UID[0] += 1
+    name = f"etsCard{_CARD_UID[0]}"
     f = QFrame()
+    f.setObjectName(name)
     f.setStyleSheet(
-        f"QFrame {{ background: {C['bg_surface']}; border: 1px solid {C['border']}; border-radius: 14px; }}"
+        f"QFrame#{name} {{ background: {C['bg_surface']};"
+        f" border: 1px solid {C['border']}; border-radius: 14px; }}"
     )
     return f
 
@@ -368,9 +404,15 @@ def _muted_label(text: str) -> QLabel:
 
 
 def _divider() -> QFrame:
+    """1px separator — border/radius explicitly none, taaki koi bhi parent
+    stylesheet ise box me na badal de."""
     d = QFrame()
+    d.setObjectName("etsDivider")
     d.setFixedHeight(1)
-    d.setStyleSheet(f"background:{C['border']};")
+    d.setStyleSheet(
+        f"QFrame#etsDivider {{ background:{C['border']}; border:none;"
+        f" border-radius:0px; }}"
+    )
     return d
 
 
@@ -686,141 +728,254 @@ class _ConfigTab(QWidget):
         self._build_ui()
         self._load_employees()
 
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(18)
+    # ── UI helpers ───────────────────────────────────────────────────────
+    #
+    #  BUG FIX (screenshot me dikhi "white lines"): `_card()` ka stylesheet
+    #  `QFrame { border: 1px solid ...; border-radius: 14px }` hai. Qt me
+    #  aisa rule card ke ANDAR ke har QFrame child pe bhi lagta hai — aur
+    #  `_divider()` bhi ek QFrame hai. Nateeja: har 1px ki divider line ko
+    #  chaaron taraf border + 14px radius mil jaata tha, jisse wo patli
+    #  line ki jagah ek chamakta hua box ban jaati thi.
+    #
+    #  Ab dividers bilkul use hi nahi karte — settings ko grouped section
+    #  cards me baant diya hai. Har card ka apna objectName hai taaki
+    #  stylesheet sirf usi pe lage, children pe nahi.
+    # ─────────────────────────────────────────────────────────────────────
+    def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
+        """Ek setting ki row — koi divider nahi, sirf spacing aur alignment."""
+        row = QWidget()
+        row.setObjectName("cfgRow")
+        # Scoped selector — plain `background:transparent` andar ke QSpinBox /
+        # QLineEdit / QCheckBox pe bhi cascade ho jaata tha, jisse unke field
+        # boxes hi gayab ho gaye the (number hawa me tairta dikhta tha).
+        row.setStyleSheet("QWidget#cfgRow { background: transparent; }")
+        row.setMinimumHeight(58)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 8, 0, 8)
+        lay.setSpacing(18)
 
-        # Employee selector toolbar
-        toolbar = _card()
-        t_lay = QHBoxLayout(toolbar)
-        t_lay.setContentsMargins(18, 14, 18, 14)
-        t_lay.setSpacing(12)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.setContentsMargins(0, 0, 0, 0)
+        name = QLabel(label_text)
+        name.setStyleSheet(
+            f"color:{C['text_primary']}; font-size:13px; font-weight:600;"
+            f"background:transparent;"
+        )
+        hint = QLabel(desc)
+        hint.setWordWrap(True)
+        hint.setMinimumWidth(240)
+        hint.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+        )
+        text_col.addWidget(name)
+        text_col.addWidget(hint)
+        lay.addLayout(text_col, 1)
 
-        t_lay.addWidget(_muted_label("Employee"))
-        self._emp_combo = QComboBox()
-        self._emp_combo.setMinimumWidth(260)
-        self._emp_combo.currentIndexChanged.connect(self._on_employee_changed)
-        t_lay.addWidget(self._emp_combo)
-        t_lay.addStretch()
+        # Field + uska unit ek hi group me — pehle unit label form ke bilkul
+        # baayin taraf latak jaata tha aur value se dur dikhta tha.
+        field = QWidget()
+        field.setObjectName("cfgField")
+        field.setStyleSheet("QWidget#cfgField { background: transparent; }")
+        f_lay = QHBoxLayout(field)
+        f_lay.setContentsMargins(0, 0, 0, 0)
+        f_lay.setSpacing(8)
 
-        refresh_btn = _btn("↻  Refresh", variant="secondary", height=34, width=110)
-        refresh_btn.clicked.connect(self._load_employees)
-        t_lay.addWidget(refresh_btn)
+        if isinstance(widget, QCheckBox):
+            widget.setFixedWidth(24)
+        else:
+            widget.setFixedWidth(104)
+        f_lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        root.addWidget(toolbar)
-
-        # Settings rows
-        self._min_spin = QSpinBox()
-        self._min_spin.setRange(1, 60)
-        self._min_spin.setSuffix(" min")
-        self._min_spin.setMinimumWidth(120)
-
-        self._max_spin = QSpinBox()
-        self._max_spin.setRange(1, 120)
-        self._max_spin.setSuffix(" min")
-        self._max_spin.setMinimumWidth(120)
-
-        self._cnt_spin = QSpinBox()
-        self._cnt_spin.setRange(1, 20)
-        self._cnt_spin.setMinimumWidth(120)
-
-        self._upl_spin = QSpinBox()
-        self._upl_spin.setRange(1, 240)
-        self._upl_spin.setSuffix(" min")
-        self._upl_spin.setMinimumWidth(120)
-
-        self._idle_spin = QSpinBox()
-        self._idle_spin.setRange(10, 150)
-        self._idle_spin.setSuffix(" sec")
-        self._idle_spin.setMinimumWidth(120)
-
-        self._verbose_check = QCheckBox()
-        self._verbose_check.setMinimumWidth(120)
-
-        self._shift_start = QLineEdit()
-        self._shift_start.setPlaceholderText("09:00")
-        self._shift_start.setFixedWidth(120)
-
-        self._shift_end = QLineEdit()
-        self._shift_end.setPlaceholderText("18:00")
-        self._shift_end.setFixedWidth(120)
-
-        rows_data = [
-            ("Screenshot min interval", "Shortest gap allowed before the next capture.", self._min_spin),
-            ("Screenshot max interval", "Longest gap allowed between captures.",          self._max_spin),
-            ("Screenshots per shift",   "Maximum captures taken in a single shift.",       self._cnt_spin),
-            ("Upload interval",         "How often captured data syncs to the server.",    self._upl_spin),
-            ("Idle threshold",          "Seconds of inactivity before marked idle.",        self._idle_spin),
-            ("Verbose logging",         "Log every sync/schedule event. Turn on only while debugging an issue.", self._verbose_check),
-            ("Shift start time",        "Employee shift start time (HH:MM format, IST).",  self._shift_start),
-            ("Shift end time",          "Employee shift end time (HH:MM format, IST).",    self._shift_end),
-        ]
-
-        # BUG FIX: pehle rows ki koi minimum height nahi thi. Card me 8 rows
-        # + 7 dividers the, aur window chhoti hone par Qt unhe squeeze kar
-        # deta tha — har row ka description text neeche se KATA hua dikhta
-        # tha ("Shortest gap allowed before the next capture." adhoora).
-        # Ab har row ki fixed minimum height hai aur poora form scrollable
-        # hai, to chhoti window pe bhi kuch clip nahi hota.
-        form_card = _card()
-        form_vbox = QVBoxLayout(form_card)
-        form_vbox.setContentsMargins(22, 10, 22, 10)
-        form_vbox.setSpacing(0)
-
-        for idx, (label_text, desc, spin_widget) in enumerate(rows_data):
-            row_widget = QWidget()
-            row_widget.setMinimumHeight(62)
-            row_widget.setStyleSheet("background:transparent;")
-            row = QHBoxLayout(row_widget)
-            row.setSpacing(16)
-            row.setContentsMargins(0, 10, 0, 10)
-
-            text_col = QVBoxLayout()
-            text_col.setSpacing(3)
-            text_col.setContentsMargins(0, 0, 0, 0)
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet(
-                f"color:{C['text_primary']}; font-size:13px; font-weight:600;"
-                f"background:transparent;"
-            )
-            desc_lbl = QLabel(desc)
-            desc_lbl.setWordWrap(True)
-            desc_lbl.setMinimumWidth(260)
-            desc_lbl.setStyleSheet(
+        if suffix:
+            unit = QLabel(suffix)
+            unit.setFixedWidth(58)
+            unit.setStyleSheet(
                 f"color:{C['text_muted']}; font-size:11px; background:transparent;"
             )
-            text_col.addWidget(lbl)
-            text_col.addWidget(desc_lbl)
+            f_lay.addWidget(unit, 0, Qt.AlignmentFlag.AlignVCenter)
+        else:
+            f_lay.addSpacing(58)
 
-            row.addLayout(text_col, 1)
-            row.addWidget(spin_widget, 0, Qt.AlignmentFlag.AlignVCenter)
-            form_vbox.addWidget(row_widget)
+        lay.addWidget(field, 0, Qt.AlignmentFlag.AlignVCenter)
+        return row
 
-            if idx < len(rows_data) - 1:
-                form_vbox.addWidget(_divider())
+    def _build_section(self, icon: str, title: str, subtitle: str, rows: list) -> QFrame:
+        card = _card()
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(4)
 
-        form_scroll = QScrollArea()
-        form_scroll.setWidgetResizable(True)
-        form_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        form_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
-        form_scroll.setWidget(form_card)
-        root.addWidget(form_scroll, 1)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        badge = QLabel(icon)
+        badge.setFixedSize(30, 30)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setStyleSheet(
+            f"background:{C['accent_soft']}; border-radius:9px; font-size:14px;"
+        )
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        heading = QLabel(title)
+        heading.setStyleSheet(
+            f"color:{C['text_primary']}; font-size:14px; font-weight:700;"
+            f"background:transparent;"
+        )
+        sub = QLabel(subtitle)
+        sub.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+        )
+        titles.addWidget(heading)
+        titles.addWidget(sub)
+        head.addWidget(badge)
+        head.addLayout(titles)
+        head.addStretch()
+        lay.addLayout(head)
+        lay.addSpacing(8)
 
-        # Save
+        for row in rows:
+            lay.addWidget(row)
+        return card
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        host = QWidget()
+        host.setObjectName("cfgHost")
+        host.setStyleSheet("QWidget#cfgHost { background: transparent; }")
+        body = QVBoxLayout(host)
+        body.setContentsMargins(28, 22, 22, 22)
+        body.setSpacing(14)
+        scroll.setWidget(host)
+        root.addWidget(scroll)
+
+        # ── Scope selector ────────────────────────────────────────────────
+        toolbar = _card()
+        t_lay = QHBoxLayout(toolbar)
+        t_lay.setContentsMargins(20, 14, 20, 14)
+        t_lay.setSpacing(12)
+
+        scope_label = QLabel("Applying to")
+        scope_label.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:12px; font-weight:600;"
+            f"background:transparent;"
+        )
+        self._emp_combo = QComboBox()
+        self._emp_combo.setMinimumWidth(300)
+        self._emp_combo.setFixedHeight(38)
+        self._emp_combo.currentIndexChanged.connect(self._on_employee_changed)
+
+        refresh_btn = _btn("↻  Refresh", variant="secondary", height=38, width=110)
+        refresh_btn.clicked.connect(self._load_employees)
+
+        t_lay.addWidget(scope_label)
+        t_lay.addWidget(self._emp_combo)
+        t_lay.addStretch()
+        t_lay.addWidget(refresh_btn)
+        body.addWidget(toolbar)
+
+        # ── Scope banner ──────────────────────────────────────────────────
+        #  Ye sabse zaroori addition hai: pehle screen pe kahin saaf nahi
+        #  tha ki aap GLOBAL badal rahe ho ya EK employee ka. Dono form
+        #  bilkul ek jaise dikhte the, to galti se sabka config badal
+        #  dena bahut aasan tha.
+        self._scope_banner = QLabel("")
+        self._scope_banner.setWordWrap(True)
+        self._scope_banner.setStyleSheet(
+            f"background:{C['accent_soft']}; color:{C['text_secondary']};"
+            f"border:1px solid {C['border']}; border-radius:10px;"
+            f"padding:11px 16px; font-size:12px;"
+        )
+        body.addWidget(self._scope_banner)
+
+        # ── Widgets (naam wahi — save/load logic inhi pe depend karta hai) ──
+        self._min_spin = QSpinBox(); self._min_spin.setRange(1, 60)
+        self._max_spin = QSpinBox(); self._max_spin.setRange(1, 120)
+        self._cnt_spin = QSpinBox(); self._cnt_spin.setRange(1, 20)
+        self._upl_spin = QSpinBox(); self._upl_spin.setRange(1, 240)
+        self._idle_spin = QSpinBox(); self._idle_spin.setRange(10, 150)
+        for s in (self._min_spin, self._max_spin, self._cnt_spin,
+                  self._upl_spin, self._idle_spin):
+            s.setFixedHeight(36)
+            s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._verbose_check = QCheckBox()
+        self._shift_start = QLineEdit(); self._shift_start.setPlaceholderText("09:00")
+        self._shift_end   = QLineEdit(); self._shift_end.setPlaceholderText("18:00")
+        for e in (self._shift_start, self._shift_end):
+            e.setFixedHeight(36)
+            e.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            e.setMaxLength(5)
+
+        # ── Sections ──────────────────────────────────────────────────────
+        body.addWidget(self._build_section(
+            "📸", "Screenshot Capture",
+            "Kitni aur kitni jaldi captures li jayen.",
+            [
+                self._setting_row("Screenshots per shift",
+                                  "Ek shift me maximum kitne captures.",
+                                  self._cnt_spin, "captures"),
+                self._setting_row("Minimum interval",
+                                  "Do captures ke beech kam se kam itna gap.",
+                                  self._min_spin, "minutes"),
+                self._setting_row("Maximum interval",
+                                  "Do captures ke beech zyada se zyada itna gap.",
+                                  self._max_spin, "minutes"),
+            ]))
+
+        body.addWidget(self._build_section(
+            "🖥", "Activity Tracking",
+            "Employee kab idle maana jaayega.",
+            [
+                self._setting_row("Idle threshold",
+                                  "Itni der koi input na aaye to idle mark hoga.",
+                                  self._idle_spin, "seconds"),
+            ]))
+
+        body.addWidget(self._build_section(
+            "🕐", "Shift Schedule",
+            "Screenshots isi window ke andar schedule hote hain (IST).",
+            [
+                self._setting_row("Shift start time", "24-hour format, jaise 09:00.",
+                                  self._shift_start, "HH:MM"),
+                self._setting_row("Shift end time",
+                                  "Overnight shift ke liye end < start rakho (22:00 → 06:00).",
+                                  self._shift_end, "HH:MM"),
+            ]))
+
+        body.addWidget(self._build_section(
+            "⚙", "Advanced",
+            "Sirf zarurat padne par badlo.",
+            [
+                self._setting_row("Upload interval",
+                                  "Captured data kitni der me server pe sync ho.",
+                                  self._upl_spin, "minutes"),
+                self._setting_row("Verbose logging",
+                                  "Har sync/schedule event log karta hai. Sirf debugging ke "
+                                  "liye ON karo — DB tezi se bharta hai.",
+                                  self._verbose_check),
+            ]))
+
+        # ── Save ──────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
-        self._save_btn = _btn("💾  Save Config", variant="primary", height=40, width=170)
+        btn_row.setSpacing(12)
+        self._save_btn = _btn("💾  Save Config", variant="primary", height=42, width=170)
         self._save_btn.clicked.connect(self._save_config)
-        btn_row.addWidget(self._save_btn)
-        btn_row.addStretch()
-        root.addLayout(btn_row)
-
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("font-size:12px; background:transparent;")
-        root.addWidget(self._status_label)
-        root.addStretch()
-
-    # Data loading
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
+        )
+        btn_row.addWidget(self._save_btn)
+        btn_row.addWidget(self._status_label, 1)
+        body.addLayout(btn_row)
+        body.addStretch()
 
     def _load_employees(self):
         self._status_label.setText("Employees load ho rahe hain…")
@@ -847,6 +1002,7 @@ class _ConfigTab(QWidget):
 
     def _on_employee_changed(self):
         emp_id = self._emp_combo.currentData() or "global"
+        self._update_scope_banner()
         w = _FetchWorker(f"{API_BASE_URL}/admin/config/{emp_id}")
         w.result.connect(self._populate_form)
         w.error.connect(lambda e: self._status_label.setText(f"Config load error: {e}"))
@@ -869,6 +1025,48 @@ class _ConfigTab(QWidget):
         # jaata hai". Ab har baar field explicitly set/clear hoti hai.
         self._shift_start.setText(str(cfg.get("shift_start") or "")[:5])
         self._shift_end.setText(str(cfg.get("shift_end") or "")[:5])
+        self._update_scope_banner(bool(cfg.get("inherited")))
+
+    def _update_scope_banner(self, inherited: bool = False):
+        """Saaf batata hai ki abhi jo values dikh rahi hain wo kiske liye hain.
+
+        Ye isliye zaroori hai: global aur per-employee form bilkul ek jaise
+        dikhte the. Admin ek employee select karke value badalta, aur use
+        yakeen nahi hota tha ki ye sirf usi employee pe lagi ya sabpe.
+        """
+        emp_id = self._emp_combo.currentData()
+        if not emp_id or emp_id == "global":
+            self._scope_banner.setStyleSheet(
+                f"background:{C['warning_soft']}; color:{C['text_secondary']};"
+                f"border:1px solid {C['border']}; border-radius:10px;"
+                f"padding:11px 16px; font-size:12px;"
+            )
+            self._scope_banner.setText(
+                "🌐  <b>Global Default</b> — ye har us employee pe lagega jiska "
+                "apna override set nahi hai. Jinke override set hain wo apni "
+                "hi value pe rahenge."
+            )
+            return
+
+        label = self._emp_combo.currentText()
+        self._scope_banner.setStyleSheet(
+            f"background:{C['accent_soft']}; color:{C['text_secondary']};"
+            f"border:1px solid {C['border']}; border-radius:10px;"
+            f"padding:11px 16px; font-size:12px;"
+        )
+        if inherited:
+            self._scope_banner.setText(
+                f"👤  <b>{label}</b> — abhi iska apna koi override nahi hai, ye "
+                f"<b>Global Default</b> se values le raha hai. Save dabate hi "
+                f"sirf isi employee ka override ban jayega; baaki koi affect "
+                f"nahi hoga."
+            )
+        else:
+            self._scope_banner.setText(
+                f"👤  <b>{label}</b> — ye iski apni settings hain. Yahan kiya "
+                f"gaya change <b>sirf isi employee</b> pe lagega, kisi aur pe "
+                f"nahi."
+            )
 
     # Actions
 
@@ -1149,7 +1347,8 @@ class _DashboardTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
         host = QWidget()
-        host.setStyleSheet("background:transparent;")
+        host.setObjectName("cfgHost")
+        host.setStyleSheet("QWidget#cfgHost { background: transparent; }")
         root = QVBoxLayout(host)
         root.setContentsMargins(28, 22, 22, 22)
         root.setSpacing(16)

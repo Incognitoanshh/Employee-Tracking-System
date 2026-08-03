@@ -93,7 +93,14 @@ exports.syncConfig = async (req, res) => {
                     end_ist:   `${today}T${String(s.shift_end).substring(0, 5)}:00+05:30`,
                 };
             }
-        } catch (e) {}
+        } catch (e) {
+            // Pehle ye catch bilkul khaali tha. Agar shift query kabhi fail
+            // hoti (DB blip, statement_timeout), shift chup-chaap null ho
+            // jaata aur client "login se 8 ghante" wale fallback window pe
+            // chala jaata — screenshots galat time pe, aur logs me iska koi
+            // nishaan tak nahi. Ab kam se kam trace to milega.
+            console.error(`[CONFIG SYNC] shift lookup failed for ${employee_id}:`, e.message);
+        }
 
 
         return res.status(200).json({
