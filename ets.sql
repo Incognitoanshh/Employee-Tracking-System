@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS employees (
     username    VARCHAR(100) UNIQUE NOT NULL,
     password    VARCHAR(255) NOT NULL,
     role        VARCHAR(20)  NOT NULL DEFAULT 'employee',
+    full_name   VARCHAR(120),
+    designation VARCHAR(120),
     created_at  TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
 );
 
@@ -62,14 +64,24 @@ CREATE TABLE IF NOT EXISTS employee_configs (
     updated_at              TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
 );
 
--- Global default config row
+-- Sirf EK global-default row ho sake. Normal UNIQUE constraint yahan kaam
+-- nahi karta: Postgres NULLs ko ek doosre se DISTINCT maanta hai, is liye
+-- `ON CONFLICT (employee_id) DO NOTHING` NULL row pe kabhi trigger hi nahi
+-- hota tha — har baar ye file chalane pe ek NAYI duplicate global row ban
+-- jaati thi. Partial unique index NULL pe bhi enforce karta hai.
+CREATE UNIQUE INDEX IF NOT EXISTS employee_configs_single_global
+    ON employee_configs ((employee_id IS NULL))
+    WHERE employee_id IS NULL;
+
+-- Global default config row (sirf tab jab pehle se na ho)
 INSERT INTO employee_configs
     (employee_id, screenshot_min_minutes, screenshot_max_minutes,
      screenshot_count, upload_interval_minutes, idle_threshold_seconds,
      force_logout, verbose_logging)
-VALUES
-    (NULL, 3, 10, 3, 60, 60, false, false)
-ON CONFLICT (employee_id) DO NOTHING;
+SELECT NULL, 3, 10, 3, 60, 60, false, false
+WHERE NOT EXISTS (
+    SELECT 1 FROM employee_configs WHERE employee_id IS NULL
+);
 
 -- ═══════════════════════════════════════════════════════════════
 -- MIGRATION: existing DB pe run karo agar already tables hain

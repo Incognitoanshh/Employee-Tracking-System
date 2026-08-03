@@ -1,5 +1,11 @@
 const pool = require("../config/db");
 
+// super_admin ko har jagah admin ke barabar (ya usse upar) treat karo.
+// BUG: ye checks pehle sirf "admin" dekhte the, is liye super_admin ko
+// sirf apna hi data dikhta — poori company ka nahi.
+const isElevated = (role) => role === "admin" || role === "super_admin";
+
+
 exports.createLog = async (req, res) => {
 
     try {
@@ -14,7 +20,7 @@ exports.createLog = async (req, res) => {
         // SECURITY FIX: non-admin employees sirf apne naam se log create
         // kar sakte hain. Pehle koi bhi employee body mein kisi aur ka
         // employee_id bhej ke uske naam se fake activity log daal sakta tha.
-        if (req.employee?.role !== "admin") {
+        if (!isElevated(req.employee?.role)) {
             employee_id = req.employee?.employee_id;
         }
 
@@ -80,21 +86,36 @@ exports.getLogs = async (req, res) => {
         const role = req.employee?.role;
         const requestingEmployee = req.employee?.employee_id;
 
+        // BUG FIX: response me sirf `data` (max 100 rows) jaata tha, koi
+        // total nahi. Client dashboard ka "Logs Recorded" card `len(data)`
+        // gin ke dikhata tha — matlab 100 logs ke baad wo card HAMESHA
+        // "100" pe atka rehta tha, chahe employee ke 5000 logs ho jayen.
+        // Employee ko lagta tha counter kaam hi nahi kar raha (bilkul sahi
+        // observation). Ab alag se asli COUNT bhejte hain.
         let result;
-        if (role === "admin") {
+        let totalResult;
+        if (isElevated(role)) {
             result = await pool.query(
                 `SELECT * FROM activity_logs ORDER BY id DESC LIMIT 100`
+            );
+            totalResult = await pool.query(
+                `SELECT COUNT(*) FROM activity_logs`
             );
         } else {
             result = await pool.query(
                 `SELECT * FROM activity_logs WHERE employee_id = $1 ORDER BY id DESC LIMIT 100`,
                 [requestingEmployee]
             );
+            totalResult = await pool.query(
+                `SELECT COUNT(*) FROM activity_logs WHERE employee_id = $1`,
+                [requestingEmployee]
+            );
         }
 
         return res.json({
             success: true,
-            data: result.rows
+            data:  result.rows,
+            total: Number(totalResult.rows[0].count),
         });
 
     }

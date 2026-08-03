@@ -15,6 +15,45 @@ from client.presentation.windows.screenshot_preview_window import ScreenshotPrev
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+def _sort_key(ts) -> datetime:
+    """
+    Kisi bhi timestamp format ko ek comparable UTC datetime me badlo.
+
+    Server do alag shapes bhej sakta hai — raw Postgres string
+    ("2026-08-02 09:30:00") aur ISO-with-Z ("2026-08-02T09:30:00.123Z").
+    Sort ke liye dono ko normalize karna zaroori hai, warna rows galat
+    order me dikhti hain.
+    """
+    raw = str(ts or "").strip()
+    if not raw:
+        # Timestamp missing — sabse purana maano taaki wo neeche chala jaye.
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    cleaned = raw.replace("Z", "+00:00")
+    if "T" not in cleaned:
+        cleaned = cleaned.replace(" ", "T", 1)
+
+    # fromisoformat 6 se zyada fractional digits accept nahi karta.
+    if "." in cleaned:
+        head, frac = cleaned.split(".", 1)
+        offset = ""
+        for marker in ("+", "-"):
+            if marker in frac:
+                idx = frac.index(marker)
+                frac, offset = frac[:idx], frac[idx:]
+                break
+        cleaned = f"{head}.{frac[:6]}{offset}"
+
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def to_ist(ts):
     for fmt in ["%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%fZ"]:
         try:
@@ -46,7 +85,7 @@ class _LoadLogsWorker(QObject):
 
             for log in idle_logs:
                 emp_id = log[0]
-                if self._role != "admin" and emp_id != SessionManager.employee_id:
+                if self._role not in ("admin", "super_admin") and emp_id != SessionManager.employee_id:
                     continue
                 if self._employee_filter and emp_id != self._employee_filter:
                     continue
@@ -57,13 +96,21 @@ class _LoadLogsWorker(QObject):
                 emp_id = log[1]
                 file_name = log[2]
                 timestamp = log[3]
-                if self._role != "admin" and emp_id != SessionManager.employee_id:
+                if self._role not in ("admin", "super_admin") and emp_id != SessionManager.employee_id:
                     continue
                 if self._employee_filter and emp_id != self._employee_filter:
                     continue
                 total_logs.append([emp_id, "📸 SCREENSHOT", timestamp, None])
 
-            total_logs.sort(key=lambda x: str(x[2]), reverse=True)
+            # BUG FIX: pehle `key=lambda x: str(x[2])` tha — yaani timestamps
+            # ko STRING ki tarah sort kiya jaata tha. idle_logs aur
+            # screenshot_logs alag-alag timestamp formats de sakte hain
+            # ("2026-08-02 09:30:00" vs "2026-08-02T09:30:00.123Z"), aur
+            # mixed-format string sort chronological order NAHI hota — 'T'
+            # (0x54) space (0x20) se bada hai, is liye saari ISO-format rows
+            # apne actual time se hat ke alag hi jagah chali jaati thin.
+            # Ab actual datetime pe sort karte hain.
+            total_logs.sort(key=lambda x: _sort_key(x[2]), reverse=True)
 
             for row, entry in enumerate(total_logs):
                 if "SCREENSHOT" in str(entry[1]):
@@ -115,7 +162,7 @@ class LogsWindow(BaseWindow):
         filter_layout.addWidget(self.filter_box)
 
         # Admin ke liye employee filter
-        if self._role == "admin":
+        if self._role in ("admin", "super_admin"):
             self.emp_filter_box = QComboBox()
             self.emp_filter_box.addItem("All Employees", None)
             # Employees load honge logs ke saath
@@ -163,7 +210,7 @@ class LogsWindow(BaseWindow):
         self._screenshot_paths = {}
 
         employee_filter = None
-        if self._role == "admin" and hasattr(self, 'emp_filter_box'):
+        if self._role in ("admin", "super_admin") and hasattr(self, 'emp_filter_box'):
             employee_filter = self.emp_filter_box.currentData()
 
         self._thread = QThread()
@@ -187,7 +234,7 @@ class LogsWindow(BaseWindow):
         self.all_logs = total_logs
 
         # Admin ke liye employee list populate karo
-        if self._role == "admin" and hasattr(self, 'emp_filter_box'):
+        if self._role in ("admin", "super_admin") and hasattr(self, 'emp_filter_box'):
             current = self.emp_filter_box.currentData()
             employees = sorted(set(log[0] for log in total_logs if log[0]))
             self.emp_filter_box.blockSignals(True)

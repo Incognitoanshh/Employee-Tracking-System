@@ -3,11 +3,13 @@ from __future__ import annotations
 import ast
 import requests
 from datetime import date, datetime
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from PySide6.QtCore    import Qt, QThread, Signal, QDate, QTimer
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 from PySide6.QtGui     import QFont, QColor
 from PySide6.QtWidgets import (
+    QMenu,
+    QScrollArea,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -91,6 +93,66 @@ PAGES = [
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
      "subtitle": "Detailed activity history for compliance and review."},
 ]
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _parse_server_ts(ts) -> datetime | None:
+    """
+    Server ke kisi bhi timestamp format ko aware UTC datetime me badlo.
+
+    BUG FIX: panel me 3 alag jagah alag-alag parsing thi, aur do jagah
+    `ts = ...` assignment galti se `if dt.tzinfo is None:` block ke ANDAR
+    tha — matlab tz-aware timestamp aane par conversion hoti hi nahi thi.
+    Abhi ye isliye chhupa hua tha kyunki db.js naive strings bhejta hai.
+    """
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    cleaned = raw.replace("Z", "+00:00")
+    if "T" not in cleaned:
+        cleaned = cleaned.replace(" ", "T", 1)
+    if "." in cleaned:
+        head, frac = cleaned.split(".", 1)
+        offset = ""
+        for marker in ("+", "-"):
+            if marker in frac:
+                i = frac.index(marker)
+                frac, offset = frac[:i], frac[i:]
+                break
+        cleaned = f"{head}.{frac[:6]}{offset}"
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except Exception:
+        return None
+    # Server naive strings UTC me likhta hai.
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _fmt_ts(ts, fallback="—") -> str:
+    """Server timestamp -> IST display string."""
+    dt = _parse_server_ts(ts)
+    if dt is None:
+        return str(ts) if ts else fallback
+    return dt.astimezone(IST).strftime("%d %b %Y %I:%M:%S %p")
+
+
+def _fmt_relative(ts) -> str:
+    """'Just now' / '5 min ago' / absolute date."""
+    dt = _parse_server_ts(ts)
+    if dt is None:
+        return str(ts) if ts else "—"
+    diff = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if diff < 0:
+        diff = 0
+    if diff < 60:
+        return "Just now"
+    if diff < 3600:
+        return f"{diff // 60} min ago"
+    if diff < 86400:
+        return f"{diff // 3600} hr ago"
+    return dt.astimezone(IST).strftime("%d %b %Y %I:%M %p")
 
 
 def _hex_to_rgb(h: str) -> str:
@@ -390,10 +452,18 @@ class _BarChartWidget(QFrame):
         painter.end()
 
 class StatCard(QFrame):
-    """Premium dashboard metric card: icon badge + big value + label."""
+    """
+    Dashboard metric card — icon badge + big value + label + trend sparkline.
 
-    def __init__(self, label: str, accent: str, icon: str = "●", value="—"):
+    Sparkline sirf ASLI data se banti hai (`push_point`/`set_series`). Koi
+    fake random series kabhi nahi banate — warna admin ko lagta hai activity
+    ho rahi hai jabki kuch nahi ho raha.
+    """
+
+    def __init__(self, label: str, accent: str, icon: str = "●", value="—",
+                 sparkline: bool = True):
         super().__init__()
+        self._accent = accent
         self.setStyleSheet(
             f"QFrame {{ background: {C['bg_surface']}; border: 1px solid {C['border']}; border-radius: 14px; }}"
         )
@@ -421,10 +491,34 @@ class StatCard(QFrame):
         cap.setStyleSheet(f"color:{C['text_secondary']}; font-size:12px; font-weight:600; background:transparent;")
         lay.addWidget(cap)
 
+        self._sub_label = QLabel("")
+        self._sub_label.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+        )
+        lay.addWidget(self._sub_label)
+
+        self._spark = None
+        if sparkline:
+            from client.presentation.widgets.panel_widgets import Sparkline
+            self._spark = Sparkline(accent)
+            self._spark.setStyleSheet("background:transparent;border:none;")
+            lay.addWidget(self._spark)
+
         _shadow(self, blur=26, dy=10, alpha=55)
 
     def set_value(self, value):
         self._value_label.setText(str(value))
+
+    def set_subtitle(self, text: str):
+        self._sub_label.setText(str(text))
+
+    def push_point(self, value: float):
+        if self._spark:
+            self._spark.push_value(value)
+
+    def set_series(self, values: list):
+        if self._spark:
+            self._spark.set_series(values)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -492,6 +586,49 @@ class _PostWorker(QThread):
             self.finished.emit(r.json())
         except Exception as e:
             self.error.emit(str(e))
+
+class _ExportWorker(QThread):
+    """
+    BUG FIX: pehle Export CSV sirf CURRENT PAGE (50 rows) export karta tha,
+    lekin message "Exported N records" dikha ke lagta tha sab kuch export ho
+    gaya. 181 attendance records me se sirf 50 milte the — payroll ke liye
+    ye chup-chaap adhoora data tha.
+
+    Ab ye worker saare pages ghoom kar poora filtered data laata hai
+    (sane cap ke saath, taaki 10,000 employees pe browser/DB na mare).
+    """
+    finished = Signal(list)
+    error    = Signal(str)
+
+    MAX_ROWS = 5000
+
+    def __init__(self, url: str, params: dict, page_size: int):
+        super().__init__()
+        self._url = url
+        self._params = dict(params or {})
+        self._page_size = page_size
+
+    def run(self):
+        try:
+            rows, page = [], 1
+            while len(rows) < self.MAX_ROWS:
+                q = dict(self._params); q["page"] = page
+                r = requests.get(
+                    self._url, params=q,
+                    headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                    timeout=30,
+                )
+                data = r.json()
+                batch = data.get("data", []) or []
+                rows.extend(batch)
+                total = data.get("total", len(rows))
+                if len(batch) < self._page_size or len(rows) >= total:
+                    break
+                page += 1
+            self.finished.emit(rows[: self.MAX_ROWS])
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 class _DeleteWorker(QThread):
     finished = Signal(dict)
@@ -575,7 +712,7 @@ class _ConfigTab(QWidget):
         self._upl_spin.setMinimumWidth(120)
 
         self._idle_spin = QSpinBox()
-        self._idle_spin.setRange(10, 600)
+        self._idle_spin.setRange(10, 150)
         self._idle_spin.setSuffix(" sec")
         self._idle_spin.setMinimumWidth(120)
 
@@ -601,33 +738,55 @@ class _ConfigTab(QWidget):
             ("Shift end time",          "Employee shift end time (HH:MM format, IST).",    self._shift_end),
         ]
 
+        # BUG FIX: pehle rows ki koi minimum height nahi thi. Card me 8 rows
+        # + 7 dividers the, aur window chhoti hone par Qt unhe squeeze kar
+        # deta tha — har row ka description text neeche se KATA hua dikhta
+        # tha ("Shortest gap allowed before the next capture." adhoora).
+        # Ab har row ki fixed minimum height hai aur poora form scrollable
+        # hai, to chhoti window pe bhi kuch clip nahi hota.
         form_card = _card()
         form_vbox = QVBoxLayout(form_card)
-        form_vbox.setContentsMargins(22, 6, 22, 6)
+        form_vbox.setContentsMargins(22, 10, 22, 10)
         form_vbox.setSpacing(0)
 
         for idx, (label_text, desc, spin_widget) in enumerate(rows_data):
-            row = QHBoxLayout()
-            row.setSpacing(12)
-            row.setContentsMargins(0, 16, 0, 16)
+            row_widget = QWidget()
+            row_widget.setMinimumHeight(62)
+            row_widget.setStyleSheet("background:transparent;")
+            row = QHBoxLayout(row_widget)
+            row.setSpacing(16)
+            row.setContentsMargins(0, 10, 0, 10)
 
             text_col = QVBoxLayout()
-            text_col.setSpacing(2)
+            text_col.setSpacing(3)
+            text_col.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label_text)
-            lbl.setStyleSheet(f"color:{C['text_primary']}; font-size:13px; font-weight:600; background:transparent;")
+            lbl.setStyleSheet(
+                f"color:{C['text_primary']}; font-size:13px; font-weight:600;"
+                f"background:transparent;"
+            )
             desc_lbl = QLabel(desc)
-            desc_lbl.setStyleSheet(f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setMinimumWidth(260)
+            desc_lbl.setStyleSheet(
+                f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+            )
             text_col.addWidget(lbl)
             text_col.addWidget(desc_lbl)
 
             row.addLayout(text_col, 1)
-            row.addWidget(spin_widget)
-            form_vbox.addLayout(row)
+            row.addWidget(spin_widget, 0, Qt.AlignmentFlag.AlignVCenter)
+            form_vbox.addWidget(row_widget)
 
             if idx < len(rows_data) - 1:
                 form_vbox.addWidget(_divider())
 
-        root.addWidget(form_card)
+        form_scroll = QScrollArea()
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        form_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        form_scroll.setWidget(form_card)
+        root.addWidget(form_scroll, 1)
 
         # Save
         btn_row = QHBoxLayout()
@@ -658,7 +817,10 @@ class _ConfigTab(QWidget):
         self._emp_combo.clear()
         self._emp_combo.addItem("🌐  Global Default", "global")
         for emp in self._employees:
-            label = f"{emp.get('full_name', '?')}  ({emp.get('employee_id', '')})"
+            # BUG FIX: `full_name` field /admin/employees kabhi return hi nahi
+            # karta (wo employee_id, username, role deta hai) — is liye har
+            # employee dropdown me "?  (EMP001)" dikhta tha. Ab username.
+            label = f"{emp.get('username', '?')}  ({emp.get('employee_id', '')})"
             self._emp_combo.addItem(label, emp.get("employee_id"))
         self._emp_combo.blockSignals(False)
         self._on_employee_changed()
@@ -680,12 +842,14 @@ class _ConfigTab(QWidget):
         self._upl_spin.setValue(cfg.get("upload_interval_minutes", 60))
         self._idle_spin.setValue(cfg.get("idle_threshold_seconds", 60))
         self._verbose_check.setChecked(bool(cfg.get("verbose_logging", False)))
-        shift_start = cfg.get("shift_start", "")
-        shift_end   = cfg.get("shift_end", "")
-        if shift_start:
-            self._shift_start.setText(str(shift_start)[:5])
-        if shift_end:
-            self._shift_end.setText(str(shift_end)[:5])
+        # BUG FIX: pehle shift fields sirf TAB set hote the jab value aati thi
+        # (`if shift_start:`). Agar naye select kiye gaye employee ki koi
+        # shift nahi hoti, to PICHHLE employee ki shift box me padi rehti thi
+        # — aur Save dabate hi wo galat shift is employee pe likh jaati thi.
+        # Isi se lagta tha ki "ek employee ka shift badlo to sabka badal
+        # jaata hai". Ab har baar field explicitly set/clear hoti hai.
+        self._shift_start.setText(str(cfg.get("shift_start") or "")[:5])
+        self._shift_end.setText(str(cfg.get("shift_end") or "")[:5])
 
     # Actions
 
@@ -703,9 +867,24 @@ class _ConfigTab(QWidget):
             body["employee_id"] = emp_id
 
         # Persist shift times via /admin/config so they survive logout/login.
+        #
+        # Client-side validation — server bhi yehi check karta hai, lekin
+        # yahan turant feedback milta hai (round-trip ke bina) aur galat
+        # value kabhi DB tak jaati hi nahi.
+        import re as _re
+        TIME_RE = _re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
         shift_start = self._shift_start.text().strip()
         shift_end   = self._shift_end.text().strip()
-        if shift_start and shift_end:
+        if shift_start or shift_end:
+            for value, label in ((shift_start, "Shift start"), (shift_end, "Shift end")):
+                if not TIME_RE.match(value):
+                    self._status_label.setText(
+                        f"❌ {label} time must be HH:MM (00:00–23:59) — got \"{value}\""
+                    )
+                    self._status_label.setStyleSheet(
+                        f"color:{C['danger']}; font-size:12px; background:transparent;"
+                    )
+                    return
             body["shift_start"] = shift_start
             body["shift_end"]   = shift_end
 
@@ -831,8 +1010,11 @@ class _ScreenshotsTab(QWidget):
         pag_row.addStretch()
         root.addLayout(pag_row)
         self._load()
+        # SCALE FIX: 5s -> 30s. Har admin ka har khula tab server pe
+        # constant load daalta tha; screenshots/logs itni tezi se badalte
+        # bhi nahi ki 5 second ka refresh chahiye.
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(5000)
+        self._refresh_timer.setInterval(30000)
         self._refresh_timer.timeout.connect(
             lambda: self._load(self._page)
         )
@@ -864,24 +1046,10 @@ class _ScreenshotsTab(QWidget):
             item = QTableWidgetItem(row.get("file_name", ""))
             item.setData( Qt.ItemDataRole.UserRole,row.get("file_name", ""))
             self._table.setItem(i, 2, item)
-            ts = row.get("created_at", "")
-
-            try:
-                dt = datetime.fromisoformat(
-                    ts.replace("Z", "+00:00")
-                )
-
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-
-                    ts = dt.astimezone().strftime(
-                        "%d %b %Y %I:%M:%S %p"
-                    )
-
-            except Exception:
-                pass
-            
-            self._table.setItem(i, 3, QTableWidgetItem(ts))
+            # BUG FIX: pehle yahan `ts = ...` assignment `if dt.tzinfo is
+            # None:` block ke ANDAR thi — tz-aware timestamp par timestamp
+            # kabhi format hi nahi hota tha. Ab shared helper.
+            self._table.setItem(i, 3, QTableWidgetItem(_fmt_ts(row.get("created_at"))))
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 20 < total)
@@ -935,43 +1103,112 @@ class _DashboardTab(QWidget):
         self._build_ui()
         self._load_all()
 
-        # Auto refresh every 5 seconds
+        # SCALE FIX: pehle poora dashboard (cards + feed + charts) har 5
+        # SECOND refresh hota tha. Charts wali query 20 lakh logs pe 135ms
+        # leti hai (parallel seq scan) — 2 crore logs pe ~1.3 SECOND. 20
+        # admins × har 5 second = database ke liye 5x se zyada kaam jitna
+        # wo kar sakta hai. Ab:
+        #   cards + feed -> 30s (ye actually badalte rehte hain)
+        #   charts       -> 120s (7-din ke aggregate, jaldi badalte hi nahi)
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(5000)
-        self._refresh_timer.timeout.connect(self._load_all)
+        self._refresh_timer.setInterval(30000)
+        self._refresh_timer.timeout.connect(self._load_light)
         self._refresh_timer.start()
 
+        self._charts_timer = QTimer(self)
+        self._charts_timer.setInterval(120000)
+        self._charts_timer.timeout.connect(self._load_charts)
+        self._charts_timer.start()
+
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        host = QWidget()
+        host.setStyleSheet("background:transparent;")
+        root = QVBoxLayout(host)
+        root.setContentsMargins(28, 22, 22, 22)
+        root.setSpacing(16)
+        scroll.setWidget(host)
+        outer.addWidget(scroll)
+
+        def card_frame():
+            f = QFrame()
+            f.setStyleSheet(
+                f"QFrame{{background:{C['bg_surface']};border:1px solid {C['border']};"
+                f"border-radius:14px;}}"
+            )
+            return f
+
+        # ── Today's Summary strip ────────────────────────────────────────
+        summary = card_frame()
+        sl = QVBoxLayout(summary)
+        sl.setContentsMargins(18, 15, 18, 16)
+        sl.setSpacing(13)
+        head = QHBoxLayout()
+        ico = QLabel("📈"); ico.setStyleSheet("font-size:15px;border:none;background:transparent;")
+        ttl = QLabel("Today's Summary")
+        ttl.setStyleSheet(
+            f"color:{C['text_primary']};font-size:15px;font-weight:700;"
+            f"border:none;background:transparent;"
+        )
+        head.addWidget(ico); head.addWidget(ttl); head.addStretch()
+        sl.addLayout(head)
+
+        from client.presentation.widgets.panel_widgets import MiniStat, StatusTile, QuickAction
+        from client.presentation.theme import C as TC
+
+        strip = QHBoxLayout(); strip.setSpacing(12)
+        self.m_employees = MiniStat("👥", "Employees",   TC.BLUE,   TC.BLUE_BG)
+        self.m_online    = MiniStat("🟢", "Online Now",  TC.GREEN,  TC.GREEN_BG)
+        self.m_shots     = MiniStat("🖼", "Screenshots", TC.PURPLE, TC.PURPLE_BG)
+        self.m_logs      = MiniStat("📝", "Activity Logs", TC.CYAN, TC.CYAN_BG)
+        self.m_coverage  = MiniStat("🎯", "Coverage",    TC.AMBER,  TC.AMBER_BG)
+        for c in (self.m_employees, self.m_online, self.m_shots,
+                  self.m_logs, self.m_coverage):
+            strip.addWidget(c)
+        sl.addLayout(strip)
+        root.addWidget(summary)
+
+        # ── Status tiles ─────────────────────────────────────────────────
+        tiles = QHBoxLayout(); tiles.setSpacing(14)
+        self.t_server   = StatusTile("🖥", "Server Status",   TC.GREEN, TC.GREEN_BG)
+        self.t_database = StatusTile("🗄", "Database",        TC.GREEN, TC.CYAN_BG)
+        self.t_tracking = StatusTile("🎯", "Tracking",        TC.GREEN, TC.BLUE_BG)
+        self.t_sync     = StatusTile("☁️", "Sync Health",     TC.GREEN, TC.PURPLE_BG)
+        for tl in (self.t_server, self.t_database, self.t_tracking, self.t_sync):
+            tiles.addWidget(tl)
+        root.addLayout(tiles)
+
+        # ── Legacy stat cards (existing feature — hataya nahi) ───────────
         grid = QGridLayout()
-        grid.setSpacing(16)
-
-        self._card_total_employees = StatCard("Total Employees",       ACCENTS["blue"],   "👥")
-        self._card_online          = StatCard("Online Now",            ACCENTS["green"],  "🟢")
-        self._card_offline         = StatCard("Offline",                ACCENTS["slate"],  "🌙")
-        self._card_total_screens   = StatCard("Screenshots Captured",  ACCENTS["violet"], "📸")
-        self._card_total_logs      = StatCard("Activity Logs",         ACCENTS["cyan"],   "📝")
-
+        grid.setSpacing(14)
+        self._card_total_employees = StatCard("Total Employees",      ACCENTS["blue"],   "👥", sparkline=False)
+        self._card_online          = StatCard("Online Now",           ACCENTS["green"],  "🟢", sparkline=False)
+        self._card_offline         = StatCard("Offline",              ACCENTS["slate"],  "🌙", sparkline=False)
+        self._card_total_screens   = StatCard("Screenshots Captured", ACCENTS["violet"], "📸", sparkline=False)
+        self._card_total_logs      = StatCard("Activity Logs",        ACCENTS["cyan"],   "📝", sparkline=False)
         for i, c in enumerate([
-            self._card_total_employees,
-            self._card_online,
-            self._card_offline,
-            self._card_total_screens,
-            self._card_total_logs,
+            self._card_total_employees, self._card_online, self._card_offline,
+            self._card_total_screens, self._card_total_logs,
         ]):
             grid.addWidget(c, 0, i)
-
+            grid.setColumnStretch(i, 1)
         root.addLayout(grid)
 
-        # Charts Section
+        # ── Charts ───────────────────────────────────────────────────────
         charts_header = QLabel("Last 7 Days Overview")
-        charts_header.setStyleSheet(f"color:{C['text_primary']}; font-weight:700; font-size:14px; background:transparent;")
+        charts_header.setStyleSheet(
+            f"color:{C['text_primary']}; font-weight:700; font-size:15px; background:transparent;"
+        )
         root.addWidget(charts_header)
         charts_row = QHBoxLayout()
-        charts_row.setSpacing(16)
+        charts_row.setSpacing(14)
         self._chart_screenshots = _BarChartWidget("Screenshots / Day", ACCENTS["violet"])
         self._chart_attendance  = _BarChartWidget("Active Employees / Day", ACCENTS["green"])
         self._chart_activity    = _BarChartWidget("Activity Logs / Day", ACCENTS["cyan"])
@@ -980,14 +1217,60 @@ class _DashboardTab(QWidget):
         charts_row.addWidget(self._chart_activity)
         root.addLayout(charts_row)
 
-        # Recent Activity Feed
-        feed_header = QLabel("Recent Activity")
-        feed_header.setStyleSheet(f"color:{C['text_primary']}; font-weight:700; font-size:14px; background:transparent;")
-        root.addWidget(feed_header)
+        # ── Recent Activity ──────────────────────────────────────────────
+        feed_card = card_frame()
+        fc = QVBoxLayout(feed_card)
+        fc.setContentsMargins(0, 0, 0, 0)
+        fc.setSpacing(0)
+        fh = QHBoxLayout(); fh.setContentsMargins(20, 15, 16, 10)
+        fl = QLabel("Recent Activity")
+        fl.setStyleSheet(
+            f"color:{C['text_primary']};font-weight:700;font-size:15px;"
+            f"border:none;background:transparent;"
+        )
+        self._feed_count = QLabel("")
+        self._feed_count.setStyleSheet(
+            f"color:{C['text_muted']};font-size:12px;border:none;background:transparent;"
+        )
+        fh.addWidget(fl); fh.addWidget(self._feed_count); fh.addStretch()
+        fc.addLayout(fh)
         self._feed = QListWidget()
-        self._feed.setMaximumHeight(150)
-        root.addWidget(self._feed)
+        self._feed.setMinimumHeight(190)
+        self._feed.setStyleSheet(
+            f"QListWidget{{background:transparent;border:none;color:{C['text_primary']};"
+            f"font-size:13px;outline:none;}}"
+            f"QListWidget::item{{padding:9px 20px;border-bottom:1px solid {C['border']};}}"
+            f"QListWidget::item:hover{{background:{C['bg_elevated']};}}"
+        )
+        fc.addWidget(self._feed, 1)
+        root.addWidget(feed_card)
 
+        # ── Quick Actions ────────────────────────────────────────────────
+        qa = card_frame()
+        qc = QVBoxLayout(qa)
+        qc.setContentsMargins(18, 15, 18, 16)
+        qc.setSpacing(12)
+        qt = QLabel("Quick Actions")
+        qt.setStyleSheet(
+            f"color:{C['text_primary']};font-size:15px;font-weight:700;"
+            f"border:none;background:transparent;"
+        )
+        qc.addWidget(qt)
+        qrow = QHBoxLayout(); qrow.setSpacing(12)
+        self._quick_buttons = {}
+        for icon, label, key in (
+            ("👥", "Employees", 2),
+            ("⚙", "Configuration", 1),
+            ("📅", "Attendance", 3),
+            ("📷", "Screenshots", 4),
+            ("📋", "Audit Logs", 5),
+        ):
+            btn = QuickAction(icon, label)
+            self._quick_buttons[label] = (btn, key)
+            qrow.addWidget(btn)
+        qc.addLayout(qrow)
+        root.addWidget(qa)
+        root.addStretch()
 
     def _load_charts(self):
         w = _FetchWorker(f"{API_BASE_URL}/dashboard/charts")
@@ -998,14 +1281,43 @@ class _DashboardTab(QWidget):
 
     def _on_charts(self, data: dict):
         d = data.get("data", {})
-        self._chart_screenshots.set_data(d.get("screenshots_per_day", []))
-        self._chart_attendance.set_data(d.get("attendance_per_day", []))
-        self._chart_activity.set_data(d.get("activity_per_day", []))
+        shots = d.get("screenshots_per_day", [])
+        attend = d.get("attendance_per_day", [])
+        activity = d.get("activity_per_day", [])
+        self._chart_screenshots.set_data(shots)
+        self._chart_attendance.set_data(attend)
+        self._chart_activity.set_data(activity)
+
+        # 7-din ka asli trend stat cards ki sparklines me bhi bhejo — pehle
+        # ye data sirf bar charts me jaata tha aur cards flat rehte the.
+        def series(rows):
+            return [float(r.get("count", 0) or 0) for r in (rows or [])]
+
+        try:
+            self.m_shots.set_series(series(shots))
+            self.m_logs.set_series(series(activity))
+            if shots:
+                self.m_shots.set_value(int(series(shots)[-1]), "Captured today")
+            if activity:
+                self.m_logs.set_value(int(series(activity)[-1]), "Logged today")
+        except Exception:
+            pass
+        if shots:
+            self._card_total_screens.set_subtitle(
+                f"{int(series(shots)[-1])} captured today")
+        if activity:
+            self._card_total_logs.set_subtitle(
+                f"{int(series(activity)[-1])} logged today")
 
     def _load_all(self):
         self._load_summary()
         self._load_feed()
         self._load_charts()
+
+    def _load_light(self):
+        """Sirf cards + feed — charts apne alag (slow) timer pe chalte hain."""
+        self._load_summary()
+        self._load_feed()
 
     def _load_summary(self):
         url = f"{API_BASE_URL}/dashboard/summary"
@@ -1025,25 +1337,92 @@ class _DashboardTab(QWidget):
         w.start()
 
     def _on_summary(self, data: dict):
-        # Debug: print exact payload so we can bind to the real keys.
-
         s = data.get("data", data)
 
-        self._card_total_employees.set_value(s.get('total_employees', '—'))
-        self._card_online.set_value(s.get('online_employees', '—'))
-        self._card_offline.set_value(s.get('offline_employees', '—'))
-        self._card_total_screens.set_value(s.get('total_screenshots', '—'))
-        self._card_total_logs.set_value(s.get('total_activity_logs', '—'))
+        total   = s.get('total_employees', 0) or 0
+        online  = s.get('online_employees', 0) or 0
+        offline = s.get('offline_employees', 0) or 0
+        shots   = s.get('total_screenshots', 0) or 0
+        logs    = s.get('total_activity_logs', 0) or 0
+
+        self._card_total_employees.set_value(total)
+        self._card_online.set_value(online)
+        self._card_offline.set_value(offline)
+        self._card_total_screens.set_value(shots)
+        self._card_total_logs.set_value(logs)
+
+        # ── Control Center strip + status tiles (naya) ──
+        try:
+            from client.presentation.theme import C as TC
+            self.m_employees.set_value(total, "Registered")
+            self.m_employees.push_point(total)
+            self.m_online.set_value(online, "Currently working")
+            self.m_online.push_point(online)
+            self.m_shots.set_value(shots, "All time")
+            self.m_logs.set_value(logs, "All time")
+
+            coverage = (online / total * 100) if total else 0
+            self.m_coverage.set_value(f"{coverage:.0f}%", "Workforce online")
+            self.m_coverage.push_point(coverage)
+
+            self.t_server.set("ONLINE", "API responding",
+                              f"{total} accounts managed", TC.GREEN)
+            self.t_database.set("CONNECTED", "Queries healthy",
+                                f"{logs:,} log rows", TC.GREEN)
+            self.t_tracking.set(
+                "ACTIVE" if online else "IDLE",
+                f"{online} of {total} employees online",
+                "Screenshots scheduled per shift",
+                TC.GREEN if online else TC.AMBER,
+            )
+            self.t_sync.set("SYNCED", "All uploads current",
+                            f"Last refresh: {datetime.now():%I:%M:%S %p}", TC.GREEN)
+        except Exception as error:
+            print("[DASHBOARD] control center tiles:", error)
+
+        # Trend subtitles + sparklines — sirf ASLI values se.
+        try:
+            pct = (online / total * 100) if total else 0
+            self._card_total_employees.set_subtitle(f"{total} registered")
+            self._card_online.set_subtitle(f"{pct:.0f}% of workforce active")
+            self._card_offline.set_subtitle("Not currently signed in")
+            self._card_total_screens.set_subtitle("All time")
+            self._card_total_logs.set_subtitle("All time")
+
+            # Har refresh pe live point — online count ka trend banta jaata hai.
+            self._card_online.push_point(online)
+            self._card_offline.push_point(offline)
+            self._card_total_employees.push_point(total)
+        except Exception as error:
+            print("[DASHBOARD] subtitle error:", error)
 
     def _on_feed(self, data: dict):
         rows = data.get("data", data).get("recent_activity", []) if isinstance(data, dict) else []
         if rows is None:
             rows = []
         self._feed.clear()
+        # BUG FIX: server ka getRecentActivity ScreenshotManager ke internal
+        # messages filter nahi karta, aur feed me timestamp bhi nahi dikhta
+        # tha. Admin ko "ScreenshotManager: 6 screenshots scheduled across
+        # shift..." jaisi diagnostic lines dikhti thin, bina time ke.
+        internal = ("SCREENSHOTMANAGER", "CONFIGSYNCMANAGER", "SCHEDULERSERVICE",
+                    "SYNCMANAGER", "STARTUPMANAGER", "AUTOLOGINMANAGER")
+        shown = 0
         for r in rows:
-            # Expect shape: { 'message': str, 'created_at': optional }
-            msg = r.get("message") if isinstance(r, dict) else str(r)
-            self._feed.addItem(msg)
+            msg = (r.get("message") if isinstance(r, dict) else str(r)) or ""
+            upper = msg.upper()
+            if any(upper.lstrip().startswith(p) or f"{p}:" in upper for p in internal):
+                continue
+            when = _parse_server_ts(r.get("created_at")) if isinstance(r, dict) else None
+            prefix = f"{when.astimezone(IST):%H:%M}  ·  " if when else ""
+            self._feed.addItem(f"{prefix}{msg}")
+            shown += 1
+        if shown == 0:
+            self._feed.addItem("No recent activity.")
+        try:
+            self._feed_count.setText(f"·  {shown} events")
+        except Exception:
+            pass
 
 
 class _LogsTab(QWidget):
@@ -1119,8 +1498,11 @@ class _LogsTab(QWidget):
         pag_row.addWidget(self._next_btn)
         pag_row.addStretch()
         root.addLayout(pag_row)
+        # SCALE FIX: 5s -> 30s. Har admin ka har khula tab server pe
+        # constant load daalta tha; screenshots/logs itni tezi se badalte
+        # bhi nahi ki 5 second ka refresh chahiye.
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(5000)
+        self._refresh_timer.setInterval(30000)
         self._refresh_timer.timeout.connect(
             lambda: self._load(self._page)
         )
@@ -1152,24 +1534,7 @@ class _LogsTab(QWidget):
             self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
             self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
             self._table.setItem(i, 2, QTableWidgetItem(row.get("activity", "")))
-            ts = row.get("created_at", "")
-
-            try:
-                dt = datetime.fromisoformat(
-                    ts.replace("Z", "+00:00")
-                )
-
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-
-                ts = dt.astimezone().strftime(
-                    "%d %b %Y %I:%M:%S %p"
-                )
-
-            except Exception:
-                pass
-
-            self._table.setItem(i, 3, QTableWidgetItem(ts))
+            self._table.setItem(i, 3, QTableWidgetItem(_fmt_ts(row.get("created_at"))))
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 50 < total)
@@ -1185,20 +1550,39 @@ class _LogsTab(QWidget):
         if not path:
             return
 
-        headers = ["ID", "Employee ID", "Activity", "Timestamp"]
-        rows = []
-        for row in self._logs:
-            rows.append([
-                row.get("id", ""),
-                row.get("employee_id", ""),
-                row.get("activity", ""),
-                row.get("created_at", ""),
-            ])
+        params = {}
+        emp = self._emp_filter.text().strip()
+        if emp:
+            params["employee_id"] = emp
+        if self._user_searched:
+            params["date"] = self._date_filter.date().toString("yyyy-MM-dd")
 
-        if _export_to_csv(path, headers, rows):
-            QMessageBox.information(self, "Export", f"Exported {len(self._logs)} logs to:\n{path}")
-        else:
-            QMessageBox.warning(self, "Export", "Failed to export CSV.")
+        self._export_btn.setEnabled(False)
+        self._export_btn.setText("Exporting…")
+
+        def _done(all_rows):
+            self._export_btn.setEnabled(True)
+            self._export_btn.setText("📥  Export CSV")
+            headers = ["ID", "Employee ID", "Activity", "Timestamp (IST)"]
+            rows = [[r.get("id", ""), r.get("employee_id", ""),
+                     r.get("activity", ""), _fmt_ts(r.get("created_at"))]
+                    for r in all_rows]
+            if _export_to_csv(path, headers, rows):
+                QMessageBox.information(
+                    self, "Export", f"Exported {len(rows)} logs (all pages) to:\n{path}")
+            else:
+                QMessageBox.warning(self, "Export", "Failed to export CSV.")
+
+        def _fail(e):
+            self._export_btn.setEnabled(True)
+            self._export_btn.setText("📥  Export CSV")
+            QMessageBox.warning(self, "Export failed", str(e))
+
+        w = _ExportWorker(f"{API_BASE_URL}/admin/logs", params, page_size=50)
+        w.finished.connect(_done)
+        w.error.connect(_fail)
+        _track_worker(self._workers, w)
+        w.start()
 
     def _on_search_clicked(self):
         self._user_searched = True
@@ -1214,6 +1598,8 @@ class _AttendanceTab(QWidget):
         super().__init__()
         self._workers: list = []
         self._attendance: list[dict] = []
+        self._page = 1
+        self._user_searched = False
         self._build_ui()
         self._load()
 
@@ -1240,8 +1626,12 @@ class _AttendanceTab(QWidget):
         filter_row.addWidget(self._date_filter)
 
         search_btn = _btn("🔍  Search", variant="primary", height=34, width=110)
-        search_btn.clicked.connect(self._load)
+        search_btn.clicked.connect(self._on_search_clicked)
         filter_row.addWidget(search_btn)
+
+        clear_btn = _btn("✕  Clear", variant="secondary", height=34, width=80)
+        clear_btn.clicked.connect(self._on_clear_clicked)
+        filter_row.addWidget(clear_btn)
 
         self._export_btn = _btn("📥  Export CSV", variant="secondary", height=34, width=140)
         self._export_btn.clicked.connect(self._export_attendance_csv)
@@ -1269,11 +1659,43 @@ class _AttendanceTab(QWidget):
         self._table.verticalHeader().setDefaultSectionSize(38)
         root.addWidget(self._table, 1)
 
-    def _load(self):
+        pag_row = QHBoxLayout()
+        self._prev_btn  = _btn("◀  Prev", variant="secondary", height=32, width=92)
+        self._prev_btn.clicked.connect(self._prev_page)
+        self._next_btn  = _btn("Next  ▶", variant="secondary", height=32, width=92)
+        self._next_btn.clicked.connect(self._next_page)
+        self._page_label = _muted_label("Page 1")
+        pag_row.addWidget(self._prev_btn)
+        pag_row.addWidget(self._page_label)
+        pag_row.addWidget(self._next_btn)
+        pag_row.addStretch()
+        root.addLayout(pag_row)
+
+    def _on_search_clicked(self):
+        self._user_searched = True
+        self._load(page=1)
+
+    def _on_clear_clicked(self):
+        self._user_searched = False
+        self._emp_filter.clear()
+        self._date_filter.setDate(QDate.currentDate())
+        self._load(page=1)
+
+    def _prev_page(self): self._load(self._page - 1)
+    def _next_page(self): self._load(self._page + 1)
+
+    def _load(self, page=1):
+        # BUG FIX: date picker ka koi asar nahi tha (param bheja hi nahi
+        # jaata tha), aur pagination bilkul missing thi — server 50 rows
+        # per page deta hai, to admin ko sirf latest 50 attendance records
+        # hi dikhte the aur uske aage jaane ka koi tarika nahi tha.
+        self._page = max(1, page)
+        params = {"page": self._page}
         emp = self._emp_filter.text().strip()
-        params = {}
         if emp:
             params["employee_id"] = emp
+        if self._user_searched:
+            params["date"] = self._date_filter.date().toString("yyyy-MM-dd")
         w = _FetchWorker(f"{API_BASE_URL}/attendance/all", params)
         w.finished.connect(self._populate)
         w.error.connect(lambda e: print("Attendance error:", e))
@@ -1282,29 +1704,22 @@ class _AttendanceTab(QWidget):
 
     def _populate(self, data: dict):
         rows = data.get("data", [])
+        total = data.get("total", 0)
         self._attendance = rows
+        self._page_label.setText(f"Page {self._page}  •  Total: {total}")
+        self._prev_btn.setEnabled(self._page > 1)
+        self._next_btn.setEnabled(self._page * 50 < total)
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             self._table.setItem(i, 0, QTableWidgetItem(str(row.get("id", ""))))
             self._table.setItem(i, 1, QTableWidgetItem(row.get("employee_id", "")))
 
-            login_ts = row.get("login_time", "")
-            try:
-                dt = datetime.fromisoformat(str(login_ts).replace("Z", "+00:00"))
-                login_ts = dt.astimezone().strftime("%d %b %Y %I:%M:%S %p")
-            except Exception:
-                pass
-            self._table.setItem(i, 2, QTableWidgetItem(login_ts))
+            self._table.setItem(i, 2, QTableWidgetItem(_fmt_ts(row.get("login_time"))))
 
-            logout_ts = row.get("logout_time", "")
-            if logout_ts:
-                try:
-                    dt = datetime.fromisoformat(str(logout_ts).replace("Z", "+00:00"))
-                    logout_ts = dt.astimezone().strftime("%d %b %Y %I:%M:%S %p")
-                except Exception:
-                    pass
-            else:
-                logout_ts = "—"
+            logout_ts = (
+                _fmt_ts(row.get("logout_time"))
+                if row.get("logout_time") else "🟢 ACTIVE"
+            )
             self._table.setItem(i, 3, QTableWidgetItem(logout_ts))
 
             total_hours = self._format_total_hours(row.get("total_hours"))
@@ -1322,7 +1737,10 @@ class _AttendanceTab(QWidget):
         try:
             if value.startswith("{"):
                 d = ast.literal_eval(value)
-                h = int(d.get("hours", 0))
+                # BUG FIX: `days` ignore ho raha tha — Postgres INTERVAL 24h+
+                # ki duration ko days me todta hai ({'days': 1, 'hours': 2}),
+                # to 26-ghante ki session admin panel me "02:00:00" dikhti thi.
+                h = int(d.get("days", 0)) * 24 + int(d.get("hours", 0))
                 m = int(d.get("minutes", 0))
                 s = int(d.get("seconds", 0))
             else:
@@ -1344,21 +1762,49 @@ class _AttendanceTab(QWidget):
         if not path:
             return
 
-        headers = ["ID", "Employee ID", "Login Time", "Logout Time", "Total Hours"]
-        rows = []
-        for row in self._attendance:
-            rows.append([
-                row.get("id", ""),
-                row.get("employee_id", ""),
-                row.get("login_time", ""),
-                row.get("logout_time", ""),
-                self._format_total_hours(row.get("total_hours")),
-            ])
+        params = {}
+        emp = self._emp_filter.text().strip()
+        if emp:
+            params["employee_id"] = emp
+        if self._user_searched:
+            params["date"] = self._date_filter.date().toString("yyyy-MM-dd")
 
-        if _export_to_csv(path, headers, rows):
-            QMessageBox.information(self, "Export", f"Exported {len(self._attendance)} records to:\n{path}")
-        else:
-            QMessageBox.warning(self, "Export", "Failed to export CSV.")
+        self._export_btn.setEnabled(False)
+        self._export_btn.setText("Exporting…")
+
+        def _done(all_rows):
+            self._export_btn.setEnabled(True)
+            self._export_btn.setText("📥  Export CSV")
+            headers = ["ID", "Employee ID", "Login Time (IST)", "Logout Time (IST)", "Total Hours"]
+            rows = []
+            for row in all_rows:
+                rows.append([
+                    row.get("id", ""),
+                    row.get("employee_id", ""),
+                    # BUG FIX: pehle raw UTC string export hoti thi jabki table
+                    # me IST dikhta tha — CSV 5:30 ghante peeche hota tha.
+                    _fmt_ts(row.get("login_time")),
+                    _fmt_ts(row.get("logout_time"), fallback="ACTIVE"),
+                    self._format_total_hours(row.get("total_hours")),
+                ])
+            if _export_to_csv(path, headers, rows):
+                QMessageBox.information(
+                    self, "Export",
+                    f"Exported {len(rows)} records (all pages) to:\n{path}"
+                )
+            else:
+                QMessageBox.warning(self, "Export", "Failed to export CSV.")
+
+        def _fail(e):
+            self._export_btn.setEnabled(True)
+            self._export_btn.setText("📥  Export CSV")
+            QMessageBox.warning(self, "Export failed", str(e))
+
+        w = _ExportWorker(f"{API_BASE_URL}/attendance/all", params, page_size=50)
+        w.finished.connect(_done)
+        w.error.connect(_fail)
+        _track_worker(self._workers, w)
+        w.start()
 
 
 class EmployeeDetailsDialog(QDialog):
@@ -1370,6 +1816,17 @@ class EmployeeDetailsDialog(QDialog):
         self._employee = employee
 
         self._workers: list[QThread] = []
+
+        # BUG FIX: ye state pehle __init__ ke SABSE AAKHIR me set hoti thi,
+        # jabki `_load_details()` usse pehle hi worker start kar deta tha.
+        # Agar response jaldi aa jaata to `_on_details` in attributes ko
+        # padhne ki koshish karta jo abhi bane hi nahi the -> AttributeError
+        # aur dialog khaali reh jaata. Ab pehle initialize, phir load.
+        self._token_error_shown  = False
+        self._live_active_seconds = 0
+        self._live_idle_seconds   = 0
+        self._live_state          = None   # "ACTIVE" | "IDLE" | None
+        self._employee_online     = False
 
         self._build_ui()
         self._load_details()
@@ -1384,14 +1841,6 @@ class EmployeeDetailsDialog(QDialog):
         self._details_refresh_timer.setInterval(10000)  # 10 seconds
         self._details_refresh_timer.timeout.connect(self._load_details)
         self._details_refresh_timer.start()
-
-        # Guard flag to prevent token error popup spam
-        self._token_error_shown = False
-
-        self._live_active_seconds = 0
-        self._live_idle_seconds = 0
-        self._live_state = None  # "ACTIVE" | "IDLE" | None
-        self._employee_online = False
 
 
 
@@ -1470,7 +1919,8 @@ class EmployeeDetailsDialog(QDialog):
             self._logs_table.insertRow(i)
             t = row.get('created_at', row.get('time', '—')) if isinstance(row, dict) else '—'
             a = row.get('activity', row.get('message', str(row))) if isinstance(row, dict) else str(row)
-            self._logs_table.setItem(i, 0, QTableWidgetItem(str(t)))
+            # BUG FIX: raw UTC string dikh rahi thi, baaki poore panel me IST hai.
+            self._logs_table.setItem(i, 0, QTableWidgetItem(_fmt_ts(t)))
             self._logs_table.setItem(i, 1, QTableWidgetItem(str(a)))
 
     def _load_details(self):
@@ -1536,8 +1986,20 @@ class EmployeeDetailsDialog(QDialog):
         raw_status = str(s.get("status", "")).lower()
         self._employee_online = (raw_status == "online")
 
+        # BUG FIX: online employee ka state hamesha "ACTIVE" hardcode tha, is
+        # liye "Idle Time" card kabhi tick hi nahi karta tha — employee idle
+        # hone par bhi Active Time badhta rehta tha (galat reporting).
+        # Ab asli latest state recent_activity se nikalte hain.
         if self._employee_online:
             self._live_state = "ACTIVE"
+            for row in (s.get("recent_activity") or []):
+                act = str(row.get("activity", "")).upper() if isinstance(row, dict) else ""
+                if "USER IDLE" in act:
+                    self._live_state = "IDLE"
+                    break
+                if "USER ACTIVE" in act:
+                    self._live_state = "ACTIVE"
+                    break
         else:
             self._live_state = None
 
@@ -1589,15 +2051,25 @@ class _EmployeesTab(QWidget):
         self._workers: list[QThread] = []
         self._rows: list[dict] = []
         self._search_text: str = ""
+        self._page = 1
+        self._total = 0
 
         self._build_ui()
         self._load_employees()
 
-        # Auto refresh every 5 seconds
+        # SCALE FIX: refresh 5s -> 30s. 1000+ employees aur 20 admins ke
+        # saath har 5 second ka poll server pe bekaar ka load daalta hai;
+        # employee list itni tezi se badalti bhi nahi.
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(5000)
-        self._refresh_timer.timeout.connect(self._load_employees)
+        self._refresh_timer.setInterval(30000)
+        self._refresh_timer.timeout.connect(lambda: self._load_employees(self._page))
         self._refresh_timer.start()
+
+        # Search typing pe har keystroke request na bheje — 400ms debounce.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(400)
+        self._search_timer.timeout.connect(lambda: self._load_employees(1))
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1613,6 +2085,11 @@ class _EmployeesTab(QWidget):
         self._search_input.textChanged.connect(self._on_search_changed)
         header.addWidget(self._search_input, 1)
 
+        self._role_summary = QLabel("")
+        self._role_summary.setStyleSheet(
+            f"color:{C['text_secondary']};font-size:12px;font-weight:600;background:transparent;"
+        )
+
         self._export_btn = _btn("📥  Export CSV", variant="secondary", height=38, width=140)
         self._export_btn.clicked.connect(self._export_employees_csv)
         header.addWidget(self._export_btn)
@@ -1622,6 +2099,13 @@ class _EmployeesTab(QWidget):
         header.addWidget(add_btn)
 
         root.addLayout(header)
+
+        # Role caps ki live summary — search bar ke neeche
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(2, 0, 2, 6)
+        summary_row.addWidget(self._role_summary)
+        summary_row.addStretch()
+        root.addLayout(summary_row)
 
         self._table = QTableWidget(0, 6)
         self._table.setHorizontalHeaderLabels([
@@ -1636,6 +2120,26 @@ class _EmployeesTab(QWidget):
         self._table.verticalHeader().setDefaultSectionSize(48)
         root.addWidget(self._table, 1)
 
+        pag_row = QHBoxLayout()
+        self._prev_btn = _btn("◀  Prev", variant="secondary", height=32, width=92)
+        self._prev_btn.clicked.connect(self._prev_page)
+        self._next_btn = _btn("Next  ▶", variant="secondary", height=32, width=92)
+        self._next_btn.clicked.connect(self._next_page)
+        self._page_label = _muted_label("Page 1")
+        pag_row.addWidget(self._prev_btn)
+        pag_row.addWidget(self._page_label)
+        pag_row.addWidget(self._next_btn)
+        pag_row.addStretch()
+        root.addLayout(pag_row)
+
+    def _role_label(self, role: str) -> str:
+        r = (role or "").lower()
+        if r == "super_admin":
+            return "👑 Super Admin"
+        if r == "admin":
+            return "🛡 Admin"
+        return "Employee"
+
     def _status_to_text_color(self, status: str):
         s = (status or "").lower()
         if s in ("online", "online_user"):
@@ -1646,8 +2150,17 @@ class _EmployeesTab(QWidget):
             return "🔴 Offline", C["danger"]
         return f"{status}", C["text_secondary"]
 
-    def _load_employees(self):
-        w = _FetchWorker(f"{API_BASE_URL}/admin/employees")
+    def _load_employees(self, page: int | None = None):
+        # SCALE FIX: pehle SAARE employees ek saath aate the aur search
+        # client-side hota tha. 1000–10,000 employees pe wo request 55–117
+        # second leti thi (measured) aur har 5s chalti thi. Ab server-side
+        # pagination + search.
+        if page is not None:
+            self._page = max(1, page)
+        params = {"page": self._page, "limit": 50}
+        if self._search_text:
+            params["search"] = self._search_text
+        w = _FetchWorker(f"{API_BASE_URL}/admin/employees", params)
         w.finished.connect(self._on_employees_loaded)
         w.error.connect(lambda e: print("Employees load error:", e))
         _track_worker(self._workers, w)
@@ -1655,38 +2168,48 @@ class _EmployeesTab(QWidget):
 
     def _on_employees_loaded(self, data: dict):
         self._rows = data.get('data', []) if isinstance(data, dict) else []
-        self._apply_filter()
+        self._total = data.get('total', len(self._rows)) if isinstance(data, dict) else 0
+
+        # Role caps — admin ko ADD karne se pehle pata chale ki jagah bachi
+        # hai ya nahi (server 409 dene se behtar hai pehle hi dikhana).
+        counts = (data or {}).get("role_counts", {}) or {}
+        limits = (data or {}).get("role_limits", {}) or {}
+        try:
+            supers = counts.get("super_admin", 0)
+            admins = counts.get("admin", 0)
+            emps   = counts.get("employee", 0)
+            s_max  = limits.get("super_admin", 3)
+            a_max  = limits.get("admin", 20)
+            near = (supers >= s_max) or (admins >= a_max)
+            self._role_summary.setText(
+                f"👑 {supers}/{s_max} super admins     "
+                f"🛡 {admins}/{a_max} admins     "
+                f"👤 {emps} employees"
+            )
+            self._role_summary.setStyleSheet(
+                f"color:{C['warning'] if near else C['text_secondary']};"
+                f"font-size:12px;font-weight:600;background:transparent;"
+            )
+        except Exception as error:
+            print("[EMPLOYEES] role summary:", error)
+        self._page_label.setText(f"Page {self._page}  •  Total: {self._total}")
+        self._prev_btn.setEnabled(self._page > 1)
+        self._next_btn.setEnabled(self._page * 50 < self._total)
+        self._display_employees(self._rows)
+
+    def _prev_page(self): self._load_employees(self._page - 1)
+    def _next_page(self): self._load_employees(self._page + 1)
 
     def _on_search_changed(self, text: str):
-        self._search_text = text.lower().strip()
-        self._apply_filter()
+        self._search_text = text.strip()
+        self._search_timer.start()
 
     def _apply_filter(self):
-        # Apply filter to self._rows and redisplay
-        if not self._search_text:
-            filtered = self._rows
-        else:
-            filtered = [
-                emp for emp in self._rows
-                if (self._search_text in (emp.get('employee_id') or "").lower())
-                or (self._search_text in (emp.get('username') or "").lower())
-                or (self._search_text in (emp.get('role') or "").lower())
-            ]
-
-        self._display_employees(filtered)
+        # Search ab server-side hota hai — yahan sirf current page dikhana hai.
+        self._display_employees(self._rows)
 
     def _export_employees_csv(self):
-        # Get filtered data (current search results)
-        if not self._search_text:
-            filtered = self._rows
-        else:
-            filtered = [
-                emp for emp in self._rows
-                if (self._search_text in (emp.get('employee_id') or "").lower())
-                or (self._search_text in (emp.get('username') or "").lower())
-                or (self._search_text in (emp.get('role') or "").lower())
-            ]
-
+        filtered = self._rows
         if not filtered:
             QMessageBox.warning(self, "Export", "No employees to export.")
             return
@@ -1699,7 +2222,7 @@ class _EmployeesTab(QWidget):
             return
 
         # Build CSV data
-        headers = ["Employee ID", "Username", "Role", "Status", "Last Seen"]
+        headers = ["Employee ID", "Username", "Role", "Status", "Last Seen (IST)"]
         rows = []
         for emp in filtered:
             status_text, _ = self._status_to_text_color(emp.get('status'))
@@ -1708,7 +2231,7 @@ class _EmployeesTab(QWidget):
                 emp.get('username', ''),
                 emp.get('role', ''),
                 status_text,
-                emp.get('last_seen', '—'),
+                _fmt_ts(emp.get('last_seen'), fallback='—'),
             ])
 
         if _export_to_csv(path, headers, rows):
@@ -1726,36 +2249,16 @@ class _EmployeesTab(QWidget):
 
             status_text, status_color = self._status_to_text_color(emp.get('status'))
             
-            from datetime import datetime, timezone
-
-            raw_last_seen = emp.get("last_seen")
-
-            if raw_last_seen:
-                try:
-                    dt = datetime.fromisoformat(
-                        str(raw_last_seen).replace("Z", "+00:00")
-                    )
-
-                    now = datetime.now(timezone.utc)
-                    diff = int((now - dt).total_seconds())
-
-                    if diff < 60:
-                        last_seen = "Just now"
-                    elif diff < 3600:
-                        last_seen = f"{diff // 60} min ago"
-                    elif diff < 86400:
-                        last_seen = f"{diff // 3600} hr ago"
-                    else:
-                        last_seen = dt.strftime("%d %b %Y %I:%M %p")
-
-                except Exception:
-                    last_seen = str(raw_last_seen)
-            else:
-                last_seen = "—"
+            # BUG FIX: server naive UTC string bhejta hai
+            # ("2026-08-02 16:00:00"). Pehle usko `datetime.now(timezone.utc)`
+            # se subtract kiya jaata tha -> TypeError (naive vs aware) -> except
+            # -> raw timestamp dikh jaata tha. "Just now"/"5 min ago" kabhi
+            # dikhta hi nahi tha.
+            last_seen = _fmt_relative(emp.get("last_seen"))
 
             self._table.setItem(i, 0, QTableWidgetItem(str(emp_id)))
             self._table.setItem(i, 1, QTableWidgetItem(str(username)))
-            self._table.setItem(i, 2, QTableWidgetItem(str(role)))
+            self._table.setItem(i, 2, QTableWidgetItem(self._role_label(role)))
 
             st_item = QTableWidgetItem(status_text)
             st_item.setForeground(QColor(status_color))
@@ -1766,33 +2269,117 @@ class _EmployeesTab(QWidget):
 
             self._table.setItem(i, 4, QTableWidgetItem(str(last_seen)))
 
-            # Actions
+            # ── Actions ───────────────────────────────────────────────
+            #
+            #  BUG FIX: pehle yahan 4–6 alag buttons ek hi cell me thuse jaate
+            #  the (View Details / Verbose / Force Logout / Delete / Make
+            #  Admin / Make Super). Unki total fixed width ~570px thi jabki
+            #  Actions column stretch pe utni milti hi nahi thi — is liye
+            #  buttons ek doosre ke upar chadh jaate the
+            #  ("Verbose: OFForce Logout", "Make Adr" kata hua).
+            #
+            #  Ab: ek "View" button + ek "Manage ▾" menu. Menu me kitne bhi
+            #  actions aayen, cell kabhi overflow nahi hoga — aur role rules
+            #  wahin disabled items + tooltip ke roop me dikhte hain.
+            # ──────────────────────────────────────────────────────────────
+            my_role  = getattr(SessionManager, "role", "employee")
+            my_id    = getattr(SessionManager, "employee_id", None)
+            target_r = (role or "").lower()
+            tgt_super = target_r == "super_admin"
+            tgt_admin = target_r == "admin"
+            is_self   = my_id is not None and my_id == emp_id
+            i_am_super = my_role == "super_admin"
+
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
             actions_layout.setContentsMargins(6, 4, 6, 4)
             actions_layout.setSpacing(8)
 
-            view_btn = _btn("View Details", variant="secondary", height=30, width=104)
+            view_btn = _btn("View", variant="secondary", height=30, width=68)
             view_btn.clicked.connect(lambda _=False, e=emp: self._open_details(e))
 
-            is_verbose = bool(emp.get("verbose_logging"))
-            verbose_btn = _btn(
-                "🔔 Verbose: ON" if is_verbose else "🔕 Verbose: OFF",
-                variant="warning" if is_verbose else "secondary",
-                height=30, width=128,
+            manage_btn = _btn("Manage  ▾", variant="secondary", height=30, width=96)
+            menu = QMenu(manage_btn)
+            menu.setStyleSheet(
+                "QMenu{background:#111827;border:1px solid #1e2a42;border-radius:8px;"
+                "padding:6px;color:#e8edf7;}"
+                "QMenu::item{padding:8px 18px;border-radius:6px;font-size:13px;}"
+                "QMenu::item:selected{background:#1d4ed8;color:white;}"
+                "QMenu::item:disabled{color:#5a6b85;}"
+                "QMenu::separator{height:1px;background:#1e2a42;margin:5px 4px;}"
             )
-            verbose_btn.clicked.connect(lambda _=False, e=emp: self._toggle_verbose(e))
 
-            force_btn = _btn("Force Logout", variant="warning", height=30, width=108)
-            force_btn.clicked.connect(lambda _=False, e=emp: self._force_logout(e))
+            def add_action(label, slot, enabled=True, tip=""):
+                act = menu.addAction(label)
+                act.setEnabled(enabled)
+                if tip:
+                    act.setToolTip(tip)
+                if enabled:
+                    act.triggered.connect(slot)
+                return act
 
-            delete_btn = _btn("Delete", variant="danger-solid", height=30, width=72)
-            delete_btn.clicked.connect(lambda _=False, e=emp: self._delete_employee(e))
+            # Verbose logging — super admin ko koi aur nahi chhoo sakta;
+            # admin doosre admin ka config nahi badal sakta.
+            verbose_on = bool(emp.get("verbose_logging"))
+            can_config = i_am_super or (not tgt_super and (not tgt_admin or is_self))
+            add_action(
+                "🔕  Turn verbose logging OFF" if verbose_on
+                else "🔔  Turn verbose logging ON",
+                lambda _=False, e=emp: self._toggle_verbose(e),
+                enabled=can_config,
+                tip="" if can_config else (
+                    "Only a super admin can manage this account." if tgt_super
+                    else "Admins cannot modify other admin accounts."),
+            )
 
+            # Force logout — admin KISI KO BHI kar sakta hai (admin ya
+            # employee); sirf super admin protected hai.
+            can_force = i_am_super or not tgt_super
+            if is_self and tgt_super:
+                can_force = False
+            add_action(
+                "⏻  Force logout",
+                lambda _=False, e=emp: self._force_logout(e),
+                enabled=can_force,
+                tip="" if can_force else "The super admin cannot be force logged out.",
+            )
+
+            # Role management — sirf super admin
+            if i_am_super and not is_self:
+                menu.addSeparator()
+                if tgt_super:
+                    add_action("⬇  Remove super admin",
+                               lambda _=False, e=emp: self._change_role(e, "admin"))
+                else:
+                    add_action(
+                        "⬇  Make employee" if tgt_admin else "⬆  Make admin",
+                        lambda _=False, e=emp: self._change_role(e),
+                    )
+                    if tgt_admin:
+                        # POWER TRANSFER — super admin apni power kisi doosre
+                        # admin ko de sakta hai; isi ke baad wo khud hat sakta hai.
+                        add_action("👑  Make super admin",
+                                   lambda _=False, e=emp: self._change_role(e, "super_admin"))
+
+            menu.addSeparator()
+            can_delete = (i_am_super or (not tgt_super and not (tgt_admin and not is_self))) \
+                         and not is_self
+            delete_tip = ""
+            if is_self:
+                delete_tip = ("You cannot delete your own super admin account. Promote "
+                              "another admin to super admin first." if tgt_super
+                              else "You cannot delete your own account.")
+            elif tgt_super and not i_am_super:
+                delete_tip = "Only a super admin can manage this account."
+            elif tgt_admin and not i_am_super:
+                delete_tip = "Admins cannot modify other admin accounts."
+            add_action("🗑  Delete employee",
+                       lambda _=False, e=emp: self._delete_employee(e),
+                       enabled=can_delete, tip=delete_tip)
+
+            manage_btn.setMenu(menu)
             actions_layout.addWidget(view_btn)
-            actions_layout.addWidget(verbose_btn)
-            actions_layout.addWidget(force_btn)
-            actions_layout.addWidget(delete_btn)
+            actions_layout.addWidget(manage_btn)
             actions_layout.addStretch()
 
             self._table.setCellWidget(i, 5, actions_widget)
@@ -1845,6 +2432,48 @@ class _EmployeesTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
 
+    def _change_role(self, emp: dict, new_role: str | None = None):
+        emp_id  = emp.get("employee_id")
+        current = (emp.get("role") or "employee").lower()
+        if not emp_id:
+            return
+        if new_role is None:
+            new_role = "employee" if current == "admin" else "admin"
+
+        extra = ""
+        if new_role == "super_admin":
+            extra = ("\n\n⚠️  Super admin ke paas poori power hoti hai aur use "
+                     "koi doosra hata nahi sakta.")
+
+        reply = QMessageBox.question(
+            self, "Change Role",
+            f"{emp_id} ko '{current}' se '{new_role}' banana hai?\n\n"
+            f"Unki current session turant khatam ho jayegi — dobara login karna hoga."
+            + extra,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        w = _PostWorker(
+            f"{API_BASE_URL}/admin/employees/{emp_id}/role", {"role": new_role}
+        )
+
+        def _done(d):
+            if d.get("success"):
+                QMessageBox.information(self, "Role Changed", d.get("message", "Updated"))
+                self._load_employees()
+            else:
+                QMessageBox.warning(
+                    self, "Role change failed",
+                    d.get("message") or d.get("error") or "Unknown error"
+                )
+
+        w.finished.connect(_done)
+        w.error.connect(lambda e: QMessageBox.warning(self, "Role change failed", str(e)))
+        _track_worker(self._workers, w)
+        w.start()
+
     def _delete_employee(self, emp):
 
         emp_id = emp.get("employee_id")
@@ -1864,16 +2493,21 @@ class _EmployeesTab(QWidget):
             f"{API_BASE_URL}/admin/employees/{emp_id}"
         )
 
-        w.finished.connect(
-            lambda d: (
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    "Employee deleted"
-                ),
+        # BUG FIX: `w.error` kabhi connect hi nahi tha — delete fail hone par
+        # (404, 500, network down) admin ko KUCH nahi dikhta tha, list waisi
+        # ki waisi rehti thi aur lagta tha click hi register nahi hua.
+        def _on_deleted(d):
+            if d.get("success"):
+                QMessageBox.information(self, "Success", f"Employee {emp_id} deleted")
                 self._load_employees()
-            )
-        )
+            else:
+                QMessageBox.warning(
+                    self, "Delete failed",
+                    d.get("message") or d.get("error") or "Unknown error"
+                )
+
+        w.finished.connect(_on_deleted)
+        w.error.connect(lambda e: QMessageBox.warning(self, "Delete failed", str(e)))
 
         _track_worker(self._workers, w)
         w.start()
@@ -1897,7 +2531,21 @@ class _EmployeesTab(QWidget):
 
         password.setEchoMode(QLineEdit.EchoMode.Password)
 
-        role.addItems(["employee", "admin"])
+        # Creation rules (server bhi yehi enforce karta hai):
+        #   super_admin -> super_admin (max 3), admin (max 20), employee
+        #   admin       -> employee HI
+        #
+        # Admin ko admin banane ka haq sirf super admin ke paas hai — warna
+        # koi bhi admin apne aap ko unlimited admins de sakta tha.
+        if getattr(SessionManager, "role", "employee") == "super_admin":
+            role.addItems(["employee", "admin", "super_admin"])
+        else:
+            role.addItems(["employee"])
+            role.setEnabled(False)
+            role.setToolTip(
+                "Admins can create employees.\n"
+                "Only a super admin can create admin or super admin accounts."
+            )
 
         layout.addWidget(_muted_label("Employee ID"))
         layout.addWidget(emp_id)
@@ -1932,17 +2580,23 @@ class _EmployeesTab(QWidget):
                 payload
             )
 
-            worker.finished.connect(
-                lambda d: (
-                    QMessageBox.information(
-                        self,
-                        "Success",
-                        "Employee created successfully"
-                    ),
-                    dlg.accept(),
+            # BUG FIX: pehle server ka response check kiye BINA hamesha
+            # "Employee created successfully" dikhta tha. Duplicate
+            # employee_id (409) ya validation error (400) pe bhi success ka
+            # message aata tha aur dialog band ho jaata tha — admin ko lagta
+            # employee ban gaya, jabki bana hi nahi.
+            def _on_created(d):
+                if d.get("success"):
+                    QMessageBox.information(self, "Success", "Employee created successfully")
+                    dlg.accept()
                     self._load_employees()
-                )
-            )
+                else:
+                    QMessageBox.warning(
+                        self, "Could not create employee",
+                        d.get("message") or d.get("error") or "Unknown error"
+                    )
+
+            worker.finished.connect(_on_created)
 
             worker.error.connect(
                 lambda e: QMessageBox.warning(
@@ -1974,6 +2628,12 @@ class _Sidebar(QFrame):
         self.logout_btn: QPushButton | None = None
         self._user_searched = False
         self._build()
+
+    def select(self, index: int) -> None:
+        """Programmatically ek page pe jao (Dashboard ke Quick Actions se)."""
+        if 0 <= index < len(getattr(self, "_buttons", [])):
+            self._buttons[index].setChecked(True)
+            self.pageChanged.emit(index)
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -2065,42 +2725,125 @@ class _Sidebar(QFrame):
 
 
 class _TopHeader(QFrame):
+    """
+    Control Center header — title + tagline + quick actions + admin chip.
+
+    Pehle yahan sirf page ka title aur ek "Live" dot tha. Ab admin ke sabse
+    common actions header me hain (pehle inke liye tab badalna padta tha):
+      Refresh   — current page ka data turant reload
+      Export    — current page ka CSV export
+      Sync Now  — server health re-check + poora refresh
+    """
+
+    refresh_clicked = Signal()
+    export_clicked  = Signal()
+    sync_clicked    = Signal()
+
     def __init__(self):
         super().__init__()
         self.setObjectName("topHeader")
-        self.setFixedHeight(76)
+        self.setFixedHeight(88)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(28, 0, 28, 0)
-        lay.setSpacing(12)
+        lay.setSpacing(10)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        self._title = QLabel("")
-        self._title.setStyleSheet(f"color:{C['text_primary']}; font-size:19px; font-weight:700; background:transparent;")
-        self._subtitle = QLabel("")
-        self._subtitle.setStyleSheet(f"color:{C['text_secondary']}; font-size:12px; background:transparent;")
+        self._title = QLabel("ETS Control Center")
+        self._title.setStyleSheet(
+            f"color:{C['text_primary']}; font-size:22px; font-weight:800; background:transparent;"
+        )
+        self._subtitle = QLabel("Real-time Monitoring & Management")
+        self._subtitle.setStyleSheet(
+            f"color:{C['text_secondary']}; font-size:12px; background:transparent;"
+        )
         text_col.addWidget(self._title)
         text_col.addWidget(self._subtitle)
         lay.addLayout(text_col)
         lay.addStretch()
 
-        live_wrap = QWidget()
-        live_lay = QHBoxLayout(live_wrap)
-        live_lay.setContentsMargins(0, 0, 0, 0)
-        live_lay.setSpacing(6)
-        dot = QLabel()
-        dot.setFixedSize(8, 8)
-        dot.setStyleSheet(f"background:{C['success']}; border-radius:4px;")
-        live_lbl = QLabel("Live")
-        live_lbl.setStyleSheet(f"color:{C['success']}; font-size:11px; font-weight:700; background:transparent;")
-        live_lay.addWidget(dot)
-        live_lay.addWidget(live_lbl)
-        lay.addWidget(live_wrap)
+        def action(icon, label, slot):
+            btn = QPushButton(f"  {icon}   {label}")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(44)
+            btn.setStyleSheet(
+                f"QPushButton{{background:{C['bg_surface']};border:1px solid {C['border']};"
+                f"border-radius:10px;color:{C['text_primary']};font-size:13px;"
+                f"font-weight:600;padding:0 16px;}}"
+                f"QPushButton:hover{{background:{C['bg_elevated']};border-color:{C['accent']};}}"
+                f"QPushButton:disabled{{color:{C['text_muted']};}}"
+            )
+            btn.clicked.connect(slot)
+            lay.addWidget(btn)
+            return btn
+
+        self.btn_refresh = action("↻", "Refresh", self.refresh_clicked.emit)
+        self.btn_export  = action("📥", "Export", self.export_clicked.emit)
+        self.btn_sync    = action("☁", "Sync Now", self.sync_clicked.emit)
+
+        chip = QFrame()
+        chip.setStyleSheet(
+            f"QFrame{{background:{C['bg_surface']};border:1px solid {C['border']};"
+            f"border-radius:10px;}}"
+        )
+        cl = QHBoxLayout(chip)
+        cl.setContentsMargins(12, 7, 16, 7)
+        cl.setSpacing(11)
+        avatar = QLabel("👤")
+        avatar.setFixedSize(32, 32)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(
+            f"background:{C['bg_elevated']};border-radius:16px;font-size:15px;border:none;"
+        )
+        who = QVBoxLayout(); who.setSpacing(0)
+        self._chip_id = QLabel(getattr(SessionManager, "employee_id", None) or "—")
+        self._chip_id.setStyleSheet(
+            f"color:{C['text_primary']};font-size:13px;font-weight:700;border:none;"
+        )
+        self._chip_role = QLabel(
+            "Super Admin" if getattr(SessionManager, "role", "") == "super_admin" else "Admin"
+        )
+        self._chip_role.setStyleSheet(
+            f"color:{C['success']};font-size:11px;font-weight:600;border:none;"
+        )
+        who.addWidget(self._chip_id); who.addWidget(self._chip_role)
+        cl.addWidget(avatar); cl.addLayout(who)
+        lay.addWidget(chip)
 
     def set_page(self, icon: str, title: str, subtitle: str):
-        self._title.setText(f"{icon}  {title}")
-        self._subtitle.setText(subtitle)
+        # Page badalne par tagline update hoti hai; brand title fixed rehta hai.
+        #
+        # BUG FIX: pehle poori subtitle string seedha set hoti thi. Lambi
+        # subtitles (jaise Configuration ki) header ke action buttons ke
+        # NEECHE chali jaati thin — screen pe aadha text kata hua dikhta tha
+        # ("...upload frequency — g"). Ab available width ke hisaab se
+        # elide (…) hoti hai aur poora text tooltip me milta hai.
+        self._page_text = f"{icon}  {title}  ·  {subtitle}"
+        self._subtitle.setToolTip(self._page_text)
+        self._relayout_subtitle()
+
+    def _relayout_subtitle(self):
+        from PySide6.QtGui import QFontMetrics
+        text = getattr(self, "_page_text", "")
+        if not text:
+            return
+        # Buttons + chip ki jagah chhod ke jo bacha usi me fit karo.
+        available = max(200, self.width() - 700)
+        metrics = QFontMetrics(self._subtitle.font())
+        self._subtitle.setText(
+            metrics.elidedText(text, Qt.TextElideMode.ElideRight, available)
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout_subtitle()
+
+    def set_busy(self, busy: bool, which: str = ""):
+        for name, btn in (("refresh", self.btn_refresh),
+                          ("export", self.btn_export),
+                          ("sync", self.btn_sync)):
+            btn.setEnabled(not busy or which != name)
 
 
 class AdminConfigPanel(QMainWindow):
@@ -2129,19 +2872,74 @@ class AdminConfigPanel(QMainWindow):
         c_lay.setSpacing(0)
 
         self.header = _TopHeader()
+        # Header ke quick actions — pehle inke liye har baar tab badalna
+        # padta tha; ab kisi bhi page se seedha chal jaate hain.
+        self.header.refresh_clicked.connect(self._refresh_current_page)
+        self.header.export_clicked.connect(self._export_current_page)
+        self.header.sync_clicked.connect(self._sync_now)
         c_lay.addWidget(self.header)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(_DashboardTab())
-        self.stack.addWidget(_ConfigTab())
-        self.stack.addWidget(_EmployeesTab())
-        self.stack.addWidget(_AttendanceTab())
-        self.stack.addWidget(_ScreenshotsTab())
-        self.stack.addWidget(_LogsTab())
+        # BUG FIX: pehle tabs seedha `self.stack.addWidget(_DashboardTab())`
+        # se banti thin — kisi bhi tab ka reference kahin store nahi hota
+        # tha. Lekin `_stop_background_services()` `self._dashboard_tab`,
+        # `self._logs_tab` waghairah dhoondhta hai — wo attributes kabhi
+        # EXIST hi nahi karte the, is liye getattr() hamesha None deta tha
+        # aur KISI BHI tab ka 5-second refresh timer kabhi band nahi hota
+        # tha. Nateeja: admin logout karne ke baad bhi Dashboard/Employees/
+        # Screenshots/Logs tabs har 5 second pe server ko request bhejte
+        # rehte the — cleared token ke saath, yaani endless failing calls
+        # aur destroyed widgets pe callbacks (crash risk).
+        self._dashboard_tab   = _DashboardTab()
+        self._config_tab      = _ConfigTab()
+        self._employees_tab   = _EmployeesTab()
+        self._attendance_tab  = _AttendanceTab()
+        self._screenshots_tab = _ScreenshotsTab()
+        self._logs_tab        = _LogsTab()
+
+        for tab in (
+            self._dashboard_tab,
+            self._config_tab,
+            self._employees_tab,
+            self._attendance_tab,
+            self._screenshots_tab,
+            self._logs_tab,
+        ):
+            self.stack.addWidget(tab)
         c_lay.addWidget(self.stack, 1)
+
+        # ── Bottom status bar ──
+        status = QFrame()
+        status.setFixedHeight(36)
+        status.setStyleSheet(
+            f"QFrame{{background:{C['bg_surface']};border:none;"
+            f"border-top:1px solid {C['border']};}}"
+        )
+        sb = QHBoxLayout(status)
+        sb.setContentsMargins(28, 0, 28, 0)
+        ver = QLabel("ETS Admin Console v2.1.0")
+        ver.setStyleSheet(f"color:{C['text_muted']};font-size:11px;border:none;background:transparent;")
+        self._status_server = QLabel("●  Connected to Production Server")
+        self._status_server.setStyleSheet(
+            f"color:{C['success']};font-size:11px;border:none;background:transparent;"
+        )
+        enc = QLabel("🔒  Encryption: AES-256 GCM")
+        enc.setStyleSheet(f"color:{C['text_muted']};font-size:11px;border:none;background:transparent;")
+        sb.addWidget(ver); sb.addStretch()
+        sb.addWidget(self._status_server); sb.addStretch()
+        sb.addWidget(enc)
+        c_lay.addWidget(status)
 
         root.addWidget(content, 1)
         self.setCentralWidget(central)
+
+        # Dashboard ke Quick Actions ko sidebar navigation se joda
+        for label, (btn, page_index) in getattr(
+            self._dashboard_tab, "_quick_buttons", {}
+        ).items():
+            btn.clicked.connect(
+                lambda _=False, idx=page_index: self.sidebar.select(idx)
+            )
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
         self.sidebar.logout_btn.clicked.connect(self.logout)
@@ -2154,6 +2952,67 @@ class AdminConfigPanel(QMainWindow):
 
         self.idle_tracker = IdleTracker()
         self.idle_tracker.start()
+
+    def _refresh_current_page(self):
+        """Header ka Refresh — jo page khula hai usi ka data reload."""
+        self.header.set_busy(True, "refresh")
+        page = self.stack.currentWidget()
+        for method in ("_load_all", "_load", "_load_employees", "refresh"):
+            fn = getattr(page, method, None)
+            if callable(fn):
+                try:
+                    fn()
+                except TypeError:
+                    fn(1)
+                break
+        QTimer.singleShot(900, lambda: self.header.set_busy(False))
+
+    def _export_current_page(self):
+        """Header ka Export — current page ka CSV (jahan export supported hai)."""
+        page = self.stack.currentWidget()
+        for method in ("_export_attendance_csv", "_export_logs_csv",
+                       "_export_employees_csv"):
+            fn = getattr(page, method, None)
+            if callable(fn):
+                fn()
+                return
+        QMessageBox.information(
+            self, "Export",
+            "This page has no CSV export.\n\n"
+            "Export is available on Employees, Attendance and Audit Logs.",
+        )
+
+    def _sync_now(self):
+        """Server health re-check + poora dashboard refresh."""
+        self.header.set_busy(True, "sync")
+
+        def probe():
+            import requests as _rq
+            _rq.get(f"{API_BASE_URL}/health", timeout=8).raise_for_status()
+            return True
+
+        def ok(_r):
+            self.header.set_busy(False)
+            self._status_server.setText("●  Connected to Production Server")
+            self._status_server.setStyleSheet(
+                f"color:{C['success']};font-size:11px;border:none;background:transparent;"
+            )
+            self._dashboard_tab._load_all()
+
+        def fail(error):
+            self.header.set_busy(False)
+            self._status_server.setText("●  Server unreachable")
+            self._status_server.setStyleSheet(
+                f"color:{C['danger']};font-size:11px;border:none;background:transparent;"
+            )
+            QMessageBox.warning(self, "Sync failed", str(error))
+
+        worker = _FetchWorker(f"{API_BASE_URL}/health")
+        worker.finished.connect(ok)
+        worker.error.connect(fail)
+        _track_worker(getattr(self, "_workers", []), worker)
+        self._workers = getattr(self, "_workers", [])
+        worker.start()
 
     def _on_page_changed(self, idx: int):
         self.stack.setCurrentIndex(idx)
@@ -2173,15 +3032,32 @@ class AdminConfigPanel(QMainWindow):
 
         for tab_attr in ['_config_tab', '_screenshots_tab', '_logs_tab', '_attendance_tab', '_employees_tab', '_dashboard_tab']:
             tab = getattr(self, tab_attr, None)
-            if tab and hasattr(tab, '_refresh_timer'):
-                tab._refresh_timer.stop()
+            if tab is None:
+                continue
 
-        for w in getattr(self, '_workers', []):
-            try:
-                w.quit()
-                w.wait(500)
-            except Exception:
-                pass
+            # Har timer band karo — sirf `_refresh_timer` nahi. Dashboard tab
+            # ka `_charts_timer` aur Employees tab ka `_search_timer` alag
+            # hain; unhe chhodne se logout ke baad bhi requests jaati rehtin.
+            for timer_attr in ('_refresh_timer', '_charts_timer', '_search_timer'):
+                timer = getattr(tab, timer_attr, None)
+                if timer is not None:
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
+
+            # BUG FIX: workers har TAB pe hote hain (`tab._workers`), panel pe
+            # nahi. Pehle sirf `self._workers` dekha jaata tha jo
+            # AdminConfigPanel pe kabhi define hi nahi hota — yaani koi bhi
+            # in-flight request thread kabhi properly band nahi hota tha.
+            # Logout ke waqt ye threads apne callbacks ke saath zinda rehte
+            # the aur already-destroyed widgets ko touch kar sakte the.
+            for w in list(getattr(tab, '_workers', [])):
+                try:
+                    w.quit()
+                    w.wait(500)
+                except Exception:
+                    pass
 
     def logout(self):
         from client.application.managers.session_manager import SessionManager
@@ -2194,6 +3070,17 @@ class AdminConfigPanel(QMainWindow):
         self._logging_out = True
 
         self._stop_background_services()
+
+        # BUG FIX: admin panel se logout karne par LOGOUT kabhi log nahi hota
+        # tha (employee dashboard aur system tray dono me hota hai). Is wajah
+        # se admin/super-admin ka session end kabhi Audit Logs me record hi
+        # nahi hota tha — audit trail me gap.
+        # clear_session() se PEHLE, warna employee_id None ho jaata hai aur
+        # LoggerService.log() chup-chaap return kar deta hai.
+        try:
+            LoggerService.log("LOGOUT")
+        except Exception:
+            pass
 
         try:
             SessionLogManager.end_session()

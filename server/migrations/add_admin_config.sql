@@ -20,12 +20,16 @@ BEGIN
 END$$;
 
 -- 3. Global default row
+-- BUG FIX: `ON CONFLICT (employee_id) DO NOTHING` NULL employee_id pe kabhi
+-- trigger nahi hota (Postgres NULLs ko distinct maanta hai) — har run pe ek
+-- nayi duplicate global row banti thi. Ab NOT EXISTS se guard karte hain.
 INSERT INTO employee_configs
     (employee_id, screenshot_min_minutes, screenshot_max_minutes,
      screenshot_count, upload_interval_minutes, idle_threshold_seconds, force_logout)
-VALUES
-    (NULL, 3, 10, 3, 60, 60, false)
-ON CONFLICT (employee_id) DO NOTHING;
+SELECT NULL, 3, 10, 3, 60, 60, false
+WHERE NOT EXISTS (
+    SELECT 1 FROM employee_configs WHERE employee_id IS NULL
+);
 
 -- 4. employees.role column confirm
 ALTER TABLE employees

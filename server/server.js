@@ -26,6 +26,11 @@ pool.query("SELECT NOW()")
 
 const app = express();
 
+// SECURITY: `X-Powered-By: Express` header hata do — ye attacker ko free me
+// bata deta hai ki backend kis stack pe hai (targeted CVE scanning aasan ho
+// jaata hai). Koi functional asar nahi.
+app.disable("x-powered-by");
+
 const isProduction = process.env.NODE_ENV === "production";
 
 const allowedOrigin = process.env.ALLOWED_ORIGIN;

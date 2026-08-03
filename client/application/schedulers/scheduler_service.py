@@ -70,6 +70,17 @@ class SchedulerService(QObject):
 
         now = datetime.now()
 
+        # ── SUPER ADMIN ko monitor nahi karna ──
+        # Super admin company ka owner/manager hai, tracked employee nahi.
+        # BUG tha: production pe ULTA ho raha tha — saare 69 screenshots
+        # EMP001 (super admin) ke the, aur employees/admins ka ek bhi nahi.
+        if getattr(SessionManager, "role", "") == "super_admin":
+            LoggerService.log(
+                "SchedulerService: super admin — screenshots disabled for this account"
+            )
+            self._scheduled_until = None
+            return
+
         # Shift timings SessionManager se
         shift_start_str = SessionManager.shift_start
         shift_end_str   = SessionManager.shift_end
@@ -141,19 +152,60 @@ class SchedulerService(QObject):
             if previous_start <= now < previous_end:
                 shift_start, shift_end = previous_start, previous_end
 
+        # ── OFF-SHIFT COVERAGE ────────────────────────────────────────────
+        #
+        #  BUG (production me pakda gaya): employee agar apni shift window ke
+        #  BAHAR logged in ho, to pehle ek bhi screenshot schedule nahi hota
+        #  tha — na abhi ke liye, na kuch der baad ke liye.
+        #
+        #  Asli case: EMP002 ki shift 09:00–23:59 thi. Wo raat 12:40 baje
+        #  login hua. `effective_start` = max(09:00, 00:40) = 09:00 (agli
+        #  subah) ban gaya, aur pehla screenshot 09:00–11:29 ke beech kahin
+        #  schedule hua. Employee 09:12 pe logout ho gaya — matlab 8 GHANTE
+        #  31 MINUTE ka poora kaam bina kisi screenshot ke nikal gaya.
+        #
+        #  Ek monitoring product ka poora maqsad hi khatam ho jaata hai agar
+        #  wo tab andha ho jaye jab employee off-hours kaam kare. Ab: agar
+        #  employee logged in hai lekin shift ke bahar hai, to shift shuru
+        #  hone tak (ya agle rollover tak) configured min–max cadence pe
+        #  captures lete rahenge. Shift shuru hote hi normal slot-based
+        #  schedule automatically le leta hai (rollover ke through).
+        # ──────────────────────────────────────────────────────────────────
+        if now < shift_start:
+            # Shift abhi shuru nahi hui — tab tak off-shift coverage.
+            LoggerService.log(
+                f"SchedulerService: off-shift ({now.strftime('%H:%M')}), shift "
+                f"{shift_start.strftime('%H:%M')} baje shuru hogi — interim coverage on"
+            )
+            self._scheduled_until = shift_start
+            self._arm_timers(
+                ScreenshotManager.generate_interval_schedule(now, shift_start), now
+            )
+            return
+
         effective_start = max(shift_start, now)
         if effective_start >= shift_end:
-            LoggerService.log_verbose("SchedulerService: shift already ended, no screenshots scheduled")
-            # Agle din ki shift start hone par dobara try karo — warna app
-            # raat bhar chalti rahe to kal ek bhi screenshot nahi hoga.
-            self._scheduled_until = shift_start + timedelta(days=1)
+            # Shift khatam ho chuki hai lekin employee abhi bhi kaam kar raha
+            # hai — agle din ki shift tak off-shift coverage chalu rakho.
+            next_start = shift_start + timedelta(days=1)
+            LoggerService.log(
+                f"SchedulerService: shift ended, employee still logged in — "
+                f"off-shift coverage till {next_start.strftime('%d %b %H:%M')}"
+            )
+            self._scheduled_until = next_start
+            self._arm_timers(
+                ScreenshotManager.generate_interval_schedule(now, next_start), now
+            )
             return
 
         self._scheduled_until = shift_end
         timestamps = ScreenshotManager.generate_random_schedule(effective_start, shift_end)
 
-        for ts in timestamps:
+        self._arm_timers(timestamps, now)
 
+    def _arm_timers(self, timestamps, now: datetime):
+        """Timestamps ki list ke liye single-shot QTimers lagao."""
+        for ts in timestamps:
             delay_ms = int((ts - now).total_seconds() * 1000)
             if delay_ms < 0:
                 continue  # already past

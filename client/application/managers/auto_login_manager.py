@@ -111,7 +111,16 @@ class AutoLoginManager:
             ShiftManager.start_shift()
             SessionLogManager.start_session()
 
-            LoggerService.log(f"AutoLoginManager: auto-login succeeded for {employee_id}")
+            # BUG FIX: yahan sirf "AutoLoginManager: ..." log hota tha. Wo ek
+            # INTERNAL-prefix message hai, jise dashboard/admin feed ka noise
+            # filter chhupa deta hai — is liye auto-login ke baad employee ko
+            # apni Recent Activity me koi login event dikhta hi nahi tha
+            # (feed purane events pe atki lagti thi).
+            # Ab ek asli user-facing LOGIN event bhi jaata hai.
+            LoggerService.log(f"LOGIN SUCCESS : {employee_id}")
+            LoggerService.log_verbose(
+                f"AutoLoginManager: auto-login succeeded for {employee_id}"
+            )
             return {"employee_id": employee_id, "role": role}
 
         except Exception as error:

@@ -34,4 +34,8 @@ router.get(
     adminOnly,
     dashboardController.getChartsData
 );
+// Employee ka apna summary — adminOnly NAHI (har employee apna dekh sakta hai;
+// employee_id JWT se aata hai, client se nahi).
+router.get("/me", dashboardController.getMySummary);
+
 module.exports = router;

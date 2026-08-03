@@ -1,6 +1,6 @@
 const express        = require("express");
 const router         = express.Router();
-const { adminOnly }  = require("../middleware/admin.middleware");
+const { adminOnly, superAdminOnly } = require("../middleware/admin.middleware");
 const adminCtrl      = require("../controllers/admin.controller");
 
 // Sab routes admin-only hain
@@ -10,6 +10,9 @@ router.use(adminOnly);
 router.get("/employees",  adminCtrl.getEmployees);
 router.post("/employees", adminCtrl.createEmployee);
 router.delete("/employees/:employee_id", adminCtrl.deleteEmployee);
+
+// Role change — sirf super_admin
+router.post("/employees/:employee_id/role", superAdminOnly, adminCtrl.changeRole);
 
 // Config
 router.get("/config/:employee_id", adminCtrl.getConfig);   // GET config for one employee or "global"

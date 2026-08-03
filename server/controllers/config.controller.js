@@ -63,10 +63,28 @@ exports.syncConfig = async (req, res) => {
         // Shift timings come from employee_configs.shift_start/shift_end (HH:MM in IST).
         let shift = null;
         try {
-            const shiftResult = await pool.query(
+            // BUG FIX: ye query SIRF employee-specific row dekhti thi. Jis
+            // employee ka apna koi config row nahi hai (yaani jo default pe
+            // chal raha hai — normal case), uske liye `shift` hamesha null
+            // aata tha. Client ka SchedulerService phir "shift times not
+            // found" pe gir kar "login se 8 ghante" wala window use karta —
+            // yaani admin ka set kiya hua GLOBAL shift kabhi apply hi nahi
+            // hota tha, aur screenshots asli shift ke bahar schedule ho
+            // jaate the. Baaki saare config fields pehle se hi global row pe
+            // fall back karte hain (upar `configRow`) — shift ko bhi wahi
+            // consistent behaviour chahiye.
+            let shiftResult = await pool.query(
                 `SELECT shift_start, shift_end FROM employee_configs WHERE employee_id = $1 LIMIT 1`,
                 [employee_id]
             );
+
+            if (!shiftResult.rows[0]?.shift_start || !shiftResult.rows[0]?.shift_end) {
+                shiftResult = await pool.query(
+                    `SELECT shift_start, shift_end FROM employee_configs
+                     WHERE employee_id IS NULL LIMIT 1`
+                );
+            }
+
             const s = shiftResult.rows[0];
             if (s?.shift_start && s?.shift_end) {
                 const today = new Date().toISOString().split("T")[0];

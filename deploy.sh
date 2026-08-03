@@ -1,11 +1,21 @@
 #!/bin/bash
 
-BASE_URL="http://65.21.212.85:8000/api"
-ADMIN_ID="admin"
-ADMIN_PASS="admin123"
-ADMIN_EMP_ID="EMP001"
-EMP_ID="EMP002"
-EMP_PASS="ansh"
+# SECURITY FIX: credentials pehle yahan hardcoded the (aur git me committed).
+# Ab environment se aate hain — repo me koi password nahi.
+#
+# Usage:
+#   ADMIN_PASS='...' EMP_PASS='...' ./deploy.sh
+#
+BASE_URL="${BASE_URL:-http://65.21.212.85:8000/api}"
+ADMIN_ID="${ADMIN_ID:-admin}"
+ADMIN_EMP_ID="${ADMIN_EMP_ID:-EMP001}"
+EMP_ID="${EMP_ID:-EMP002}"
+
+if [ -z "$ADMIN_PASS" ]; then
+    echo "ERROR: ADMIN_PASS environment variable is not set."
+    echo "Usage: ADMIN_PASS='<admin password>' EMP_PASS='<employee password>' ./deploy.sh"
+    exit 1
+fi
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'

@@ -34,6 +34,47 @@ from client.services.logger_service import LoggerService
 from client.presentation.windows.attendance_window import AttendanceWindow
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  BUG FIX: "Recent Activity" feed me internal debug messages dikh rahe the
+#  (jaise "ScreenshotManager: 6 screenshots scheduled across shift ...").
+#
+#  Wajah: noise filtering DO alag jagah, DO alag lists se hoti thi —
+#    1. API path ka `noise` list  -> ScreenshotManager INCLUDED tha
+#    2. display ka `IGNORE_LOGS`  -> ScreenshotManager MISSING tha
+#  aur local-DB fallback path pe pehla filter lagta hi nahi tha. Is liye jab
+#  bhi feed local DB se banta (offline ya sab logs filter ho jaane par),
+#  internal ScreenshotManager/Scheduler messages employee ko dikh jaate the.
+#
+#  Ab ek hi source of truth hai jo dono paths use karte hain.
+# ──────────────────────────────────────────────────────────────────────────────
+_INTERNAL_LOG_PREFIXES = (
+    "CONFIGSYNCMANAGER",
+    "SCHEDULERSERVICE",
+    "SCREENSHOTMANAGER",   # <- ye missing tha
+    "SYNCMANAGER",
+    "CONFIGSYNC",
+    "STARTUPMANAGER",
+    "AUTOLOGINMANAGER",
+    "CRYPTOENGINE",
+    "APISERVICE",
+    "IDLETRACKER",
+    "LOGGERSERVICE",
+)
+
+
+def _is_user_facing(activity: str) -> bool:
+    """
+    True sirf un logs ke liye jo employee ko dikhane laayak hain
+    (LOGIN, USER IDLE/ACTIVE, SCREENSHOT CAPTURED, UPLOAD ...).
+    Internal component diagnostics filter ho jaate hain.
+    """
+    text = str(activity or "").upper()
+    if not text.strip():
+        return False
+    return not any(text.lstrip().startswith(p) or f"{p}:" in text
+                   for p in _INTERNAL_LOG_PREFIXES)
+
+
 class _CallWorker(QThread):
     """
     Generic background worker — koi bhi blocking call (jaise `requests.get`)
@@ -252,7 +293,7 @@ class DashboardWindow(BaseWindow):
 
         admin_button = None
 
-        if SessionManager.role == "admin":
+        if SessionManager.role in ("admin", "super_admin"):
             admin_button = QPushButton("🛠 Admin Panel")
             admin_button.setFixedHeight(42)
 
@@ -425,8 +466,17 @@ class DashboardWindow(BaseWindow):
 
             total_activity_logs = 0
 
+            # BUG FIX: server ab asli `total` bhejta hai. Pehle ye poora
+            # block sirf `len(data)` gin paata tha, aur /logs/all pe
+            # LIMIT 100 hai — is liye "Logs Recorded" card 100 pe permanently
+            # atak jaata tha (employee ne yehi report kiya: "start me 100
+            # dikha, ab bhi 100"). `total` ko sabse pehle prefer karo.
+            if isinstance(result, dict) and isinstance(result.get("total"), (int, float)):
+                self.log_count_card.update_value(str(int(result["total"])))
+                return
+
             try:
-                
+
                 if isinstance(result, dict):
                     # Prefer nested data structures
                     data_block = result.get("data")
@@ -519,7 +569,15 @@ class DashboardWindow(BaseWindow):
         try:
             conn = Database.connect()
             cur  = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM pending_logs")
+            # BUG FIX: pehle ye SAARE pending_logs count karta tha, chahe wo
+            # kisi bhi employee ke hon. Shared machine pe (ya employee badalne
+            # ke baad) "Logs Recorded" card galat, inflated number dikhata tha.
+            # Server wala path already sirf apne logs deta hai — local
+            # fallback ko bhi wahi scope follow karna chahiye.
+            cur.execute(
+                "SELECT COUNT(*) FROM pending_logs WHERE employee_id = ?",
+                (SessionManager.employee_id,),
+            )
             log_count = cur.fetchone()[0]
             conn.close()
             self.log_count_card.update_value(str(log_count))
@@ -547,8 +605,7 @@ class DashboardWindow(BaseWindow):
         try:
             all_logs = result.get("data", []) if isinstance(result, dict) else []
             # Filter: sirf meaningful logs dikhao
-            noise = ['ConfigSyncManager', 'SchedulerService', 'SyncManager', 'ScreenshotManager']
-            logs = [l for l in all_logs if not any(n in l.get('activity','') for n in noise)][:15]
+            logs = [l for l in all_logs if _is_user_facing(l.get('activity', ''))][:15]
 
             # BUG FIX: agar server ne success to diya lekin list KHAALI hai
             # (ya sab kuch noise filter me nikal gaya), to pehle feed
@@ -570,14 +627,18 @@ class DashboardWindow(BaseWindow):
             cur  = conn.cursor()
             # BUG FIX: pehle yahan employee filter nahi tha — shared machine
             # pe pichhle employee ke buffered logs bhi dikh jaate the.
+            # LIMIT 15 nahi, 200 — kyunki internal diagnostics filter hone ke
+            # baad hi 15 user-facing events chunne hain. Pehle raw 15 rows
+            # uthate the, jo aksar poori tarah ScreenshotManager/Scheduler
+            # noise hoti thin, aur feed khaali (ya noise se bhari) dikhta tha.
             cur.execute("""
                 SELECT id, activity, timestamp
                 FROM pending_logs
                 WHERE employee_id = ?
                 ORDER BY id DESC
-                LIMIT 15
+                LIMIT 200
                 """, (SessionManager.employee_id,))
-            rows = cur.fetchall()
+            rows = [r for r in cur.fetchall() if _is_user_facing(r[1])][:15]
             conn.close()
 
             self.activity_list.clear()
@@ -627,17 +688,15 @@ class DashboardWindow(BaseWindow):
             "UPLOAD FAILED":       ("❌", "#f87171", "Upload Failed"),
         }
 
-        IGNORE_LOGS = [
-            "CONFIGSYNCMANAGER",
-            "SCHEDULERSERVICE",
-            "CONFIGSYNC",
-            "SYNCMANAGER",
-        ]
-
+        # BUG FIX: yahan pehle ek ALAG (aur adhoori) IGNORE_LOGS list thi
+        # jisme "SCREENSHOTMANAGER" tha hi nahi — is liye ScreenshotManager
+        # ke internal messages feed me dikh jaate the. Ab wahi ek shared
+        # `_is_user_facing()` helper use hota hai jo API path bhi use karta
+        # hai, to dono jagah behaviour hamesha same rahega.
         for log in logs:
             activity_raw = str(log.get("activity", "")).upper()
 
-            if any(x in activity_raw for x in IGNORE_LOGS):
+            if not _is_user_facing(activity_raw):
                 continue
 
             ts = str(log.get("created_at", "") or log.get("timestamp", "") or "")
@@ -751,6 +810,21 @@ class DashboardWindow(BaseWindow):
     def logout(self):
         print("[LOGOUT] Starting...")
 
+        # BUG FIX: LOGOUT kabhi log hi nahi hota tha. `_populate_activity_list`
+        # ke icon_map me "LOGOUT" entry maujood thi, lekin poore codebase me
+        # koi `LoggerService.log("LOGOUT")` call hi nahi thi — is liye
+        # employee ke Recent Activity me kabhi "Logged Out" dikh hi nahi
+        # sakta tha, aur admin ke Audit Logs me bhi session end ka koi
+        # record nahi jaata tha.
+        #
+        # Ye clear_session() se PEHLE hona zaroori hai — uske baad
+        # employee_id None ho jaata hai aur LoggerService.log() chup-chaap
+        # return kar deta hai (yehi bug LOGIN pe bhi tha).
+        try:
+            LoggerService.log("LOGOUT")
+        except Exception as e:
+            print("LOGOUT LOG ERROR:", e)
+
         try:
             SessionLogManager.end_session()
         except Exception as e:
@@ -815,7 +889,7 @@ class DashboardWindow(BaseWindow):
         self.attendance_window.show()
 
     def open_admin_panel(self):
-        if SessionManager.role != "admin":
+        if SessionManager.role not in ("admin", "super_admin"):
             return
        
         if hasattr(self, "scheduler") and self.scheduler:
@@ -824,8 +898,24 @@ class DashboardWindow(BaseWindow):
             self.idle_tracker.stop()
 
         self.admin_panel = AdminConfigPanel()
+        # BUG FIX: pehle ye `destroyed` signal se resume karta tha. Qt me
+        # window band karne se object DESTROY nahi hota — sirf hide hota
+        # hai (deleteLater() kabhi call hi nahi hota). Yaani ye signal
+        # practically kabhi fire nahi karta tha: admin ek baar Admin Panel
+        # khol le, to uske apne screenshots + idle tracking HAMESHA ke liye
+        # band ho jaate the. Ab close hote hi resume ho jaata hai.
         self.admin_panel.destroyed.connect(self._resume_tracking_after_admin_panel)
+        self.admin_panel.installEventFilter(self)
         self.admin_panel.show()
+
+    def eventFilter(self, watched, event):
+        from PySide6.QtCore import QEvent
+        if (
+            watched is getattr(self, "admin_panel", None)
+            and event.type() == QEvent.Type.Close
+        ):
+            self._resume_tracking_after_admin_panel()
+        return super().eventFilter(watched, event)
 
     def _resume_tracking_after_admin_panel(self):
         if not SessionManager.is_authenticated:

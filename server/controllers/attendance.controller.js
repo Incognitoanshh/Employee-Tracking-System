@@ -1,13 +1,19 @@
 const pool = require("../config/db");
 
+// super_admin ko har jagah admin ke barabar (ya usse upar) treat karo.
+// BUG: ye checks pehle sirf "admin" dekhte the, is liye super_admin ko
+// sirf apna hi data dikhta — poori company ka nahi.
+const isElevated = (role) => role === "admin" || role === "super_admin";
+
+
 exports.getAttendance = async (req, res) => {
     try {
-        let { employee_id, page = 1 } = req.query;
+        let { employee_id, date, page = 1 } = req.query;
         const limit  = 50;
         const offset = (page - 1) * limit;
 
         // SECURITY: non-admin apna data hi dekh sakte hain
-        if (req.employee?.role !== "admin") {
+        if (!isElevated(req.employee?.role)) {
             employee_id = req.employee?.employee_id;
         }
 
@@ -18,6 +24,18 @@ exports.getAttendance = async (req, res) => {
         if (employee_id) {
             conditions.push(`employee_id = $${idx++}`);
             values.push(employee_id);
+        }
+
+        // BUG FIX: admin panel ke Attendance tab me date picker maujood tha
+        // lekin server `date` param support hi nahi karta tha — us control ko
+        // dabane se kuch hota hi nahi tha. Ab UTC-stored login_time ko IST me
+        // convert karke uss din ke records filter hote hain (baaki panel
+        // bhi isi pattern se date filter karta hai).
+        if (date) {
+            conditions.push(
+                `DATE((login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = $${idx++}`
+            );
+            values.push(date);
         }
 
         const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -50,7 +68,7 @@ exports.loginAttendance = async (req, res) => {
     try {
         let { employee_id, login_time } = req.body;
 
-        if (req.employee?.role !== "admin") {
+        if (!isElevated(req.employee?.role)) {
             employee_id = req.employee?.employee_id;
         }
 
@@ -65,7 +83,7 @@ exports.loginAttendance = async (req, res) => {
         // hai (isi row ke apne dono timestamps se), display pe "—" ki jagah
         // ek meaningful (best-effort) duration dikhega.
         await pool.query(
-            `UPDATE attendance SET logout_time = NOW(), total_hours = NOW()::timestamp - login_time
+            `UPDATE attendance SET logout_time = (NOW() AT TIME ZONE 'UTC'), total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
              WHERE employee_id = $1 AND logout_time IS NULL`,
             [employee_id]
         );
@@ -75,7 +93,7 @@ exports.loginAttendance = async (req, res) => {
         // PostgreSQL bina timezone ke store karta tha — inconsistent tha
         // Ab hum seedha NOW() use karte hain jo UTC mein hai
         const result = await pool.query(
-            `INSERT INTO attendance (employee_id, login_time) VALUES ($1, NOW()) RETURNING id`,
+            `INSERT INTO attendance (employee_id, login_time) VALUES ($1, (NOW() AT TIME ZONE 'UTC')) RETURNING id`,
             [employee_id]
         );
 
@@ -90,7 +108,7 @@ exports.logoutAttendance = async (req, res) => {
     try {
         let { employee_id } = req.body;
 
-        if (req.employee?.role !== "admin") {
+        if (!isElevated(req.employee?.role)) {
             employee_id = req.employee?.employee_id;
         }
 
@@ -109,7 +127,7 @@ exports.logoutAttendance = async (req, res) => {
         // isliye kabhi mismatch nahi ho sakta.
         const result = await pool.query(
             `UPDATE attendance
-             SET logout_time = NOW(), total_hours = NOW()::timestamp - login_time
+             SET logout_time = (NOW() AT TIME ZONE 'UTC'), total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
              WHERE id = (
                  SELECT id FROM attendance
                  WHERE employee_id = $1 AND logout_time IS NULL

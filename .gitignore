@@ -43,3 +43,7 @@ build/
 
 # DB dumps (except schema)
 ets_db.sql
+
+# Local .env backups (never commit)
+client/.env.backup-*
+server/.env.backup-*

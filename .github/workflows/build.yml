@@ -38,7 +38,7 @@ jobs:
           echo SCREENSHOT_MAX_INTERVAL=600 >> client\.env
           echo IDLE_THRESHOLD=60 >> client\.env
           echo API_BASE_URL=http://65.21.212.85:8000/api >> client\.env
-          echo SCREENSHOT_ENCRYPTION_KEY=g12Cdb/UXwN+NqAwivsBiLEv21yzJeyJ5+PWk6i/i0M= >> client\.env
+          echo SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }} >> client\.env
 
       - name: Build Windows EXE
         run: |
@@ -75,7 +75,7 @@ jobs:
           echo "SCREENSHOT_MAX_INTERVAL=600" >> client/.env
           echo "IDLE_THRESHOLD=60" >> client/.env
           echo "API_BASE_URL=http://65.21.212.85:8000/api" >> client/.env
-          echo "SCREENSHOT_ENCRYPTION_KEY=g12Cdb/UXwN+NqAwivsBiLEv21yzJeyJ5+PWk6i/i0M=" >> client/.env
+          echo "SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }}" >> client/.env
 
       - name: Build Mac Executable
         run: |
