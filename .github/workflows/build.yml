@@ -33,7 +33,7 @@ jobs:
 
       - name: Create client .env file
         run: |
-          echo APP_NAME=ETS > client\.env
+          echo APP_NAME=Amaze ETS > client\.env
           echo SCREENSHOT_MIN_INTERVAL=300 >> client\.env
           echo SCREENSHOT_MAX_INTERVAL=600 >> client\.env
           echo IDLE_THRESHOLD=60 >> client\.env
@@ -42,13 +42,13 @@ jobs:
 
       - name: Build Windows EXE
         run: |
-          pyinstaller --onefile --windowed --add-data "client/.env;." --name="ETS-Employee-Monitor" client/main.py
+          pyinstaller --onefile --windowed --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze ETS" client/main.py
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ETS-Windows-EXE
-          path: dist/ETS-Employee-Monitor.exe
+          path: "dist/Amaze ETS.exe"
 
   build-mac:
     runs-on: macos-latest
@@ -70,7 +70,7 @@ jobs:
 
       - name: Create client .env file
         run: |
-          echo "APP_NAME=ETS" > client/.env
+          echo "APP_NAME=Amaze ETS" > client/.env
           echo "SCREENSHOT_MIN_INTERVAL=300" >> client/.env
           echo "SCREENSHOT_MAX_INTERVAL=600" >> client/.env
           echo "IDLE_THRESHOLD=60" >> client/.env
@@ -79,21 +79,23 @@ jobs:
 
       - name: Build Mac Executable
         run: |
-          pyinstaller --onefile --windowed --add-data "client/.env:." --name="ETS-Employee-Monitor" client/main.py
+          pyinstaller --onefile --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --name="Amaze ETS" client/main.py
 
       - name: Create DMG Installer
         run: |
           mkdir dmg_out
           create-dmg \
-            --volname "ETS Monitor Installer" \
+            --volname "Amaze ETS" \
+            --volicon "assets/icon.icns" \
             --window-size 500 300 \
             --icon-size 100 \
+            --icon "Amaze ETS.app" 130 120 \
             --app-drop-link 350 120 \
-            "dmg_out/ETS-Employee-Monitor.dmg" \
-            "dist/ETS-Employee-Monitor.app"
+            "dmg_out/Amaze-ETS.dmg" \
+            "dist/Amaze ETS.app"
 
       - name: Upload Mac DMG Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ETS-Mac-DMG
-          path: dmg_out/ETS-Employee-Monitor.dmg
+          path: dmg_out/Amaze-ETS.dmg

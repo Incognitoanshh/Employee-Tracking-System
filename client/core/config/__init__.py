@@ -56,7 +56,7 @@ STORAGE_DIR = os.path.join(DATA_DIR, "storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://65.21.212.85:8000/api")
-APP_NAME    = os.getenv("APP_NAME", "ETS Client")
+APP_NAME    = os.getenv("APP_NAME", "Amaze ETS")
 # SINGLE SOURCE OF TRUTH — poora UI yahi padhta hai.
 # BUG FIX: pehle version 4 jagah alag-alag hardcoded tha (login "v1.0",
 # employee panel "2.1.0", admin console "v2.1.0", settings "1.0") — employee
