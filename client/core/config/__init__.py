@@ -57,7 +57,11 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://65.21.212.85:8000/api")
 APP_NAME    = os.getenv("APP_NAME", "ETS Client")
-APP_VERSION = "1.0.0"
+# SINGLE SOURCE OF TRUTH — poora UI yahi padhta hai.
+# BUG FIX: pehle version 4 jagah alag-alag hardcoded tha (login "v1.0",
+# employee panel "2.1.0", admin console "v2.1.0", settings "1.0") — employee
+# support pe jo version batata wo screen pe depend karta tha.
+APP_VERSION = "2.1.0"
 SCREENSHOT_MIN_INTERVAL = int(os.getenv("SCREENSHOT_MIN_INTERVAL", 180))
 SCREENSHOT_MAX_INTERVAL = int(os.getenv("SCREENSHOT_MAX_INTERVAL", 600))
 IDLE_THRESHOLD          = int(os.getenv("IDLE_THRESHOLD", 60))

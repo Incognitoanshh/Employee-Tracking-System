@@ -30,8 +30,37 @@ class SyncManager:
 
     @staticmethod
     def mark_uploaded(screenshot_id):
+        """
+        Upload safal — DB me flag set karo AUR local .enc file delete karo.
+
+        BUG FIX: pehle sirf `uploaded = 1` set hota tha, file disk pe hamesha
+        ke liye padi rehti thi. `cleanup_old_orphans()` sirf `uploaded = 0`
+        (failed) files hataata hai — yaani har SAFAL upload ki file kabhi
+        delete hi nahi hoti thi.
+
+        Production pe measure kiya: average file 3.5 MB, 12 captures/din
+        => ~10 GB per employee per saal, employee ke apne laptop pe. Kai
+        mahine baad employee ki disk bhar jaati aur app screenshot lena
+        band kar deti (capture failed — no space).
+
+        Upload safal hone ka matlab hai server ke paas copy hai (wahi
+        source of truth hai — admin panel aur preview dono server se hi
+        fetch karte hain), is liye local copy rakhne ka koi fayda nahi.
+        """
         connection = Database.connect()
         cursor = connection.cursor()
+
+        file_path = None
+        try:
+            cursor.execute(
+                "SELECT file_path FROM screenshots WHERE id = ?", (screenshot_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                file_path = row[0]
+        except Exception:
+            pass
+
         cursor.execute(
             """
             UPDATE screenshots
@@ -42,6 +71,17 @@ class SyncManager:
         )
         connection.commit()
         connection.close()
+
+        if file_path:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as error:
+                # Delete fail hona upload ko fail nahi karta — file agli
+                # cleanup pass me hat jayegi.
+                LoggerService.log_verbose(
+                    f"SyncManager: uploaded file delete nahi hui {file_path} — {error}"
+                )
 
     @staticmethod
     def get_pending_logs():
