@@ -600,6 +600,9 @@ class _BarChartWidget(QFrame):
 
         painter.end()
 
+_StatCardCounter = [0]
+
+
 class StatCard(QFrame):
     """
     Dashboard metric card — icon badge + big value + label + trend sparkline.
@@ -613,8 +616,22 @@ class StatCard(QFrame):
                  sparkline: bool = True):
         super().__init__()
         self._accent = accent
+        # In Qt, QLabel is a subclass of QFrame, so a bare `QFrame { border:
+        # 1px solid ... }` rule also applies to every QLabel inside the card.
+        # That drew an outline around the value, the caption and the subtitle
+        # — the stray boxes visible around "2", "Total Employees" and
+        # "2 registered" on the dashboard strip.
+        #
+        # panel_widgets.py avoids this by setting `border:none` on each child
+        # label; this class never did. Scoping the rule to this widget's own
+        # objectName is the more robust fix, since it cannot be undone by
+        # forgetting a guard on some label added later.
+        _StatCardCounter[0] += 1
+        name = f"statCard{_StatCardCounter[0]}"
+        self.setObjectName(name)
         self.setStyleSheet(
-            f"QFrame {{ background: {C['bg_surface']}; border: 1px solid {C['border']}; border-radius: 14px; }}"
+            f"QFrame#{name} {{ background: {C['bg_surface']};"
+            f" border: 1px solid {C['border']}; border-radius: 14px; }}"
         )
         # BUG: minimumHeight 100 tha, lekin card ke andar badge (36) + value
         # (24px font) + label + subtitle + spacing + margins milkar 157px
@@ -1024,49 +1041,49 @@ class _ConfigTab(QWidget):
         # ── Sections ──────────────────────────────────────────────────────
         body.addWidget(self._build_section(
             "📸", "Screenshot Capture",
-            "Kitni aur kitni jaldi captures li jayen.",
+            "How many captures, and how far apart.",
             [
                 self._setting_row("Screenshots per shift",
-                                  "Ek shift me maximum kitne captures.",
+                                  "Maximum captures taken during one shift.",
                                   self._cnt_spin, "captures"),
                 self._setting_row("Minimum interval",
-                                  "Do captures ke beech kam se kam itna gap.",
+                                  "Shortest gap allowed between two captures.",
                                   self._min_spin, "minutes"),
                 self._setting_row("Maximum interval",
-                                  "Do captures ke beech zyada se zyada itna gap.",
+                                  "Longest gap allowed between two captures.",
                                   self._max_spin, "minutes"),
             ]))
 
         body.addWidget(self._build_section(
             "🖥", "Activity Tracking",
-            "Employee kab idle maana jaayega.",
+            "When an employee counts as idle.",
             [
                 self._setting_row("Idle threshold",
-                                  "Itni der koi input na aaye to idle mark hoga.",
+                                  "Marked idle after this long with no input.",
                                   self._idle_spin, "seconds"),
             ]))
 
         body.addWidget(self._build_section(
             "🕐", "Shift Schedule",
-            "Screenshots isi window ke andar schedule hote hain (IST).",
+            "Screenshots are only scheduled inside this window (IST).",
             [
-                self._setting_row("Shift start time", "24-hour format, jaise 09:00.",
+                self._setting_row("Shift start time", "24-hour format, for example 09:00.",
                                   self._shift_start, "HH:MM"),
                 self._setting_row("Shift end time",
-                                  "Overnight shift ke liye end < start rakho (22:00 → 06:00).",
+                                  "For an overnight shift set end before start (22:00 → 06:00).",
                                   self._shift_end, "HH:MM"),
             ]))
 
         body.addWidget(self._build_section(
             "⚙", "Advanced",
-            "Sirf zarurat padne par badlo.",
+            "Only change these if you need to.",
             [
                 self._setting_row("Upload interval",
-                                  "Captured data kitni der me server pe sync ho.",
+                                  "How often captured data is synced to the server.",
                                   self._upl_spin, "minutes"),
                 self._setting_row("Verbose logging",
-                                  "Har sync/schedule event log karta hai. Sirf debugging ke "
-                                  "liye ON karo — DB tezi se bharta hai.",
+                                  "Logs every sync and schedule event. Turn on only for "
+                                  "debugging — it fills the database quickly.",
                                   self._verbose_check),
             ]))
 
@@ -1086,7 +1103,7 @@ class _ConfigTab(QWidget):
         body.addStretch()
 
     def _load_employees(self):
-        self._status_label.setText("Employees load ho rahe hain…")
+        self._status_label.setText("Loading employees…")
         w = _FetchWorker(f"{API_BASE_URL}/admin/employees")
         w.result.connect(self._on_employees_loaded)
         w.error.connect(lambda e: self._status_label.setText(f"Error: {e}"))
@@ -1150,9 +1167,9 @@ class _ConfigTab(QWidget):
                 f"padding:11px 16px; font-size:12px;"
             )
             self._scope_banner.setText(
-                "🌐  <b>Global Default</b> — ye har us employee pe lagega jiska "
-                "apna override set nahi hai. Jinke override set hain wo apni "
-                "hi value pe rahenge."
+                "🌐  <b>Global Default</b> — applies to every employee who has "
+                "no override of their own. Employees with an override keep "
+                "their own values."
             )
             return
 
@@ -1164,16 +1181,16 @@ class _ConfigTab(QWidget):
         )
         if inherited:
             self._scope_banner.setText(
-                f"👤  <b>{label}</b> — abhi iska apna koi override nahi hai, ye "
-                f"<b>Global Default</b> se values le raha hai. Save dabate hi "
-                f"sirf isi employee ka override ban jayega; baaki koi affect "
-                f"nahi hoga."
+                f"👤  <b>{label}</b> — no override of their own yet, so these "
+                f"values come from the <b>Global Default</b>. Saving creates "
+                f"an override for this employee only; nobody else is "
+                f"affected."
             )
         else:
             self._scope_banner.setText(
-                f"👤  <b>{label}</b> — ye iski apni settings hain. Yahan kiya "
-                f"gaya change <b>sirf isi employee</b> pe lagega, kisi aur pe "
-                f"nahi."
+                f"👤  <b>{label}</b> — these are this employee's own settings. "
+                f"Changes here apply to <b>this employee only</b>, nobody "
+                f"else."
             )
 
     # Actions
@@ -3573,7 +3590,7 @@ class AdminConfigPanel(QMainWindow):
                 self._tray_hint_shown = True
                 self.tray.showMessage(
                     "Amaze ETS",
-                    "Panel background me chal raha hai. Tray icon se wapas kholein.",
+                    "Still running in the background. Use the tray icon to reopen.",
                     QSystemTrayIcon.MessageIcon.Information,
                     4000,
                 )
