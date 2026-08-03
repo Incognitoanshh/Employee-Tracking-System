@@ -48,8 +48,8 @@ class SchedulerService(QObject):
         try:
             SyncManager.cleanup_old_orphans(days=7)
         except Exception as e:
-            LoggerService.log(f"SchedulerService: cleanup_old_orphans failed on startup — {e}")
-        LoggerService.log("SchedulerService: started (shift-based mode)")
+            LoggerService.log_verbose(f"SchedulerService: cleanup_old_orphans failed on startup — {e}")
+        LoggerService.log_verbose("SchedulerService: started (shift-based mode)")
 
     def stop(self):
         self._started = False
@@ -64,7 +64,7 @@ class SchedulerService(QObject):
         if self._config_sync:
             self._config_sync.stop()
             self._config_sync = None
-        LoggerService.log("SchedulerService: stopped")
+        LoggerService.log_verbose("SchedulerService: stopped")
 
     def _schedule_shift_screenshots(self):
 
@@ -74,8 +74,12 @@ class SchedulerService(QObject):
         # Super admin company ka owner/manager hai, tracked employee nahi.
         # BUG tha: production pe ULTA ho raha tha — saare 69 screenshots
         # EMP001 (super admin) ke the, aur employees/admins ka ek bhi nahi.
+        # Ye line har reschedule pe chalti thi, is liye Audit Logs me
+        # super admin ki hazaaron identical entries bhar jaati thin aur
+        # asli events (LOGIN/LOGOUT, role changes) dab jaate the. Ab
+        # log_verbose — sirf tab dikhega jab verbose_logging ON ho.
         if getattr(SessionManager, "role", "") == "super_admin":
-            LoggerService.log(
+            LoggerService.log_verbose(
                 "SchedulerService: super admin — screenshots disabled for this account"
             )
             self._scheduled_until = None
@@ -191,7 +195,7 @@ class SchedulerService(QObject):
         # ──────────────────────────────────────────────────────────────────
         if now < shift_start:
             # Shift abhi shuru nahi hui — tab tak off-shift coverage.
-            LoggerService.log(
+            LoggerService.log_verbose(
                 f"SchedulerService: off-shift ({now.strftime('%H:%M')}), shift "
                 f"{shift_start.strftime('%H:%M')} baje shuru hogi — interim coverage on"
             )
@@ -206,7 +210,7 @@ class SchedulerService(QObject):
             # Shift khatam ho chuki hai lekin employee abhi bhi kaam kar raha
             # hai — agle din ki shift tak off-shift coverage chalu rakho.
             next_start = shift_start + timedelta(days=1)
-            LoggerService.log(
+            LoggerService.log_verbose(
                 f"SchedulerService: shift ended, employee still logged in — "
                 f"off-shift coverage till {next_start.strftime('%d %b %H:%M')}"
             )
@@ -280,7 +284,7 @@ class SchedulerService(QObject):
             return
 
         if datetime.now() >= self._scheduled_until:
-            LoggerService.log("SchedulerService: shift window over — rescheduling for next shift")
+            LoggerService.log_verbose("SchedulerService: shift window over — rescheduling for next shift")
             self.reschedule()
 
     def _start_config_sync(self):
@@ -355,7 +359,7 @@ class SchedulerService(QObject):
                 SessionManager.shift_end   = end_ist
                 if old_start != start_ist or old_end != end_ist:
                     changed = True
-                    LoggerService.log(f"SchedulerService: shift updated {start_ist}–{end_ist}")
+                    LoggerService.log_verbose(f"SchedulerService: shift updated {start_ist}–{end_ist}")
 
         if changed:
             LoggerService.log_verbose(
