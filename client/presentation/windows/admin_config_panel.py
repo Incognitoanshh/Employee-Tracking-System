@@ -1952,11 +1952,15 @@ class EmployeeDetailsDialog(QDialog):
         w.result.connect(self._on_details)
         # Guard to prevent popup spam on worker errors
         def _on_worker_error(e: str):
+            self._live_timer.stop()
+            self._details_refresh_timer.stop()
+            # Logout ke baad aayi hui error — chup-chaap band karo (upar dekho).
+            if not getattr(SessionManager, "is_authenticated", False):
+                self.close()
+                return
             if self._token_error_shown:
                 return
             self._token_error_shown = True
-            self._live_timer.stop()
-            self._details_refresh_timer.stop()
             QMessageBox.warning(self, "Error", f"Failed to load details: {e}")
 
         w.error.connect(_on_worker_error)
@@ -1972,16 +1976,21 @@ class EmployeeDetailsDialog(QDialog):
             error_msg = data.get('message', 'Unknown error')
 
             # Only show the popup once
+            # BUG FIX: agar admin ne LOGOUT kar diya hai to ye popup bilkul
+            # bekaar hai — user ko login screen ke upar "Session Expired,
+            # please log out and log in again" dikhta tha, jabki wo already
+            # logout kar chuka hai. In-flight request logout ke baad 401
+            # deti hai, aur ye dialog use error samajh leta tha.
+            # Ab: session already clear ho to chup-chaap band ho jao.
+            self._live_timer.stop()
+            self._details_refresh_timer.stop()
+
+            if not getattr(SessionManager, "is_authenticated", False):
+                self.close()
+                return
+
             if not self._token_error_shown:
                 self._token_error_shown = True
-
-                # Stop all timers and workers to prevent further errors
-                self._live_timer.stop()
-                self._details_refresh_timer.stop()
-                for w in self._workers:
-                    w.quit()
-                    w.wait(1000)
-
                 QMessageBox.warning(
                     self,
                     "Session Expired",
@@ -3126,10 +3135,16 @@ class AdminConfigPanel(QMainWindow):
             # in-flight request thread kabhi properly band nahi hota tha.
             # Logout ke waqt ye threads apne callbacks ke saath zinda rehte
             # the aur already-destroyed widgets ko touch kar sakte the.
+            # NOTE: yahan `quit()` jaan-boojh kar nahi hai — override kiye
+            # gaye `run()` wale QThread me event loop hota hi nahi, to
+            # quit() bekaar hai. Asli intezaar `_drain_workers()` upar kar
+            # chuka hai (signals disconnect karke, bounded wait ke saath).
+            # Yahan bas ek aakhri short wait, aur jo phir bhi chal raha ho
+            # use DELETE nahi karte — wahi crash ki wajah banta hai.
             for w in list(getattr(tab, '_workers', [])):
                 try:
-                    w.quit()
-                    w.wait(500)
+                    if w.isRunning():
+                        w.wait(300)
                 except Exception:
                     pass
 

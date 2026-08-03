@@ -16,9 +16,18 @@ from client.application.managers.session_manager import SessionManager
 from client.security.crypto_engine import CryptoEngine
 
 
+# Jo workers window band hone ke BAAD bhi chal rahe hain unhe yahan rakhte
+# hain. Bina iske Python unhe garbage collect kar deta hai jabki OS thread
+# abhi zinda hai — aur Qt turant crash karta hai.
+_ORPHANED_WORKERS: list = []
+
+
 class _DownloadWorker(QThread):
-    finished = Signal(object)
-    error = Signal(str)
+    # CRASH FIX: pehle is signal ka naam `finished` tha, jo QThread ke
+    # BUILT-IN `finished` ko shadow karta tha — usi wajah se neeche wala
+    # cleanup logic bharosemand nahi tha.
+    result = Signal(object)
+    error  = Signal(str)
 
     def __init__(self, screenshot_id):
         super().__init__()
@@ -29,19 +38,45 @@ class _DownloadWorker(QThread):
         self._cancelled = True
 
     def run(self):
+        """
+        CRASH FIX: pehle ye ek hi blocking `requests.get(timeout=30)` tha.
+        `cancel()` sirf ek flag set karta hai, aur wo flag request ke return
+        hone tak padha hi nahi jaata — yaani thread 30 second tak zinda
+        rehta chahe user ne window kabka band kar diya ho. Us beech me app
+        quit ho jaye to Qt chalte hue QThread ko destroy karta hai aur
+        std::terminate() se poori app mar jaati hai.
+
+        Ab response STREAM hota hai aur har chunk ke beech cancel flag
+        check hota hai — cancel karte hi thread milliseconds me nikal jaata
+        hai. Connect timeout chhota (5s) hai taaki dead server pe bhi jaldi
+        haar maane.
+        """
         try:
             print(f"[DOWNLOAD WORKER] Fetching screenshot_id={self.screenshot_id}")
-            response = requests.get(
+            with requests.get(
                 f"{API_BASE_URL}/screenshots/download/{self.screenshot_id}",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=30
-            )
+                timeout=(5, 30),          # (connect, read)
+                stream=True,
+            ) as response:
+                if self._cancelled:
+                    return
+                if response.status_code != 200:
+                    body = response.text[:100] if not self._cancelled else ""
+                    self.error.emit(f"HTTP {response.status_code}:{body}")
+                    return
+
+                chunks = []
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if self._cancelled:
+                        return          # turant nikal jao — thread khatam
+                    if chunk:
+                        chunks.append(chunk)
+
             if self._cancelled:
                 return
-            if response.status_code == 200:
-                self.finished.emit(response.content)
-            else:
-                self.error.emit(f"HTTP {response.status_code}:{response.text[:100]}")
+            self.result.emit(b"".join(chunks))
+
         except Exception as e:
             if not self._cancelled:
                 print(f"[DOWNLOAD WORKER ERROR] {e}")
@@ -97,13 +132,59 @@ class ScreenshotPreviewWindow(BaseWindow):
         layout.addWidget(self.image_label)
 
     def _stop_worker(self):
-        if self._worker is not None:
-            self._worker.cancel()
-            if self._worker.isRunning():
-                self._worker.quit()
-                self._worker.wait(2000)
-            self._worker.deleteLater()
-            self._worker = None
+        """
+        CRASH FIX (SIGABRT jab loading ke beech me preview band kiya jaaye).
+
+        Purana code:
+            self._worker.cancel()            # sirf ek flag set karta hai
+            if isRunning(): quit(); wait(2000)
+            self._worker.deleteLater()       # <-- yahan crash
+
+        Teen problem thin:
+          1. `cancel()` sirf flag set karta hai. Download `requests.get(...)`
+             pe BLOCK hota hai — wo flag tab tak padha hi nahi jaata jab tak
+             request return na ho (30 second tak).
+          2. `quit()` aise QThread pe bekaar hai jiska `run()` override kiya
+             gaya ho — usme koi event loop hi nahi hota.
+          3. `wait(2000)` 2 second baad haar jaata hai, aur phir
+             `deleteLater()` ek CHALTE HUE thread pe chal jaata. Jab event
+             loop use delete karta hai, Qt "QThread: Destroyed while thread
+             is still running" ke saath std::terminate() call karta hai —
+             yaani poori app SIGABRT se mar jaati hai.
+
+        Ab: callbacks kaato, cancel karo, thoda intezaar karo — aur agar
+        thread phir bhi chal raha ho to use DELETE MAT KARO. Reference
+        zinda rakho; thread khud khatam hoke apne aap ko clean kar lega.
+        """
+        worker = self._worker
+        self._worker = None
+        if worker is None:
+            return
+
+        # Window ja rahi hai — koi callback ab is widget pe na aaye.
+        for signal in (worker.result, worker.error):
+            try:
+                signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+
+        worker.cancel()
+
+        if worker.isRunning():
+            if not worker.wait(1500):
+                # Abhi bhi chal raha hai. deleteLater() = crash.
+                # Isliye reference rakho aur thread ko apne aap khatam hone do.
+                _ORPHANED_WORKERS.append(worker)
+
+                def _reap():
+                    if worker in _ORPHANED_WORKERS:
+                        _ORPHANED_WORKERS.remove(worker)
+                    worker.deleteLater()
+
+                worker.finished.connect(_reap)   # QThread ka apna signal
+                return
+
+        worker.deleteLater()
 
     def _load_image(self):
         if self._original_pixmap is not None:
@@ -112,7 +193,7 @@ class ScreenshotPreviewWindow(BaseWindow):
 
         self._stop_worker()
         self._worker = _DownloadWorker(self.screenshot_id)
-        self._worker.finished.connect(self._on_image_loaded)
+        self._worker.result.connect(self._on_image_loaded)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
