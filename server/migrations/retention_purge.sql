@@ -52,9 +52,22 @@ UNION ALL SELECT 'screenshots', COUNT(*) FROM screenshots
 UNION ALL SELECT 'attendance',  COUNT(*) FROM attendance;
 
 -- ─────────────────────────────────────────────────────────────────────────
---  ORPHAN FILES (DB me nahi, disk pe padi hain) — shell se hatao:
+--  ORPHAN FILES (rows gone, .enc files still on disk)
 --
---    psql -d ets_db -At -c "SELECT file_name FROM screenshots" > /tmp/keep.txt
---    cd server/uploads/screenshots
---    ls | grep -vxFf /tmp/keep.txt | xargs -r rm --
+--  Deleting rows above does NOT remove the files. Use:
+--
+--      bash server/scripts/purge_screenshots.sh            # dry run
+--      bash server/scripts/purge_screenshots.sh --apply    # delete
+--
+--  This file previously documented a shell one-liner here:
+--
+--      psql ... -c "SELECT file_name FROM screenshots" > /tmp/keep.txt
+--      ls | grep -vxFf /tmp/keep.txt | xargs -r rm --
+--
+--  It has been removed because it destroys data on failure. If the psql
+--  query fails for any reason (wrong DB name, auth, server down),
+--  keep.txt is empty; `grep -vxFf` against an empty pattern file matches
+--  nothing, -v inverts that to everything, and every screenshot on disk
+--  is deleted. Verified. purge_screenshots.sh refuses to run in exactly
+--  that situation.
 -- ─────────────────────────────────────────────────────────────────────────
