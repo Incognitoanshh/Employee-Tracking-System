@@ -853,26 +853,10 @@ class _ConfigTab(QWidget):
         self._build_ui()
         self._load_employees()
 
-    # ── UI helpers ───────────────────────────────────────────────────────
-    #
-    #  BUG FIX (screenshot me dikhi "white lines"): `_card()` ka stylesheet
-    #  `QFrame { border: 1px solid ...; border-radius: 14px }` hai. Qt me
-    #  aisa rule card ke ANDAR ke har QFrame child pe bhi lagta hai — aur
-    #  `_divider()` bhi ek QFrame hai. Nateeja: har 1px ki divider line ko
-    #  chaaron taraf border + 14px radius mil jaata tha, jisse wo patli
-    #  line ki jagah ek chamakta hua box ban jaati thi.
-    #
-    #  Ab dividers bilkul use hi nahi karte — settings ko grouped section
-    #  cards me baant diya hai. Har card ka apna objectName hai taaki
-    #  stylesheet sirf usi pe lage, children pe nahi.
-    # ─────────────────────────────────────────────────────────────────────
     def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
         """Ek setting ki row — koi divider nahi, sirf spacing aur alignment."""
         row = QWidget()
         row.setObjectName("cfgRow")
-        # Scoped selector — plain `background:transparent` andar ke QSpinBox /
-        # QLineEdit / QCheckBox pe bhi cascade ho jaata tha, jisse unke field
-        # boxes hi gayab ho gaye the (number hawa me tairta dikhta tha).
         row.setStyleSheet("QWidget#cfgRow { background: transparent; }")
         row.setMinimumHeight(58)
         lay = QHBoxLayout(row)
@@ -897,8 +881,7 @@ class _ConfigTab(QWidget):
         text_col.addWidget(hint)
         lay.addLayout(text_col, 1)
 
-        # Field + uska unit ek hi group me — pehle unit label form ke bilkul
-        # baayin taraf latak jaata tha aur value se dur dikhta tha.
+        
         field = QWidget()
         field.setObjectName("cfgField")
         field.setStyleSheet("QWidget#cfgField { background: transparent; }")
@@ -1005,11 +988,7 @@ class _ConfigTab(QWidget):
         t_lay.addWidget(refresh_btn)
         body.addWidget(toolbar)
 
-        # ── Scope banner ──────────────────────────────────────────────────
-        #  Ye sabse zaroori addition hai: pehle screen pe kahin saaf nahi
-        #  tha ki aap GLOBAL badal rahe ho ya EK employee ka. Dono form
-        #  bilkul ek jaise dikhte the, to galti se sabka config badal
-        #  dena bahut aasan tha.
+       
         self._scope_banner = QLabel("")
         self._scope_banner.setWordWrap(True)
         self._scope_banner.setStyleSheet(
@@ -1142,12 +1121,6 @@ class _ConfigTab(QWidget):
         self._upl_spin.setValue(cfg.get("upload_interval_minutes", 60))
         self._idle_spin.setValue(cfg.get("idle_threshold_seconds", 60))
         self._verbose_check.setChecked(bool(cfg.get("verbose_logging", False)))
-        # BUG FIX: pehle shift fields sirf TAB set hote the jab value aati thi
-        # (`if shift_start:`). Agar naye select kiye gaye employee ki koi
-        # shift nahi hoti, to PICHHLE employee ki shift box me padi rehti thi
-        # — aur Save dabate hi wo galat shift is employee pe likh jaati thi.
-        # Isi se lagta tha ki "ek employee ka shift badlo to sabka badal
-        # jaata hai". Ab har baar field explicitly set/clear hoti hai.
         self._shift_start.setText(str(cfg.get("shift_start") or "")[:5])
         self._shift_end.setText(str(cfg.get("shift_end") or "")[:5])
         self._update_scope_banner(bool(cfg.get("inherited")))
@@ -1635,8 +1608,7 @@ class _DashboardTab(QWidget):
         self._chart_attendance.set_data(attend)
         self._chart_activity.set_data(activity)
 
-        # 7-din ka asli trend stat cards ki sparklines me bhi bhejo — pehle
-        # ye data sirf bar charts me jaata tha aur cards flat rehte the.
+        
         def series(rows):
             return [float(r.get("count", 0) or 0) for r in (rows or [])]
 
@@ -2172,11 +2144,7 @@ class EmployeeDetailsDialog(QDialog):
 
         self._workers: list[QThread] = []
 
-        # BUG FIX: ye state pehle __init__ ke SABSE AAKHIR me set hoti thi,
-        # jabki `_load_details()` usse pehle hi worker start kar deta tha.
-        # Agar response jaldi aa jaata to `_on_details` in attributes ko
-        # padhne ki koshish karta jo abhi bane hi nahi the -> AttributeError
-        # aur dialog khaali reh jaata. Ab pehle initialize, phir load.
+        
         self._token_error_shown  = False
         self._live_active_seconds = 0
         self._live_idle_seconds   = 0
@@ -2475,14 +2443,7 @@ class _EmployeesTab(QWidget):
         self._table.setHorizontalHeaderLabels([
             "Employee ID", "Username", "Role", "Status", "Last Seen", "Actions"
         ])
-        # BUG: yahan koi column width set hi nahi thi, is liye har column
-        # Qt ke default 100px pe rehta tha. Nateeja: header "Employee ID"
-        # khud "EMPLOYEE II" pe kat jaata tha, "Amazeinternet" -> "Amazein…",
-        # "👑 Super Admin" -> "👑 Supe…", aur date "01 Jul 20…".
-        #
-        # Actions column sabse buri thi: usme View (68px) + Manage (96px) +
-        # spacing/margins = ~184px chahiye, lekin stretch ke baad use sirf
-        # 138px milte the — Manage button seedha kat jaata tha.
+        
         hdr = self._table.horizontalHeader()
         hdr.setStretchLastSection(False)
         widths = {0: 120, 1: 190, 2: 150, 3: 110, 4: 150, 5: 220}
@@ -2649,19 +2610,6 @@ class _EmployeesTab(QWidget):
 
             self._table.setItem(i, 4, _cell(str(last_seen), muted=True))
 
-            # ── Actions ───────────────────────────────────────────────
-            #
-            #  BUG FIX: pehle yahan 4–6 alag buttons ek hi cell me thuse jaate
-            #  the (View Details / Verbose / Force Logout / Delete / Make
-            #  Admin / Make Super). Unki total fixed width ~570px thi jabki
-            #  Actions column stretch pe utni milti hi nahi thi — is liye
-            #  buttons ek doosre ke upar chadh jaate the
-            #  ("Verbose: OFForce Logout", "Make Adr" kata hua).
-            #
-            #  Ab: ek "View" button + ek "Manage ▾" menu. Menu me kitne bhi
-            #  actions aayen, cell kabhi overflow nahi hoga — aur role rules
-            #  wahin disabled items + tooltip ke roop me dikhte hain.
-            # ──────────────────────────────────────────────────────────────
             my_role  = getattr(SessionManager, "role", "employee")
             my_id    = getattr(SessionManager, "employee_id", None)
             target_r = (role or "").lower()
@@ -2822,8 +2770,8 @@ class _EmployeesTab(QWidget):
 
         extra = ""
         if new_role == "super_admin":
-            extra = ("\n\n⚠️  Super admin ke paas poori power hoti hai aur use "
-                     "koi doosra hata nahi sakta.")
+            extra = ("\n\n⚠️  A super administrator has full access. "
+                     "You cannot be removed by any other user.")
 
         reply = QMessageBox.question(
             self, "Change Role",
