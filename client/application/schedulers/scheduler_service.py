@@ -4,11 +4,12 @@ from PySide6.QtCore import QObject, QTimer, Signal, QMetaObject, Qt, Slot
 
 from client.application.managers.sync_manager import SyncManager
 from client.application.managers.config_sync_manager import ConfigSyncManager
-from client.application.managers.screenshot_manager import (
-    ScreenshotManager,
-    IST,
+from client.application.managers.screenshot_manager import ScreenshotManager
+from client.core.time_ist import (
     now_ist,
     end_of_ist_day,
+    parse_shift_time,
+    ShiftTimeParseError,
 )
 from client.application.managers.session_manager import SessionManager
 from client.services.settings_service import SettingsService
@@ -90,64 +91,32 @@ class SchedulerService(QObject):
             self._scheduled_until = None
             return
 
-        # Shift timings SessionManager se
-        shift_start_str = SessionManager.shift_start
-        shift_end_str   = SessionManager.shift_end
-
-        if shift_start_str and shift_end_str:
-            try:
-                # ISO format parse karo
-                shift_start = datetime.fromisoformat(shift_start_str)
-                shift_end   = datetime.fromisoformat(shift_end_str)
-
-                # BUG FIX: Server/ConfigSync kabhi kabhi shift ke saath
-                # PURANI (ya kisi bhi) date bhej deta hai — e.g. aaj 30th hai
-                # lekin payload me "2026-06-29T09:00:00+05:30" aata hai.
-                # Ye ek REPEATING DAILY shift hai (sirf 09:00-18:00 time-of-day
-                # matter karta hai, date nahi) — lekin pehle code us date ko
-                # literally use kar leta tha, is wajah se shift turant hi
-                # "already ended" ban jaati thi aur saare pending screenshot
-                # timers reschedule() me cancel ho ke khaali reh jaate the
-                # (ye poore app.log me sabse bada pattern hai — har
-                # "shift updated" ke baad "shift already ended, no
-                # screenshots scheduled" aa raha tha).
-                # Fix: date hamesha AAJ ki date se replace karo, server jo
-                # bhi date bheje uska koi farak na pade.
-                today = now.date()
-                shift_start = shift_start.replace(
-                    year=today.year, month=today.month, day=today.day
-                )
-                shift_end = shift_end.replace(
-                    year=today.year, month=today.month, day=today.day
-                )
-            except Exception:
-                # Fallback: aaj ki date pe HH:MM format
-                try:
-                    shift_start = datetime.strptime(
-                        f"{now.date()} {shift_start_str}", "%Y-%m-%d %H:%M"
-                    )
-                    shift_end = datetime.strptime(
-                        f"{now.date()} {shift_end_str}", "%Y-%m-%d %H:%M"
-                    )
-                except Exception:
-                    shift_start = now
-                    shift_end   = now + timedelta(hours=8)
-        else:
-            # Shift info nahi mili — login time se 8 ghante
+        # ── SHIFT WINDOW, RESOLVED IN IST ─────────────────────────────────
+        #
+        # One parser, one timezone, one code path. There is deliberately no
+        # second branch here: two branches that were supposed to agree is
+        # precisely what shipped a NameError to production, because the one
+        # the real client took was the one the tests never exercised.
+        #
+        # parse_shift_time() accepts every shape the client can hold — ISO
+        # with an offset, ISO without one, HH:MM, HH:MM:SS — and always
+        # returns IST wall-clock on today's IST date.
+        today = now.date()
+        try:
+            shift_start = parse_shift_time(SessionManager.shift_start, today)
+            shift_end   = parse_shift_time(SessionManager.shift_end, today)
+        except ShiftTimeParseError as error:
+            # Fall back to a window rather than to nothing. Monitoring must
+            # not switch itself off because a value was malformed, but the
+            # operator has to be able to see that it happened — so this is
+            # log(), not log_verbose().
             shift_start = now
             shift_end   = now + timedelta(hours=8)
-            LoggerService.log_verbose("SchedulerService: shift times not found, using 8hr window from now")
+            LoggerService.log(
+                f"SCHEDULER: could not read shift times ({error}) — "
+                f"falling back to an 8 hour window from now"
+            )
 
-        # Bring everything into the same IST frame as `now`.
-        #
-        # This used to be `.replace(tzinfo=None)`, which DISCARDS the offset
-        # instead of applying it: "09:00+05:30" became a bare 09:00 that was
-        # then compared against a machine-local now. Converting first means
-        # a payload in any offset still lands on the correct IST wall-clock.
-        if shift_start.tzinfo is not None:
-            shift_start = shift_start.astimezone(IST).replace(tzinfo=None)
-        if shift_end.tzinfo is not None:
-            shift_end = shift_end.astimezone(IST).replace(tzinfo=None)
 
         # ── OVERNIGHT (NIGHT SHIFT) NORMALISATION ─────────────────────────
         #
@@ -167,27 +136,39 @@ class SchedulerService(QObject):
         #
         # Ab ye dono branches ke BAAD ek hi jagah lagta hai. Jahan end pehle
         # se start ke aage hai (normal day shift) wahan ye no-op hai.
+        # ── OVERNIGHT NORMALISATION ───────────────────────────────────────
+        # A shift whose end is not after its start crosses midnight, so the
+        # end belongs to the following day. No-op for an ordinary day shift.
         if shift_end <= shift_start:
             shift_end += timedelta(days=1)
 
-        # BUG FIX (overnight shifts): upar hum shift ki date hamesha AAJ ki
-        # date se replace karte hain. Overnight shift (e.g. 22:00–06:00) me
-        # agar abhi 00:30 baje hain, to employee KAL raat shuru hui shift ke
-        # BEECH me hai — lekin normalized window "aaj 22:00 → kal 06:00"
-        # ban jaata hai, jo abhi se ~21 ghante door hai. Result: chal rahi
-        # overnight shift ke liye ek bhi screenshot schedule nahi hota.
-        # Fix: agar pichhle din ka window `now` ko contain karta hai, to
-        # usi window ko use karo.
+        # Both times were placed on TODAY's IST date above, which is wrong
+        # when an overnight shift started YESTERDAY and is still running.
+        # At 02:00 during a 22:00-06:00 shift the window would read as
+        # "tonight 22:00 -> tomorrow 06:00" — twenty hours away — and the
+        # employee, who is mid-shift right now, would be treated as
+        # pre-shift. Shift the window back a day when the previous day's
+        # window is the one actually containing `now`.
+        #
+        # (This was lost when the daily-budget rewrite replaced a block
+        # starting with the same `if now < shift_start:` line. Restored,
+        # and covered by tests/test_scheduler_timezones.py.)
+        if now < shift_start:
+            previous_start = shift_start - timedelta(days=1)
+            previous_end   = shift_end - timedelta(days=1)
+            if previous_start <= now < previous_end:
+                shift_start, shift_end = previous_start, previous_end
+
         # ── DAILY BUDGET WINDOW ───────────────────────────────────────────
         #
-        # The count is per IST calendar day now, not per shift. There is no
-        # longer a separate "off-shift" mode with its own cadence — that was
+        # The count is per IST calendar day, not per shift. There is no
+        # separate "off-shift" mode with its own cadence any more — that was
         # the path that ignored the count and produced 157 extra captures a
         # night. One budget, spread over whatever monitoring time is left
         # today.
         #
-        # The shift still decides WHEN the day's captures are placed; it no
-        # longer decides HOW MANY.
+        # The shift decides WHEN the day's captures are placed; it no longer
+        # decides HOW MANY.
         day_end = end_of_ist_day(now)
 
         if now < shift_start:
