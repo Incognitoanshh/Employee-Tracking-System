@@ -1,7 +1,7 @@
 import io
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 
 import pyautogui
@@ -18,160 +18,159 @@ from client.core.config import API_BASE_URL, STORAGE_DIR
 from client.core.config.settings import Settings
 
 
+
+# ── DAILY SCREENSHOT BUDGET ──────────────────────────────────────────────
+#
+# The count is per IST CALENDAR DAY, not per shift.
+#
+# It used to be per shift, spread across the shift window, with a separate
+# off-shift path that ignored the count entirely and fired every min..max
+# minutes. An employee who stayed logged in overnight therefore collected
+# ~157 off-shift captures on top of the configured 10, and the rollover
+# that generates the next day's schedule reset the 200-entry safety cap,
+# so it repeated every day indefinitely. Measured: 167 captures in 24h and
+# 334 in 48h where the admin had configured 10.
+#
+# Now there is one budget per IST day. Whatever remains of it is spread
+# across whatever remains of the monitoring window, and capture_screenshot()
+# refuses once the day's budget is spent — so the number can be reached
+# late, but never exceeded, no matter how the schedule is regenerated.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist() -> datetime:
+    """Current moment as IST wall-clock, naive.
+
+    Everything about the daily budget is anchored to the IST calendar day,
+    so a client in Pacific or London counts the same day boundary as one in
+    India.
+    """
+    return datetime.now(timezone.utc).astimezone(IST).replace(tzinfo=None)
+
+
+def end_of_ist_day(moment: datetime) -> datetime:
+    """Last instant of the IST day that `moment` falls in."""
+    return moment.replace(hour=23, minute=59, second=59, microsecond=0)
+
+
 class ScreenshotManager:
     STORAGE_PATH = os.path.join(STORAGE_DIR, "screenshots")
 
-    @classmethod
-    def generate_random_schedule(
-        cls, shift_start: datetime, shift_end: datetime
-    ) -> list:
-        """Shift ke andar N random timestamps generate karo."""
-        # Fallback defaults ab .env-driven Settings se aate hain (DB me
-        # koi override save nahi hua to yehi use hoga) — pehle yaha
-        # hardcoded "3"/"10" tha jo .env ke SCREENSHOT_MIN_INTERVAL/
-        # SCREENSHOT_MAX_INTERVAL se independent ho sakta tha (config
-        # drift risk: .env badlo, ye fallback kabhi sync na ho).
-        count = int(SettingsService.get_setting("screenshot_count", "3"))
-        min_gap = int(SettingsService.get_setting(
-            "screenshot_min_minutes", str(Settings.SCREENSHOT_MIN_INTERVAL // 60)
-        )) * 60
-        _max_gap = int(SettingsService.get_setting(
-            "screenshot_max_minutes", str(Settings.SCREENSHOT_MAX_INTERVAL // 60)
-        )) * 60
+    # REMOVED: generate_random_schedule() and generate_interval_schedule().
+    #
+    # Both tied the number of captures to the shift. The first spread
+    # `screenshot_count` across the shift window; the second, used whenever
+    # the employee was outside their shift, ignored the count completely and
+    # fired every min..max minutes. That second path is what produced 157
+    # extra captures a night on a machine left logged in.
+    #
+    # generate_daily_schedule() replaces both: one budget per IST day,
+    # spread over whatever monitoring time is left.
 
-        shift_duration = (shift_end - shift_start).total_seconds()
-        if shift_duration <= 0 or count <= 0:
-            LoggerService.log(
-                "ScreenshotManager: shift duration ya count invalid — schedule empty"
+
+    @classmethod
+    def screenshots_per_day(cls) -> int:
+        """Configured daily budget, clamped to the supported 1-20 range."""
+        try:
+            n = int(SettingsService.get_setting("screenshots_per_day", "10"))
+        except (TypeError, ValueError):
+            n = 10
+        return max(1, min(20, n))
+
+    @classmethod
+    def captures_today(cls) -> int:
+        """How many captures this employee already has for the current IST day.
+
+        Read from the local database rather than an in-memory counter, so
+        the budget survives an app restart or a logout/login. An in-memory
+        counter would let anyone reset it by quitting the app.
+        """
+        employee_id = getattr(SessionManager, "employee_id", None)
+        if not employee_id:
+            return 0
+        day = now_ist().strftime("%Y-%m-%d")
+        try:
+            connection = Database.connect()
+            row = connection.execute(
+                "SELECT COUNT(*) FROM screenshots "
+                "WHERE employee_id = ? AND timestamp LIKE ?",
+                (employee_id, f"{day}%"),
+            ).fetchone()
+            connection.close()
+            return int(row[0]) if row else 0
+        except Exception as error:
+            # Fail CLOSED would stop monitoring entirely on a transient DB
+            # error; fail open and let the scheduler's own spacing apply.
+            LoggerService.log_verbose(
+                f"ScreenshotManager: could not read today's count — {error}"
+            )
+            return 0
+
+    @classmethod
+    def remaining_today(cls) -> int:
+        return max(0, cls.screenshots_per_day() - cls.captures_today())
+
+    @classmethod
+    def generate_daily_schedule(
+        cls, window_start: datetime, window_end: datetime
+    ) -> list:
+        """Spread the day's REMAINING budget across the remaining window.
+
+        The window is divided into as many equal slots as there are captures
+        left, with one random moment inside each slot. That keeps the timing
+        unpredictable — an employee cannot learn the cadence — while still
+        covering the whole period rather than bunching at the start.
+
+        `screenshot_min_minutes` acts as a floor between consecutive
+        captures. The old `screenshot_max_minutes` no longer drives the
+        count: with a daily budget the spacing follows from how much of the
+        day is left, which is the honest relationship.
+        """
+        remaining = cls.remaining_today()
+        if remaining <= 0:
+            LoggerService.log_verbose(
+                f"ScreenshotManager: daily budget of {cls.screenshots_per_day()} "
+                f"already used — nothing scheduled"
             )
             return []
 
-        # BUG FIX: pehle ye loop shift_start se aage random min_gap..max_gap
-        # steps leta tha aur `count` pe ruk jaata tha — yaani SAARE
-        # screenshots shift ke pehle ~20 minute me hi ho jaate the, aur uske
-        # baad poore din (8-9 ghante) ek bhi capture nahi hota tha.
-        # Example (09:00–18:00, count=3, gap 3–10 min): 09:08, 09:16, 09:22
-        # — phir 18:00 tak kuch nahi. `buffer`/`available` calculate to hote
-        # the lekin kabhi use hi nahi hote the.
-        #
-        # Ab: shift ko `count` barabar slots me baanto aur HAR slot ke andar
-        # ek random moment chuno. Isse poori shift cover hoti hai (admin ke
-        # "Screenshots per shift" label ke mutabik) aur timing phir bhi
-        # unpredictable rehti hai — employee guess nahi kar sakta.
-        #
-        # Shift ke bilkul kinare pe capture na ho (login/logout ke exact
-        # waqt pe) is liye dono taraf chhota buffer chhodte hain.
-        buffer = min(120.0, shift_duration / (count * 4))
-        window_start = shift_start + timedelta(seconds=buffer)
-        window_duration = shift_duration - 2 * buffer
+        duration = (window_end - window_start).total_seconds()
+        if duration <= 0:
+            return []
 
-        if window_duration <= 0:
-            return [shift_start + (shift_end - shift_start) / 2]
+        try:
+            min_gap = int(SettingsService.get_setting(
+                "screenshot_min_minutes",
+                str(Settings.SCREENSHOT_MIN_INTERVAL // 60))) * 60
+        except (TypeError, ValueError):
+            min_gap = 60
+        min_gap = max(0, min_gap)
 
-        slot_seconds = window_duration / count
+        # Keep captures off the exact edges of the window (login/logout
+        # moments), but never let the buffer eat the whole window.
+        buffer = min(120.0, duration / (remaining * 4))
+        start = window_start + timedelta(seconds=buffer)
+        usable = duration - 2 * buffer
+        if usable <= 0:
+            return [window_start + timedelta(seconds=duration / 2)]
 
-        # min_gap ek FLOOR hai (do captures itne paas na hon). Agar slot
-        # max_gap se bada hai to iska matlab hai ki is count pe poori shift
-        # cover karne ke liye gap max_gap se zyada hoga — us case me admin ka
-        # `count` binding constraint hai, isliye log kar dete hain taaki
-        # admin ko dikhe ki uska max-interval effective nahi ho raha.
-        if slot_seconds > _max_gap:
-            # log_verbose: ye ek DIAGNOSTIC hai, user-facing event nahi.
-            # LoggerService.log() sab kuch server ke activity_logs me daal
-            # deta hai, aur wahi table employee dashboard ka "Recent
-            # Activity" feed banata hai — is liye plain log() se ye internal
-            # message employee ko dikhne lagta tha.
-            LoggerService.log_verbose(
-                f"ScreenshotManager: screenshot_count={count} is shift ke liye "
-                f"~{int(slot_seconds // 60)} min ka gap deta hai, jo configured "
-                f"max interval ({_max_gap // 60} min) se zyada hai. Poori shift "
-                f"cover karne ke liye count badhao."
-            )
-
+        slot = usable / remaining
         timestamps: list[datetime] = []
         previous: datetime | None = None
-
-        for index in range(count):
-            slot_start = window_start + timedelta(seconds=index * slot_seconds)
-            slot_end = slot_start + timedelta(seconds=slot_seconds)
-
-            candidate = slot_start + timedelta(
-                seconds=random.uniform(0, slot_seconds)
-            )
-
-            # min_gap floor enforce karo — lekin apne slot se bahar mat jao.
-            if previous is not None:
-                earliest = previous + timedelta(seconds=min_gap)
-                if candidate < earliest:
-                    candidate = min(earliest, slot_end)
-
-            if candidate >= shift_end:
+        for i in range(remaining):
+            slot_start = start + timedelta(seconds=i * slot)
+            moment = slot_start + timedelta(seconds=random.uniform(0, slot))
+            if previous is not None and (moment - previous).total_seconds() < min_gap:
+                moment = previous + timedelta(seconds=min_gap)
+            if moment >= window_end:
                 break
-
-            timestamps.append(candidate)
-            previous = candidate
-
-        timestamps.sort()
-
-        if timestamps:
-            LoggerService.log_verbose(
-                f"ScreenshotManager: {len(timestamps)} screenshots scheduled across "
-                f"shift {shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')} "
-                f"(first {timestamps[0].strftime('%H:%M')}, "
-                f"last {timestamps[-1].strftime('%H:%M')})"
-            )
-        else:
-            LoggerService.log_verbose(
-                f"ScreenshotManager: no screenshots scheduled for shift "
-                f"{shift_start.strftime('%H:%M')}–{shift_end.strftime('%H:%M')}"
-            )
-        return timestamps
-
-    @classmethod
-    def generate_interval_schedule(
-        cls, window_start: datetime, window_end: datetime
-    ) -> list:
-        """
-        OFF-SHIFT coverage — jab employee apni shift window ke BAHAR logged in ho.
-
-        BUG: pehle scheduler sirf [shift_start, shift_end] ke andar hi
-        screenshots schedule karta tha. Agar employee shift se bahar login
-        karta (jaise raat 12:40 baje, jabki shift 09:00–23:59 hai), to
-        `effective_start` seedha shift_start (agli subah 09:00) ban jaata —
-        yaani 8+ GHANTE ka kaam bilkul unmonitored. Production me exactly
-        yehi hua: EMP002 raat 12:40 se subah 09:12 tak logged in tha aur ek
-        bhi screenshot nahi hua.
-
-        Yahan `count` slot-based nahi hai (window kitna lamba hoga wo pata
-        nahi — employee kabhi bhi logout kar sakta hai), is liye configured
-        min–max interval pe hi captures lagate hain. Isse off-shift kaam bhi
-        cover hota hai aur cadence wahi rehti hai jo admin ne set ki.
-        """
-        min_gap = int(SettingsService.get_setting(
-            "screenshot_min_minutes", str(Settings.SCREENSHOT_MIN_INTERVAL // 60)
-        )) * 60
-        max_gap = int(SettingsService.get_setting(
-            "screenshot_max_minutes", str(Settings.SCREENSHOT_MAX_INTERVAL // 60)
-        )) * 60
-        if max_gap < min_gap:
-            min_gap, max_gap = max_gap, min_gap
-        if min_gap <= 0:
-            min_gap = 60
-        if max_gap <= 0:
-            max_gap = min_gap
-
-        timestamps: list[datetime] = []
-        current = window_start
-        # Safety cap — bahut lambi window pe hazaaron QTimer na ban jayen.
-        while len(timestamps) < 200:
-            current = current + timedelta(seconds=random.randint(min_gap, max_gap))
-            if current >= window_end:
-                break
-            timestamps.append(current)
+            timestamps.append(moment)
+            previous = moment
 
         LoggerService.log_verbose(
-            f"ScreenshotManager: {len(timestamps)} OFF-SHIFT screenshots between "
-            f"{window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')}"
+            f"ScreenshotManager: {len(timestamps)} of {cls.screenshots_per_day()} "
+            f"daily captures scheduled between "
+            f"{window_start.strftime('%d %b %H:%M')}-{window_end.strftime('%d %b %H:%M')} IST"
         )
         return timestamps
 
@@ -187,8 +186,28 @@ class ScreenshotManager:
             )
             return None
 
+        # HARD CAP — the guarantee that the daily number is never exceeded.
+        #
+        # It lives here, not in the scheduler, because every capture path
+        # goes through this method. Capping at schedule time would only
+        # cover one path, and a reschedule (config change, day rollover)
+        # would hand out a fresh allowance each time.
+        #
+        # Logged with log(), not log_verbose(): if captures stop, the admin
+        # must be able to see why. Silently stopping would look identical to
+        # tracking being broken.
+        allowed = cls.screenshots_per_day()
+        taken = cls.captures_today()
+        if taken >= allowed:
+            LoggerService.log(
+                f"SCREENSHOT SKIPPED : daily limit reached ({taken}/{allowed})"
+            )
+            return None
+
         screenshot_id = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # IST, so the day a capture belongs to does not depend on the
+        # client machine's timezone. captures_today() counts on this.
+        timestamp = now_ist().strftime("%Y-%m-%d %H:%M:%S")
 
         # Capture + encrypt + local DB record — pehle yahan koi try/except
         # nahi tha. Agar pyautogui.screenshot() fail ho jaye (e.g. macOS pe
@@ -253,7 +272,7 @@ class ScreenshotManager:
                 VALUES (?, ?, ?, ?)
                 """,
                 (screenshot_id, SessionManager.employee_id, enc_filepath,
-                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                 timestamp),
             )
             connection.commit()
             connection.close()

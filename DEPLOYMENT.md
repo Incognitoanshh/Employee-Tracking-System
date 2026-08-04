@@ -413,3 +413,45 @@ Do not roll out to employee machines. Every install will need manual
 intervention, and asking staff to click through a malware warning to
 install monitoring software is a bad position to be in — both for
 security posture and for how the rollout is received.
+
+
+---
+
+## Screenshot volume policy
+
+The screenshot count is **per IST calendar day**, not per shift. Range 1-20,
+default 10.
+
+It used to be per shift, and that was unsafe. Because the count was tied to
+the shift, an employee logged in outside their shift fell onto a separate
+code path that ignored the count entirely and captured every min..max
+minutes. Measured in production: **167 captures in 24h and 334 in 48h**
+where the admin had configured 10. At 1000 employees that is ~33 GB/day
+instead of the ~1.5 GB/day the disk was sized for — the volume fills in
+about 3 days rather than 70.
+
+Two things now guarantee the number:
+
+1. **Scheduling** spreads the day's remaining budget across the remaining
+   monitoring window, with random placement inside equal slots so the
+   timing stays unpredictable.
+2. **A hard cap in `capture_screenshot()`** refuses once the day's budget
+   is spent. It counts rows in the local database for the current IST day,
+   so it survives an app restart or a logout/login — an in-memory counter
+   could be reset by quitting the app.
+
+The cap is the guarantee. Rescheduling (a config change, the midnight
+rollover) can move *when* captures happen but can never raise *how many*.
+
+A skipped capture is logged with `log()`, not `log_verbose()`, so an admin
+can tell the difference between "budget reached" and "tracking broken".
+
+`screenshot_max_minutes` is now advisory. With a daily budget the spacing
+follows from how much of the day is left; `screenshot_min_minutes` still
+acts as a floor between consecutive captures.
+
+**Overnight shifts:** the budget is per calendar day, so a 22:00-06:00
+worker receives the configured number before midnight and again after. That
+is per specification.
+
+Storage at 1000 employees, 10/day, ~200 KB each: **~2 GB/day**.

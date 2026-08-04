@@ -1,36 +1,14 @@
 from datetime import datetime, timedelta, timezone
 
-# Shift times are defined in IST — the admin panel labels them "(IST)" and
-# the server stores them that way. They must NOT be interpreted in the
-# client machine's local timezone.
-#
-# BUG (confirmed in production): the scheduler built the shift window with
-# datetime.now() and a naive strptime of "HH:MM", both in machine-local
-# time. On a client running Pacific time the window "09:00-18:00" became
-# 09:00-18:00 PDT, i.e. 21:30-06:30 IST. At 20:15 PDT the code decided the
-# shift had already ended and switched to off-shift coverage, which ignores
-# `screenshot_count` and fires every min..max minutes instead — 130 captures
-# scheduled where the admin had configured 10.
-#
-# Working in IST throughout makes the schedule identical on every machine
-# regardless of its timezone or clock setting.
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def now_ist() -> datetime:
-    """Current moment as IST wall-clock, naive.
-
-    Naive on purpose: the rest of this module does arithmetic against these
-    values and hands the differences to QTimer. As long as every value is in
-    the same frame, the deltas are real elapsed durations.
-    """
-    return datetime.now(timezone.utc).astimezone(IST).replace(tzinfo=None)
-
 from PySide6.QtCore import QObject, QTimer, Signal, QMetaObject, Qt, Slot
 
 from client.application.managers.sync_manager import SyncManager
 from client.application.managers.config_sync_manager import ConfigSyncManager
-from client.application.managers.screenshot_manager import ScreenshotManager
+from client.application.managers.screenshot_manager import (
+    ScreenshotManager,
+    now_ist,
+    end_of_ist_day,
+)
 from client.application.managers.session_manager import SessionManager
 from client.services.settings_service import SettingsService
 from client.services.logger_service import LoggerService
@@ -199,61 +177,41 @@ class SchedulerService(QObject):
         # overnight shift ke liye ek bhi screenshot schedule nahi hota.
         # Fix: agar pichhle din ka window `now` ko contain karta hai, to
         # usi window ko use karo.
+        # ── DAILY BUDGET WINDOW ───────────────────────────────────────────
+        #
+        # The count is per IST calendar day now, not per shift. There is no
+        # longer a separate "off-shift" mode with its own cadence — that was
+        # the path that ignored the count and produced 157 extra captures a
+        # night. One budget, spread over whatever monitoring time is left
+        # today.
+        #
+        # The shift still decides WHEN the day's captures are placed; it no
+        # longer decides HOW MANY.
+        day_end = end_of_ist_day(now)
+
         if now < shift_start:
-            previous_start = shift_start - timedelta(days=1)
-            previous_end = shift_end - timedelta(days=1)
-            if previous_start <= now < previous_end:
-                shift_start, shift_end = previous_start, previous_end
+            # Logged in before the shift starts. Cover until it does; the
+            # rollover then re-plans across the shift itself.
+            window_end = min(shift_start, day_end)
+            label = "pre-shift"
+        elif now < shift_end:
+            window_end = min(shift_end, day_end)
+            label = "in-shift"
+        else:
+            # Shift is over but the employee is still logged in. Cover the
+            # rest of today only — tomorrow gets its own budget at midnight.
+            window_end = day_end
+            label = "post-shift"
 
-        # ── OFF-SHIFT COVERAGE ────────────────────────────────────────────
-        #
-        #  BUG (production me pakda gaya): employee agar apni shift window ke
-        #  BAHAR logged in ho, to pehle ek bhi screenshot schedule nahi hota
-        #  tha — na abhi ke liye, na kuch der baad ke liye.
-        #
-        #  Asli case: EMP002 ki shift 09:00–23:59 thi. Wo raat 12:40 baje
-        #  login hua. `effective_start` = max(09:00, 00:40) = 09:00 (agli
-        #  subah) ban gaya, aur pehla screenshot 09:00–11:29 ke beech kahin
-        #  schedule hua. Employee 09:12 pe logout ho gaya — matlab 8 GHANTE
-        #  31 MINUTE ka poora kaam bina kisi screenshot ke nikal gaya.
-        #
-        #  Ek monitoring product ka poora maqsad hi khatam ho jaata hai agar
-        #  wo tab andha ho jaye jab employee off-hours kaam kare. Ab: agar
-        #  employee logged in hai lekin shift ke bahar hai, to shift shuru
-        #  hone tak (ya agle rollover tak) configured min–max cadence pe
-        #  captures lete rahenge. Shift shuru hote hi normal slot-based
-        #  schedule automatically le leta hai (rollover ke through).
-        # ──────────────────────────────────────────────────────────────────
-        if now < shift_start:
-            # Shift abhi shuru nahi hui — tab tak off-shift coverage.
-            LoggerService.log_verbose(
-                f"SchedulerService: off-shift ({now.strftime('%H:%M')}), shift "
-                f"{shift_start.strftime('%H:%M')} baje shuru hogi — interim coverage on"
-            )
-            self._scheduled_until = shift_start
-            self._arm_timers(
-                ScreenshotManager.generate_interval_schedule(now, shift_start), now
-            )
-            return
+        self._scheduled_until = window_end
+        timestamps = ScreenshotManager.generate_daily_schedule(now, window_end)
 
-        effective_start = max(shift_start, now)
-        if effective_start >= shift_end:
-            # Shift khatam ho chuki hai lekin employee abhi bhi kaam kar raha
-            # hai — agle din ki shift tak off-shift coverage chalu rakho.
-            next_start = shift_start + timedelta(days=1)
-            LoggerService.log_verbose(
-                f"SchedulerService: shift ended, employee still logged in — "
-                f"off-shift coverage till {next_start.strftime('%d %b %H:%M')}"
-            )
-            self._scheduled_until = next_start
-            self._arm_timers(
-                ScreenshotManager.generate_interval_schedule(now, next_start), now
-            )
-            return
-
-        self._scheduled_until = shift_end
-        timestamps = ScreenshotManager.generate_random_schedule(effective_start, shift_end)
-
+        LoggerService.log_verbose(
+            f"SchedulerService: {label} — {len(timestamps)} capture(s) planned "
+            f"until {window_end.strftime('%d %b %H:%M')} IST "
+            f"({ScreenshotManager.captures_today()}/"
+            f"{ScreenshotManager.screenshots_per_day()} used today)"
+        )
         self._arm_timers(timestamps, now)
 
     def _arm_timers(self, timestamps, now: datetime):
@@ -356,11 +314,11 @@ class SchedulerService(QObject):
         """
         min_m  = config.get("screenshot_min_minutes")
         max_m  = config.get("screenshot_max_minutes")
-        count  = config.get("screenshot_count")
+        count  = config.get("screenshots_per_day")
 
         old_min   = SettingsService.get_setting("screenshot_min_minutes")
         old_max   = SettingsService.get_setting("screenshot_max_minutes")
-        old_count = SettingsService.get_setting("screenshot_count")
+        old_count = SettingsService.get_setting("screenshots_per_day")
 
         # Sirf un fields ko diff karo jo is payload mein actually present hain.
         # (Partial config aane par missing fields ko false-positive "changed"
@@ -376,7 +334,7 @@ class SchedulerService(QObject):
         if max_m is not None:
             SettingsService.save_setting("screenshot_max_minutes", str(max_m))
         if count is not None:
-            SettingsService.save_setting("screenshot_count", str(count))
+            SettingsService.save_setting("screenshots_per_day", str(count))
 
         # Shift timing update karo SessionManager mein bhi
         shift = config.get("shift")

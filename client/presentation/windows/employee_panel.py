@@ -789,7 +789,7 @@ class SettingsPage(QWidget):
             ("Shift", "shift"), ("Timezone", "tz"),
         ]))
         body.addWidget(self._section("Monitoring  ·  set by your administrator", [
-            ("Screenshots per shift", "m_count"),
+            ("Screenshots per day", "m_count"),
             ("Capture interval", "m_interval"),
             ("Idle threshold", "m_idle"),
             ("Detailed logging", "m_verbose"),
@@ -887,7 +887,7 @@ class SettingsPage(QWidget):
         put("shift", self._panel.shift_text())
         put("tz", "IST (Asia/Kolkata)")
 
-        put("m_count", setting("screenshot_count"))
+        put("m_count", setting("screenshots_per_day"))
         mn, mx = setting("screenshot_min_minutes"), setting("screenshot_max_minutes")
         put("m_interval", f"{mn} – {mx} min" if mn != "—" and mx != "—" else "—")
         idle = setting("idle_threshold_seconds")

@@ -3,7 +3,7 @@ const pool = require("../config/db");
 const DEFAULT_CONFIG = {
     screenshot_min_minutes:  3,
     screenshot_max_minutes:  10,
-    screenshot_count:        3,
+    screenshots_per_day:     10,
     upload_interval_minutes: 60,
     idle_threshold_seconds:  60,
     force_logout:            false,
@@ -45,7 +45,7 @@ exports.syncConfig = async (req, res) => {
         const config = {
             screenshot_min_minutes:  configRow?.screenshot_min_minutes  ?? DEFAULT_CONFIG.screenshot_min_minutes,
             screenshot_max_minutes:  configRow?.screenshot_max_minutes  ?? DEFAULT_CONFIG.screenshot_max_minutes,
-            screenshot_count:        configRow?.screenshot_count        ?? DEFAULT_CONFIG.screenshot_count,
+            screenshots_per_day:        configRow?.screenshots_per_day        ?? DEFAULT_CONFIG.screenshots_per_day,
             upload_interval_minutes: configRow?.upload_interval_minutes ?? DEFAULT_CONFIG.upload_interval_minutes,
             idle_threshold_seconds:  configRow?.idle_threshold_seconds  ?? DEFAULT_CONFIG.idle_threshold_seconds,
             force_logout:            configRow?.force_logout            ?? DEFAULT_CONFIG.force_logout,
