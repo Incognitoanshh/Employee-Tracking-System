@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 const {
     canManage,
     ROLE_SUPER_ADMIN,
@@ -556,7 +557,7 @@ exports.getScreenshots = async (req, res) => {
     let   idx        = 1;
 
     if (employee_id) { conditions.push(`employee_id = $${idx++}`); values.push(employee_id); }
-    if (date) { conditions.push(`DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = $${idx++}`); values.push(date); }
+    if (date) { conditions.push(`${istDate("created_at")} = $${idx++}`); values.push(date); }
 
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
@@ -604,7 +605,7 @@ exports.getLogs = async (req, res) => {
     let   idx        = 1;
 
     if (employee_id) { conditions.push(`employee_id = $${idx++}`); values.push(employee_id); }
-    if (date)        { conditions.push(`DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = $${idx++}`); values.push(date); }
+    if (date)        { conditions.push(`${istDate("created_at")} = $${idx++}`); values.push(date); }
 
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 

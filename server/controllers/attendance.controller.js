@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 
 // super_admin ko har jagah admin ke barabar (ya usse upar) treat karo.
 // BUG: ye checks pehle sirf "admin" dekhte the, is liye super_admin ko
@@ -33,7 +34,7 @@ exports.getAttendance = async (req, res) => {
         // bhi isi pattern se date filter karta hai).
         if (date) {
             conditions.push(
-                `DATE((login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') = $${idx++}`
+                `${istDate("login_time")} = $${idx++}`
             );
             values.push(date);
         }
