@@ -363,11 +363,49 @@ This lowers the odds. It does not solve it.
    file hash, so every new build needs resubmitting. Practical for
    tagged releases, not for routine builds.
 
+### Personal machines — decided 2026-08-04
+
+The application will be installed on employees' **personal** Windows
+machines, not company-managed devices. That removes option 2: there is no
+GPO or Intune reach into a personal laptop, and asking someone to add a
+Defender exclusion on their own computer for an employer's monitoring
+tool is both a hard sell and bad security advice.
+
+**Recommended path until a certificate is purchased:**
+
+1. **Submit each release build to Microsoft as a false positive**
+   (https://www.microsoft.com/en-us/wdsi/filesubmission). Free, usually
+   cleared in 1-3 days. The verdict is tied to the exact file hash, so
+   this only works if releases are infrequent and planned — submit, wait
+   for the verdict, then distribute. It does not work for a build-a-day
+   cadence.
+
+2. **Ship `--onedir`, not `--onefile`.** A self-extracting stub that
+   unpacks 62 MB into `%TEMP%` at every launch is one of the patterns
+   heuristics weight most heavily, and it also means Defender rescans the
+   extracted DLLs on each start — the likely cause of the multi-second
+   startup freeze observed on Windows Server 2022. onedir keeps the DLLs
+   in place and avoids both.
+
+3. **Publish a short install guide** with a screenshot of the exact
+   SmartScreen dialog and the "More info -> Run anyway" path, plus the
+   SHA-256 of the release so a cautious employee can verify what they are
+   running. Being upfront about the warning is far better than staff
+   discovering it alone and assuming the download is malware.
+
+**Buy the certificate.** For personal-device deployment it is not
+optional in practice — it is the only option that works without asking
+every employee to override their own antivirus. An **EV** certificate is
+worth the extra cost over OV here, because it grants SmartScreen
+reputation immediately; an OV certificate has to earn reputation over
+time and downloads, which means early employees still see warnings.
+
 ### Do not
 
 - Tell employees to disable Defender, or to add a blanket exclusion for
   their whole Downloads folder or user profile. That trades a cosmetic
-  problem for a real one.
+  problem for a real one — and on a personal machine it is their own
+  security you are weakening, not the company's.
 
 ### Until this is resolved
 
