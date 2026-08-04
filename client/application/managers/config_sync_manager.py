@@ -138,7 +138,7 @@ class ConfigSyncManager:
         field_map = {
             "screenshot_min_minutes":  "screenshot_min_minutes",
             "screenshot_max_minutes":  "screenshot_max_minutes",
-            "screenshot_count":        "screenshot_count",
+            "screenshots_per_day":        "screenshots_per_day",
             "upload_interval_minutes": "upload_interval_minutes",
             "idle_threshold_seconds":  "idle_threshold_seconds",
             "verbose_logging":         "verbose_logging",

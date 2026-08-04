@@ -163,7 +163,7 @@ def _monitoring_config() -> dict:
             return default
 
     return {
-        "count":    get("screenshot_count"),
+        "count":    get("screenshots_per_day"),
         "min":      get("screenshot_min_minutes"),
         "max":      get("screenshot_max_minutes"),
         "idle":     get("idle_threshold_seconds"),
@@ -364,7 +364,7 @@ class SettingsWindow(QDialog):
         # ── Monitoring (admin panel se set hoti hain) ──
         layout.addWidget(_Section("Monitoring  ·  set by your admin"))
         g = new_grid()
-        self._row(g, "Screenshots per shift:", "m_count")
+        self._row(g, "Screenshots per day:", "m_count")
         self._row(g, "Capture interval:", "m_interval")
         self._row(g, "Idle threshold:", "m_idle")
         self._row(g, "Detailed logging:", "m_verbose")

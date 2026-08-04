@@ -280,7 +280,7 @@ exports.getConfig = async (req, res) => {
         const DEFAULT = {
             screenshot_min_minutes:  3,
             screenshot_max_minutes:  10,
-            screenshot_count:        3,
+            screenshots_per_day:     10,
             upload_interval_minutes: 60,
             idle_threshold_seconds:  60,
             force_logout:            false,
@@ -329,7 +329,7 @@ exports.saveConfig = async (req, res) => {
         employee_id = null,
         screenshot_min_minutes = 3,
         screenshot_max_minutes = 10,
-        screenshot_count = 3,
+        screenshots_per_day = 10,
         upload_interval_minutes = 60,
         idle_threshold_seconds = 60,
         force_logout = false,
@@ -359,7 +359,7 @@ exports.saveConfig = async (req, res) => {
     // Range validation
     const min_ss = parseInt(screenshot_min_minutes);
     const max_ss = parseInt(screenshot_max_minutes);
-    const count  = parseInt(screenshot_count);
+    const count  = parseInt(screenshots_per_day);
     const upload = parseInt(upload_interval_minutes);
     const idle   = parseInt(idle_threshold_seconds);
 
@@ -370,7 +370,7 @@ exports.saveConfig = async (req, res) => {
     if (min_ss > max_ss)
         return res.status(400).json({ success: false, message: "screenshot_min_minutes must be ≤ screenshot_max_minutes" });
     if (isNaN(count) || count < 1 || count > 20)
-        return res.status(400).json({ success: false, message: "screenshot_count must be 1–20" });
+        return res.status(400).json({ success: false, message: "screenshots_per_day must be 1–20" });
     if (isNaN(upload) || upload < 1 || upload > 1440)
         return res.status(400).json({ success: false, message: "upload_interval_minutes must be 1–1440" });
     // Idle threshold ab 10–150 sec (admin panel spinbox ke saath match karta
@@ -423,7 +423,7 @@ exports.saveConfig = async (req, res) => {
                 await pool.query(
                     `UPDATE employee_configs
                      SET screenshot_min_minutes=$1, screenshot_max_minutes=$2,
-                         screenshot_count=$3, upload_interval_minutes=$4,
+                         screenshots_per_day=$3, upload_interval_minutes=$4,
                          idle_threshold_seconds=$5, force_logout=$6,
                          verbose_logging=$7,
                          shift_start = COALESCE($8, shift_start),
@@ -436,7 +436,7 @@ exports.saveConfig = async (req, res) => {
                 await pool.query(
                     `INSERT INTO employee_configs
                      (employee_id, screenshot_min_minutes, screenshot_max_minutes,
-                      screenshot_count, upload_interval_minutes, idle_threshold_seconds,
+                      screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
                       force_logout, verbose_logging, shift_start, shift_end, updated_at)
                      VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())`,
                     [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
@@ -446,13 +446,13 @@ exports.saveConfig = async (req, res) => {
             await pool.query(
                 `INSERT INTO employee_configs
                  (employee_id, screenshot_min_minutes, screenshot_max_minutes,
-                  screenshot_count, upload_interval_minutes, idle_threshold_seconds,
+                  screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
                   force_logout, verbose_logging, shift_start, shift_end, updated_at)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
                  ON CONFLICT (employee_id) DO UPDATE SET
                      screenshot_min_minutes = EXCLUDED.screenshot_min_minutes,
                      screenshot_max_minutes = EXCLUDED.screenshot_max_minutes,
-                     screenshot_count = EXCLUDED.screenshot_count,
+                     screenshots_per_day = EXCLUDED.screenshots_per_day,
                      upload_interval_minutes = EXCLUDED.upload_interval_minutes,
                      idle_threshold_seconds = EXCLUDED.idle_threshold_seconds,
                      force_logout = EXCLUDED.force_logout,

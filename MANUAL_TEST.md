@@ -28,7 +28,7 @@ Iske bina screenshots ya to fail hongi ya sirf wallpaper capture karengi.
 Abhi ke time se aage ka shift chahiye, warna screenshots schedule hi nahi hongi.
 
 ```bash
-ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "UPDATE employee_configs SET shift_start = make_time(0,1,0), shift_end = make_time(23,59,0), screenshot_count = 8, screenshot_min_minutes = 2, screenshot_max_minutes = 6, idle_threshold_seconds = 60, verbose_logging = false;" -c "SELECT COALESCE(employee_id,(chr(60)||chr(71)||chr(76)||chr(66)||chr(62))) emp, shift_start, shift_end, screenshot_count FROM employee_configs ORDER BY employee_id NULLS FIRST;"'
+ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "UPDATE employee_configs SET shift_start = make_time(0,1,0), shift_end = make_time(23,59,0), screenshots_per_day = 8, screenshot_min_minutes = 2, screenshot_max_minutes = 6, idle_threshold_seconds = 60, verbose_logging = false;" -c "SELECT COALESCE(employee_id,(chr(60)||chr(71)||chr(76)||chr(66)||chr(62))) emp, shift_start, shift_end, screenshots_per_day FROM employee_configs ORDER BY employee_id NULLS FIRST;"'
 ```
 
 **Expected:** har row `00:01:00 | 23:59:00 | 8`
@@ -154,18 +154,18 @@ ScreenshotManager: N screenshots scheduled across shift ... (first HH:MM, last H
 **Employee panel Settings page pe khula rakho.** Dusre terminal se:
 
 ```bash
-ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "UPDATE employee_configs SET screenshot_count = 15, idle_threshold_seconds = 120 WHERE employee_id IS NULL;"'
+ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "UPDATE employee_configs SET screenshots_per_day = 15, idle_threshold_seconds = 120 WHERE employee_id IS NULL;"'
 ```
 
 **~10 second ke andar, bina kuch kiye:**
-- [ ] Screenshots per shift → `15`
+- [ ] Screenshots per day → `15`
 - [ ] Idle threshold → `120 sec`
 - [ ] Dono **green highlight** hote hain (~2.5s)
 - [ ] `Settings synced: just now`
 
 Wapas:
 ```bash
-ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "UPDATE employee_configs SET screenshot_count = 8, idle_threshold_seconds = 60 WHERE employee_id IS NULL;"'
+ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "UPDATE employee_configs SET screenshots_per_day = 8, idle_threshold_seconds = 60 WHERE employee_id IS NULL;"'
 ```
 
 ---

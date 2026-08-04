@@ -1002,7 +1002,7 @@ class _ConfigTab(QWidget):
         # ── Widgets (naam wahi — save/load logic inhi pe depend karta hai) ──
         self._min_spin = QSpinBox(); self._min_spin.setRange(1, 60)
         self._max_spin = QSpinBox(); self._max_spin.setRange(1, 120)
-        self._cnt_spin = QSpinBox(); self._cnt_spin.setRange(1, 20)
+        self._cnt_spin = QSpinBox(); self._cnt_spin.setRange(1, 20)   # daily budget
         self._upl_spin = QSpinBox(); self._upl_spin.setRange(1, 240)
         self._idle_spin = QSpinBox(); self._idle_spin.setRange(10, 150)
         for s in (self._min_spin, self._max_spin, self._cnt_spin,
@@ -1021,16 +1021,19 @@ class _ConfigTab(QWidget):
         # ── Sections ──────────────────────────────────────────────────────
         body.addWidget(self._build_section(
             "📸", "Screenshot Capture",
-            "How many captures, and how far apart.",
+            "How many captures per day, and how far apart.",
             [
-                self._setting_row("Screenshots per shift",
-                                  "Maximum captures taken during one shift.",
+                self._setting_row("Screenshots per day",
+                                  "Exactly this many captures per calendar day (IST). "
+                                  "Never more, however long the employee stays "
+                                  "logged in.",
                                   self._cnt_spin, "captures"),
                 self._setting_row("Minimum interval",
                                   "Shortest gap allowed between two captures.",
                                   self._min_spin, "minutes"),
                 self._setting_row("Maximum interval",
-                                  "Longest gap allowed between two captures.",
+                                  "Advisory only — with a daily budget the spacing follows from how "
+                                  "much of the day is left.",
                                   self._max_spin, "minutes"),
             ]))
 
@@ -1118,7 +1121,7 @@ class _ConfigTab(QWidget):
         cfg = data.get("config", {})
         self._min_spin.setValue(cfg.get("screenshot_min_minutes",  3))
         self._max_spin.setValue(cfg.get("screenshot_max_minutes",  10))
-        self._cnt_spin.setValue(cfg.get("screenshot_count",        3))
+        self._cnt_spin.setValue(cfg.get("screenshots_per_day",     10))
         self._upl_spin.setValue(cfg.get("upload_interval_minutes", 60))
         self._idle_spin.setValue(cfg.get("idle_threshold_seconds", 60))
         self._verbose_check.setChecked(bool(cfg.get("verbose_logging", False)))
@@ -1174,7 +1177,7 @@ class _ConfigTab(QWidget):
         body = {
             "screenshot_min_minutes":  self._min_spin.value(),
             "screenshot_max_minutes":  self._max_spin.value(),
-            "screenshot_count":        self._cnt_spin.value(),
+            "screenshots_per_day":     self._cnt_spin.value(),
             "upload_interval_minutes": self._upl_spin.value(),
             "idle_threshold_seconds":  self._idle_spin.value(),
             "verbose_logging":        self._verbose_check.isChecked(),
@@ -1726,7 +1729,7 @@ class _DashboardTab(QWidget):
             self.t_tracking.set(
                 "ACTIVE" if online else "IDLE",
                 f"{online} of {total} employees online",
-                "Screenshots scheduled per shift",
+                "Screenshots scheduled per day",
                 TC.GREEN if online else TC.AMBER,
             )
             self.t_sync.set("SYNCED", "All uploads current",

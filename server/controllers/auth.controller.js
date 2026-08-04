@@ -136,7 +136,7 @@ exports.login = async (req, res) => {
             config: {
                 screenshot_min_minutes:  config.screenshot_min_minutes  || 3,
                 screenshot_max_minutes:  config.screenshot_max_minutes  || 10,
-                screenshot_count:        config.screenshot_count        || 3,
+                screenshots_per_day:        config.screenshots_per_day        || 10,
                 upload_interval_minutes: config.upload_interval_minutes || 60,
                 idle_threshold_seconds:  config.idle_threshold_seconds  || 60,
                 verbose_logging:         config.verbose_logging         || false,
