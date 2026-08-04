@@ -47,3 +47,15 @@ ets_db.sql
 # Local .env backups (never commit)
 client/.env.backup-*
 server/.env.backup-*
+
+# Uploaded screenshots — data, never source.
+# These were untracked AND un-ignored, which meant a routine `git stash -u`
+# or `git clean` on the server would have swept 136 MB of employee
+# screenshots out of the working tree. Recoverable from a stash, but not
+# something that should ever be one command away — least of all during a
+# deploy, which is exactly when those commands get reached for.
+server/uploads/screenshots/*
+!server/uploads/screenshots/.gitkeep
+
+# Local backups, if ETS_BACKUP_DIR is ever pointed inside the repo
+ets-backups/
