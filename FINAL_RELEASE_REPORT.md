@@ -2,12 +2,12 @@
 
 **Date:** 2026-08-04
 **Version:** 2.1.0
-**Audited commit:** `ec98462`
+**Audited commit:** `3a04db3`
 **Verdict:** **NOT YET PRODUCTION READY** — see Blockers.
 
 ---
 
-## Production readiness score: 82 / 100
+## Production readiness score: 88 / 100
 
 | Area | Score | Notes |
 |---|---|---|
@@ -15,16 +15,16 @@
 | Database | 95 | Schema, indexes, migrations idempotent and order-independent. Pool sized for 1000+. |
 | Security — application | 90 | Auth, JWT, SQL injection, upload handling all verified clean. |
 | Security — transport | **30** | Plain HTTP. Passwords and JWTs cross the network in clear text. |
-| Backups | 70 | Scripts written and tested end to end, **not yet installed on the VPS**. |
-| Monitoring | 70 | Same — written and ready, not yet installed. |
+| Backups | 95 | Installed on the VPS. Full backup + restore verified against production data. |
+| Monitoring | 85 | Cron jobs installed and running. Alerts go to a log file, not pushed. |
 | Windows deployment | **40** | Defender quarantines the binary on every machine. |
 | macOS deployment | 85 | Builds and runs. Unsigned, so Gatekeeper warns on first launch. |
 | Performance | 90 | Server is not the bottleneck; network RTT is. |
 | Reliability | 90 | Crash handlers, graceful shutdown, offline queue, thread safety verified. |
 
-The score is capped by three items, none of which are code defects. Two
-require a business decision or infrastructure; one requires VPS access I
-do not have.
+The score is capped by two items, neither of which is a code defect.
+Both require infrastructure or a business decision. Everything
+resolvable inside the repository or on the VPS is now done.
 
 ---
 
@@ -70,14 +70,38 @@ Fixes, in order of preference:
 company-managed, or will some be personal laptops? Managed-only means
 option 2 is sufficient. Any personal machine means option 1.
 
-### 3. Production operations not yet installed — **needs VPS access**
+### 3. ~~Production operations not installed~~ — **RESOLVED 2026-08-04**
 
-Every script is written and tested, but **nothing is running on the VPS
-yet**. I have no SSH access (key auth is denied; you have been running
-commands). See the deployment checklist for exact commands.
+Installed and verified on the production VPS:
 
-Until this is done there are **no backups at all**. That is the single
-biggest risk today.
+```
+=== ETS backup  2026-08-04T03:00:40+0000 ===
+[2/4] verifying
+  OK: 244K, 9 tables
+[3/4] rsync uploads -> /home/etsadmin/ets-backups/uploads/20260804
+  OK: 55 files, 136M apparent
+db snapshots     : 2
+upload snapshots : 1
+```
+
+```
+=== Restore test  2026-08-04T03:01:12+0000 ===
+as     : postgres superuser (app user lacks CREATEDB)
+  employees          4
+  employee_configs   3
+  attendance         186
+  activity_logs      20007
+  screenshots        97
+  active_sessions    5
+
+RESTORE TEST PASSED — 4 employees, 1 super admin(s)
+```
+
+Two bugs in the backup tooling were found by running it on the VPS —
+neither reproduced locally. Both are described under "Fixed in this
+audit".
+
+All four cron jobs are installed and running.
 
 ---
 
@@ -132,6 +156,41 @@ that is unrecoverable.
 Replaced with `server/scripts/purge_screenshots.sh`, which refuses to run
 when the keep-list is empty but files exist, refuses to delete more than
 90% in one pass, and is dry-run by default. Both guards tested.
+
+### Backup retention deleted the snapshot it had just created
+
+Found by running the script on the VPS, not locally.
+
+```
+[3/4] rsync uploads -> .../uploads/20260804
+  OK: 55 files, 136M apparent
+[4/4] pruning older than 14 days
+  removed .../uploads/20260804
+upload snapshots : 0
+```
+
+`rsync -a` preserves the source directory's mtime on the destination.
+`server/uploads/` is itself rarely modified — screenshots land in the
+`uploads/screenshots/` subdirectory — so its mtime is old. The fresh
+snapshot inherited that old mtime, `-mtime +14` matched it, and it was
+removed seconds after being written.
+
+The effect: **screenshots were never being backed up at all.** Only the
+database dump survived each run. Since the failure is silent and the run
+otherwise reports success, this would have been discovered during a
+recovery.
+
+Retention now parses the date from the directory name, which this script
+controls, and only considers directories matching `YYYYMMDD`. DB dumps
+still use mtime, which is correct for plain files nothing rewrites.
+
+### Restore test could not create its throwaway database
+
+`ERROR: permission denied to create database` — the application's
+database user has no CREATEDB privilege. That is correct and should stay
+that way; granting it so a test can run would widen the app's privileges
+for no good reason. The script now falls back to the local `postgres`
+superuser, the same route the migrations were applied through.
 
 ---
 
@@ -318,15 +377,30 @@ just syntax-checked.
 Hardlink incremental mirroring means 14 daily snapshots of a 50 GB
 `uploads/` cost roughly 50 GB plus daily deltas, not 700 GB.
 
+### Verified on production, 2026-08-04
+
+| Check | Result |
+|---|---|
+| DB dump | 244 KB, 9 tables |
+| Uploads mirror | 55 files, 136 MB |
+| Snapshot survives retention | **Passed** after the mtime fix (was 0) |
+| Restore into throwaway DB | **Passed** |
+| Row counts after restore | 4 employees, 3 configs, 186 attendance, 20007 logs, 97 screenshots |
+| super_admin present | **Passed** |
+
 **Limitation:** backups live on the same disk as the data. That covers
 accidental deletion, a bad migration, or a botched purge. It does **not**
 cover disk failure or losing the VPS. Copy `~/ets-backups` off-site.
+
+**Re-run the restore test** after any schema change, and roughly monthly
+otherwise. It is deliberately not on cron: it needs sudo, and a
+verification nobody looks at is not a verification.
 
 ---
 
 ## Monitoring status
 
-All written and tested; **none installed yet** (needs Phase 1).
+**Installed and running on the VPS as of 2026-08-04.**
 
 | Job | Schedule | Output |
 |---|---|---|
@@ -395,21 +469,24 @@ Non-blocking, roughly in order of value:
 
 ## Declaration
 
-**The project is NOT yet production ready.**
+**The project is NOT yet production ready** — but the remaining gap is no
+longer inside the repository or the VPS.
 
-Every code-level defect found in this audit has been fixed and verified.
-The application, database, and API are sound. What remains is not code:
+Every code-level defect found across this audit has been fixed and
+verified. Backups and monitoring are installed on production and proven
+by a real restore. Two blockers remain, both external:
 
-- HTTPS needs a domain name — **external**
-- Windows signing needs a certificate or a policy decision — **external**
-- Backups and monitoring need to be installed on the VPS — **needs your
-  SSH access**, scripts are ready and tested
+- **HTTPS** needs a domain name. Certbot will not issue for a bare IP.
+  Passwords and JWTs are in clear text until this is done.
+- **Windows code signing** needs a certificate or a policy decision.
+  Blocked on one unanswered question: are all employee machines
+  company-managed, or will some be personal laptops? Managed-only means a
+  free GPO exclusion is enough; any personal machine means a certificate.
 
-Complete **Phase 1** and the third item clears. At that point the honest
-position is: safe to run a **staged rollout on managed machines**, with
-HTTPS still outstanding and treated as the next priority.
+**Current honest position:** safe to run a **staged rollout on managed
+machines** — start with one real Windows machine and one Mac, then 5–10
+employees for a week.
 
-Do not do a full rollout to employee machines before Phase 3 and Phase 4.
-Asking staff to click through a malware warning in order to install
-monitoring software that then sends their password in clear text is a bad
-position on both counts.
+**Do not do a full rollout** before HTTPS is live. Asking staff to click
+through a malware warning to install monitoring software that then sends
+their password in clear text is a bad position on both counts.
