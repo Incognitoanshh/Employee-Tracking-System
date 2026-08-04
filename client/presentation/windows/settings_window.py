@@ -47,7 +47,7 @@ from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from client.core.time_ist import IST  # single source of truth
 
 
 # ---------------------------------------------------------------------------

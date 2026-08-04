@@ -13,6 +13,7 @@ from client.application.managers.sync_manager import SyncManager
 from client.infrastructure.database.database import Database
 from client.security.crypto_engine import CryptoEngine
 from client.services.logger_service import LoggerService
+from client.core.time_ist import now_ist, end_of_ist_day, ist_day_str
 from client.services.settings_service import SettingsService
 from client.core.config import API_BASE_URL, STORAGE_DIR
 from client.core.config.settings import Settings
@@ -35,23 +36,6 @@ from client.core.config.settings import Settings
 # across whatever remains of the monitoring window, and capture_screenshot()
 # refuses once the day's budget is spent — so the number can be reached
 # late, but never exceeded, no matter how the schedule is regenerated.
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def now_ist() -> datetime:
-    """Current moment as IST wall-clock, naive.
-
-    Everything about the daily budget is anchored to the IST calendar day,
-    so a client in Pacific or London counts the same day boundary as one in
-    India.
-    """
-    return datetime.now(timezone.utc).astimezone(IST).replace(tzinfo=None)
-
-
-def end_of_ist_day(moment: datetime) -> datetime:
-    """Last instant of the IST day that `moment` falls in."""
-    return moment.replace(hour=23, minute=59, second=59, microsecond=0)
-
 
 class ScreenshotManager:
     STORAGE_PATH = os.path.join(STORAGE_DIR, "screenshots")
@@ -88,7 +72,12 @@ class ScreenshotManager:
         employee_id = getattr(SessionManager, "employee_id", None)
         if not employee_id:
             return 0
-        day = now_ist().strftime("%Y-%m-%d")
+        # Derive the day from THIS module's now_ist, the same one
+        # capture_screenshot() stamps rows with. Calling ist_day_str()
+        # with no argument would resolve now_ist inside time_ist instead —
+        # identical in production, but two paths to "what day is it" is
+        # exactly the split-brain that caused every timing bug here.
+        day = ist_day_str(now_ist())
         try:
             connection = Database.connect()
             row = connection.execute(

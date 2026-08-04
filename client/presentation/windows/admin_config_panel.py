@@ -97,7 +97,7 @@ PAGES = [
 ]
 
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from client.core.time_ist import IST  # single source of truth
 
 
 def _parse_server_ts(ts) -> datetime | None:

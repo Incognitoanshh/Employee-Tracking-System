@@ -47,7 +47,7 @@ from client.services.settings_service import SettingsService
 from client.presentation.tray.system_tray import SystemTray
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from client.core.time_ist import IST  # single source of truth
 
 
 # ──────────────────────────────────────────────────────────────────────────────

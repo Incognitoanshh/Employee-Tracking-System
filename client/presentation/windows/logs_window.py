@@ -13,7 +13,7 @@ from client.services.log_service import LogService
 from client.application.managers.session_manager import SessionManager
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 
-IST = timezone(timedelta(hours=5, minutes=30))
+from client.core.time_ist import IST  # single source of truth
 
 def _sort_key(ts) -> datetime:
     """
