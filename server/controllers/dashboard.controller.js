@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 
 exports.getStats = async (req, res) => {
 
@@ -263,8 +264,7 @@ exports.getMySummary = async (req, res) => {
     }
 
     try {
-        const IST_DAY = `DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
-                         = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')`;
+        const IST_DAY = isTodayIST("created_at");
 
         const [shots, logs, session, totals] = await Promise.all([
             pool.query(
@@ -289,8 +289,7 @@ exports.getMySummary = async (req, res) => {
                      ), interval '0') AS today_worked
                  FROM attendance
                  WHERE employee_id = $1
-                   AND DATE((login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
-                       = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')`,
+                   AND ${isTodayIST("login_time")}`,
                 [employeeId]
             ),
         ]);
@@ -306,8 +305,7 @@ exports.getMySummary = async (req, res) => {
                     COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) AS end_time
              FROM attendance
              WHERE employee_id = $1
-               AND DATE((login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
-                   = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+               AND ${isTodayIST("login_time")}
              ORDER BY login_time ASC`,
             [employeeId]
         );
@@ -316,8 +314,7 @@ exports.getMySummary = async (req, res) => {
              FROM activity_logs
              WHERE employee_id = $1
                AND (UPPER(activity) LIKE '%USER ACTIVE%' OR UPPER(activity) LIKE '%USER IDLE%')
-               AND DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
-                   = DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+               AND ${isTodayIST("created_at")}
              ORDER BY created_at ASC
              LIMIT 20000`,
             [employeeId]
