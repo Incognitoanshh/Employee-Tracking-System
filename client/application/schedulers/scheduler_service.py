@@ -1,4 +1,30 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# Shift times are defined in IST — the admin panel labels them "(IST)" and
+# the server stores them that way. They must NOT be interpreted in the
+# client machine's local timezone.
+#
+# BUG (confirmed in production): the scheduler built the shift window with
+# datetime.now() and a naive strptime of "HH:MM", both in machine-local
+# time. On a client running Pacific time the window "09:00-18:00" became
+# 09:00-18:00 PDT, i.e. 21:30-06:30 IST. At 20:15 PDT the code decided the
+# shift had already ended and switched to off-shift coverage, which ignores
+# `screenshot_count` and fires every min..max minutes instead — 130 captures
+# scheduled where the admin had configured 10.
+#
+# Working in IST throughout makes the schedule identical on every machine
+# regardless of its timezone or clock setting.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist() -> datetime:
+    """Current moment as IST wall-clock, naive.
+
+    Naive on purpose: the rest of this module does arithmetic against these
+    values and hands the differences to QTimer. As long as every value is in
+    the same frame, the deltas are real elapsed durations.
+    """
+    return datetime.now(timezone.utc).astimezone(IST).replace(tzinfo=None)
 
 from PySide6.QtCore import QObject, QTimer, Signal, QMetaObject, Qt, Slot
 
@@ -68,7 +94,7 @@ class SchedulerService(QObject):
 
     def _schedule_shift_screenshots(self):
 
-        now = datetime.now()
+        now = now_ist()
 
         # ── SUPER ADMIN ko monitor nahi karna ──
         # Super admin company ka owner/manager hai, tracked employee nahi.
@@ -133,11 +159,16 @@ class SchedulerService(QObject):
             shift_end   = now + timedelta(hours=8)
             LoggerService.log_verbose("SchedulerService: shift times not found, using 8hr window from now")
 
-        # Timezone fix: dono ko naive bana do comparison ke liye
+        # Bring everything into the same IST frame as `now`.
+        #
+        # This used to be `.replace(tzinfo=None)`, which DISCARDS the offset
+        # instead of applying it: "09:00+05:30" became a bare 09:00 that was
+        # then compared against a machine-local now. Converting first means
+        # a payload in any offset still lands on the correct IST wall-clock.
         if shift_start.tzinfo is not None:
-            shift_start = shift_start.replace(tzinfo=None)
+            shift_start = shift_start.astimezone(IST).replace(tzinfo=None)
         if shift_end.tzinfo is not None:
-            shift_end = shift_end.replace(tzinfo=None)
+            shift_end = shift_end.astimezone(IST).replace(tzinfo=None)
 
         # ── OVERNIGHT (NIGHT SHIFT) NORMALISATION ─────────────────────────
         #
@@ -283,7 +314,7 @@ class SchedulerService(QObject):
         if not self._scheduled_until:
             return
 
-        if datetime.now() >= self._scheduled_until:
+        if now_ist() >= self._scheduled_until:
             LoggerService.log_verbose("SchedulerService: shift window over — rescheduling for next shift")
             self.reschedule()
 
