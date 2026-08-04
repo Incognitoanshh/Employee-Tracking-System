@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from client.application.managers.session_manager import SessionManager
+from client.infrastructure.database.database import Database
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
@@ -1494,6 +1495,40 @@ class _DashboardTab(QWidget):
             strip.addWidget(c)
         sl.addLayout(strip)
         root.addWidget(summary)
+
+        # ── This admin's OWN session ─────────────────────────────────────
+        # Everything above is org-wide. Admins are tracked users themselves —
+        # screenshots are captured for them, and the idle tracker runs — but
+        # the panel never showed them any of that, so an admin had no way to
+        # tell whether their own tracking was working. Employees see exactly
+        # these three on their dashboard.
+        mine = _card()
+        m_lay = QVBoxLayout(mine)
+        m_lay.setContentsMargins(20, 16, 20, 16)
+        m_lay.setSpacing(12)
+
+        m_head = QHBoxLayout(); m_head.setSpacing(10)
+        m_ico = QLabel("👤"); m_ico.setFixedSize(28, 28)
+        m_ico.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        m_ico.setStyleSheet(f"background:{C['accent_soft']}; border-radius:9px; font-size:14px;")
+        m_ttl = QLabel("Your Session")
+        m_ttl.setStyleSheet(
+            f"color:{C['text_primary']}; font-size:15px; font-weight:700; background:transparent;"
+        )
+        m_sub = QLabel("Your own tracking status — admins are tracked too")
+        m_sub.setStyleSheet(f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+        m_head.addWidget(m_ico); m_head.addWidget(m_ttl)
+        m_head.addSpacing(8); m_head.addWidget(m_sub); m_head.addStretch()
+        m_lay.addLayout(m_head)
+
+        my_row = QHBoxLayout(); my_row.setSpacing(12)
+        self.m_session  = MiniStat("⏱", "Session Duration", TC.AMBER,  TC.AMBER_BG)
+        self.m_activity = MiniStat("🖥", "Activity Status",  TC.GREEN,  TC.GREEN_BG)
+        self.m_myshots  = MiniStat("📸", "Screenshots Today", TC.PURPLE, TC.PURPLE_BG)
+        for c in (self.m_session, self.m_activity, self.m_myshots):
+            my_row.addWidget(c)
+        m_lay.addLayout(my_row)
+        root.addWidget(mine)
 
         # ── Status tiles ─────────────────────────────────────────────────
         tiles = QHBoxLayout(); tiles.setSpacing(14)
@@ -3299,9 +3334,70 @@ class AdminConfigPanel(QMainWindow):
         self.scheduler.start()
 
         self.idle_tracker = IdleTracker()
+        # BUG: the tracker was started but its signal was connected to
+        # nothing, so an admin's own idle/active state never reached the UI.
+        # (Tracking itself still worked — IdleTracker writes its own log and
+        # DB rows inside check_idle — but the admin could not see any of it.)
+        self.idle_tracker.status_changed.connect(self._on_own_idle)
         self.idle_tracker.start()
 
+        # Session start comes from the local `shifts` row that
+        # ShiftManager.start_shift_local() writes at login.
+        self._session_start = None
+        try:
+            conn = Database.connect()
+            row = conn.execute(
+                "SELECT login_time FROM shifts WHERE employee_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (SessionManager.employee_id,),
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                self._session_start = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+        self._own_timer = QTimer(self)
+        self._own_timer.timeout.connect(self._tick_own_session)
+        self._own_timer.start(1000)
+        self._tick_own_session()
+        self._on_own_idle("WORKING")
+
         self._setup_tray()
+
+    # ── This admin's own session ─────────────────────────────────────────
+
+    def _tick_own_session(self):
+        card = getattr(self._dashboard_tab, "m_session", None)
+        if card is None:
+            return
+        if not self._session_start:
+            card.set_value("00:00:00")
+            return
+        secs = int((datetime.now() - self._session_start).total_seconds())
+        if secs < 0:
+            secs = 0
+        card.set_value(
+            f"{secs // 3600:02}:{(secs % 3600) // 60:02}:{secs % 60:02}",
+            f"Started {self._session_start.strftime('%I:%M %p')}",
+        )
+
+    def _on_own_idle(self, status: str):
+        card = getattr(self._dashboard_tab, "m_activity", None)
+        if card is None:
+            return
+        idle = str(status).upper() == "IDLE"
+        card.set_value(
+            "IDLE" if idle else "WORKING",
+            "No input detected" if idle else "Keyboard & mouse active",
+        )
+        card.push_point(0 if idle else 1)
+
+    def _update_own_shots(self, count):
+        card = getattr(self._dashboard_tab, "m_myshots", None)
+        if card is not None:
+            card.set_value(str(count), "Captured today")
+            card.push_point(count)
 
     def _refresh_current_page(self):
         """Header ka Refresh — jo page khula hai usi ka data reload."""
@@ -3387,6 +3483,11 @@ class AdminConfigPanel(QMainWindow):
 
     def capture_screenshot(self):
         result = ScreenshotManager.capture_screenshot()
+        # Reflect it on the admin's own card. None means the capture was
+        # skipped (super admin) or failed, so the count must not move.
+        if result is not None:
+            self._own_shots = getattr(self, "_own_shots", 0) + 1
+            self._update_own_shots(self._own_shots)
 
     def _drain_workers(self, timeout_ms: int = 3000) -> int:
         """

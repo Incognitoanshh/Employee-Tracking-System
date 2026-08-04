@@ -41,6 +41,19 @@ class IdleTracker(QObject):
         self.timer.timeout.connect(self.check_idle)
 
     def start(self):
+        # Super admin is the owner/manager, not a tracked employee — the same
+        # rule screenshots already follow (scheduler_service.py and
+        # screenshot_manager.py both skip this role).
+        #
+        # Without this guard the tracker ran for super admins too and wrote
+        # USER IDLE / USER ACTIVE straight into the audit log via
+        # LoggerService.log() inside check_idle(). Those are not verbose
+        # messages, so quieting SchedulerService did not cover them.
+        if getattr(SessionManager, "role", "") == "super_admin":
+            LoggerService.log_verbose(
+                "IdleTracker: super admin — idle tracking disabled for this account"
+            )
+            return
         self.timer.start(2000)
 
     def stop(self):
