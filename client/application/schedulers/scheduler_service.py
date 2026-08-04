@@ -6,6 +6,7 @@ from client.application.managers.sync_manager import SyncManager
 from client.application.managers.config_sync_manager import ConfigSyncManager
 from client.application.managers.screenshot_manager import (
     ScreenshotManager,
+    IST,
     now_ist,
     end_of_ist_day,
 )
