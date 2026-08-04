@@ -34,7 +34,28 @@ fi
 DUMP="$(find "$BACKUP_DIR/db" -name 'ets-*.sql.gz' 2>/dev/null | sort | tail -1)"
 [ -n "$DUMP" ] || { echo "ERROR: no backups found in $BACKUP_DIR/db"; exit 1; }
 
-psql_() { PGPASSWORD="${DB_PASSWORD:-}" psql -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" -U "$DB_USER" "$@"; }
+# The application's database user deliberately does not have CREATEDB —
+# widening its privileges just so a test can run would be the wrong trade.
+# So: try as the app user, and if the server refuses, fall back to the
+# local `postgres` superuser (the same route the migrations were applied
+# through). Nothing here ever writes to the live database.
+psql_app()  { PGPASSWORD="${DB_PASSWORD:-}" psql -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" -U "$DB_USER" "$@"; }
+psql_super() { sudo -u postgres psql "$@"; }
+
+if psql_app -d postgres -qc "SELECT 1" >/dev/null 2>&1 \
+   && psql_app -d postgres -tAc "SELECT rolcreatedb FROM pg_roles WHERE rolname = current_user" 2>/dev/null | grep -q t; then
+    MODE="app user ($DB_USER)"
+    psql_() { psql_app "$@"; }
+elif sudo -n -u postgres psql -qc "SELECT 1" >/dev/null 2>&1 || sudo -u postgres psql -qc "SELECT 1" >/dev/null 2>&1; then
+    MODE="postgres superuser (app user lacks CREATEDB)"
+    psql_() { psql_super "$@"; }
+else
+    echo "ERROR: cannot create a test database."
+    echo "  $DB_USER has no CREATEDB privilege and 'sudo -u postgres' is unavailable."
+    echo "  Re-run this script with sudo access, or grant CREATEDB temporarily:"
+    echo "    sudo -u postgres psql -c 'ALTER ROLE $DB_USER CREATEDB'"
+    exit 1
+fi
 cleanup() { psql_ -d postgres -c "DROP DATABASE IF EXISTS $TEST_DB" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -42,6 +63,7 @@ echo "=== Restore test  $(date "+%Y-%m-%dT%H:%M:%S%z") ==="
 echo "backup : $DUMP  ($(du -h "$DUMP" | cut -f1))"
 echo "age    : $(( ( $(date +%s) - $(stat -c %Y "$DUMP" 2>/dev/null || stat -f %m "$DUMP") ) / 3600 )) hours old"
 echo "target : $TEST_DB  (throwaway)"
+echo "as     : $MODE"
 echo
 
 echo "[1/3] creating test database"
