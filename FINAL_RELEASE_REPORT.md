@@ -339,10 +339,18 @@ ssh -t etsadmin@65.21.212.85 'cd "$HOME/ETS-v5/Employee-Tracking-System-main cop
 ```bash
 ssh -t etsadmin@65.21.212.85
 cd ~/ets-backups/db && ls -lt | head          # pick a snapshot
+
+# Take the database name from the app's own config. It is NOT "ets" —
+# assuming that creates a new empty database while the real one sits
+# untouched under a different name.
+cd "$HOME/ETS-v5/Employee-Tracking-System-main copy/server"
+set -a && . ./.env && set +a
+echo "restoring into: $DB_NAME"
+
 pm2 stop ets-server
-sudo -u postgres psql -c "ALTER DATABASE ets RENAME TO ets_broken_$(date +%s)"
-sudo -u postgres createdb ets
-gzip -dc ets-<STAMP>.sql.gz | sudo -u postgres psql -d ets
+sudo -u postgres psql -c "ALTER DATABASE $DB_NAME RENAME TO ${DB_NAME}_broken_$(date +%s)"
+sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
+gzip -dc ~/ets-backups/db/ets-<STAMP>.sql.gz | sudo -u postgres psql -d "$DB_NAME"
 pm2 start ets-server
 ```
 
