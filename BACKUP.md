@@ -100,12 +100,20 @@ nobody looks at is not a verification.
 
 ```bash
 cd ~/ets-backups/db && ls -lt | head        # pick a snapshot
+
+# Read the real database name from the app's own config. Do NOT assume it
+# is "ets" — it is not, and a wrong name here creates a new empty database
+# while the real one sits untouched under another name.
+cd "$HOME/ETS-v5/Employee-Tracking-System-main copy/server"
+set -a && . ./.env && set +a
+echo "restoring into: $DB_NAME"
+
 pm2 stop ets-server
 
 # Rename rather than drop, so the broken database stays available
-sudo -u postgres psql -c "ALTER DATABASE ets RENAME TO ets_broken_$(date +%s)"
-sudo -u postgres createdb ets
-gzip -dc ets-<STAMP>.sql.gz | sudo -u postgres psql -d ets
+sudo -u postgres psql -c "ALTER DATABASE $DB_NAME RENAME TO ${DB_NAME}_broken_$(date +%s)"
+sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
+gzip -dc ~/ets-backups/db/ets-<STAMP>.sql.gz | sudo -u postgres psql -d "$DB_NAME"
 
 pm2 start ets-server
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/api/health   # expect 200
