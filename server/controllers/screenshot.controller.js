@@ -48,10 +48,8 @@ exports.uploadScreenshot = async (req, res) => {
 
     } catch (error) {
 
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
 
     }
 
@@ -84,10 +82,8 @@ exports.getScreenshots = async (req, res) => {
 
     } catch (error) {
 
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
 
     }
 
@@ -148,6 +144,7 @@ exports.downloadScreenshot = async (req, res) => {
 
     } catch (error) {
         console.log("[DOWNLOAD] Error:", error.message);
-        return res.status(500).json({ success: false, error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

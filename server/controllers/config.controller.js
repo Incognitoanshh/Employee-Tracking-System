@@ -11,7 +11,7 @@ const DEFAULT_CONFIG = {
 };
 
 exports.syncConfig = async (req, res) => {
-    const { employee_id, device_id } = req.body;
+    const { employee_id, device_id } = req.body || {};
     const token_employee_id = req.employee?.employee_id;
 
     if (!employee_id) {
@@ -112,6 +112,7 @@ exports.syncConfig = async (req, res) => {
         });
 
     } catch (error) {
-        return res.status(500).json({ success: false, message: "Server error", error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

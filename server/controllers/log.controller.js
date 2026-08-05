@@ -15,7 +15,7 @@ exports.createLog = async (req, res) => {
             employee_id,
             activity
 
-        } = req.body;
+        } = req.body || {};
 
         // SECURITY FIX: non-admin employees sirf apne naam se log create
         // kar sakte hain. Pehle koi bhi employee body mein kisi aur ka
@@ -63,13 +63,8 @@ exports.createLog = async (req, res) => {
 
     catch (error) {
 
-        return res.status(500).json({
-
-            success: false,
-
-            error: error.message
-
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
 
     }
 
@@ -121,10 +116,8 @@ exports.getLogs = async (req, res) => {
     }
 
     catch (error) {
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
 
     }
 

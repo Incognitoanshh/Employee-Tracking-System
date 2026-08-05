@@ -190,7 +190,8 @@ exports.getEmployees = async (req, res) => {
         });
 
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -199,7 +200,7 @@ exports.createEmployee = async (req, res) => {
     const {
         employee_id, username, password, role = "employee",
         full_name = null, designation = null,
-    } = req.body;
+    } = req.body || {};
 
     // BUG FIX: pehle empty/missing fields directly DB tak pahunch jaate the.
     if (!employee_id || !username || !password) {
@@ -262,7 +263,8 @@ exports.createEmployee = async (req, res) => {
                 message: "An employee with this employee_id or username already exists"
             });
         }
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -321,7 +323,8 @@ exports.getConfig = async (req, res) => {
 
         return res.json({ success: true, config });
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -337,7 +340,7 @@ exports.saveConfig = async (req, res) => {
         verbose_logging = false,
         shift_start = undefined,
         shift_end = undefined,
-    } = req.body;
+    } = req.body || {};
 
 
     // BUG FIX: getConfig `"global"` ko global-default ke liye sentinel maanta
@@ -471,14 +474,15 @@ exports.saveConfig = async (req, res) => {
 
     } catch (err) {
         console.error("SAVE CONFIG ERROR:", err);
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
 // FAST TOGGLE (Employees tab ke liye) — ek click se verbose_logging flip
 // karne ke liye, bina poora config form khole.
 exports.toggleVerboseLogging = async (req, res) => {
-    const { employee_id, verbose_logging } = req.body;
+    const { employee_id, verbose_logging } = req.body || {};
 
     if (!employee_id) {
         return res.status(400).json({ success: false, message: "employee_id required" });
@@ -499,12 +503,13 @@ exports.toggleVerboseLogging = async (req, res) => {
             message: `Verbose logging ${verbose_logging ? "enabled" : "disabled"} for ${employee_id}`
         });
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
 exports.forceLogout = async (req, res) => {
-    const { employee_id } = req.body;
+    const { employee_id } = req.body || {};
 
     if (!employee_id) {
         return res.status(400).json({ success: false, message: "employee_id required" });
@@ -543,7 +548,8 @@ exports.forceLogout = async (req, res) => {
         );
         return res.json({ success: true, message: `Force logout set for ${employee_id}` });
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -582,7 +588,8 @@ exports.getScreenshots = async (req, res) => {
             page:    Number(page),
         });
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -668,7 +675,8 @@ exports.getLogs = async (req, res) => {
             page:    Number(page),
         });
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -844,7 +852,8 @@ exports.getEmployeeDetails = async (req, res) => {
         });
 
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -957,17 +966,15 @@ exports.deleteEmployee = async (req, res) => {
 
     } catch (err) {
         await client.query("ROLLBACK");
-        return res.status(500).json({
-            success: false,
-            error: err.message
-        });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     } finally {
         client.release();
     }
 };
 
 exports.saveShift = async (req, res) => {
-    const { employee_id, shift_start, shift_end } = req.body;
+    const { employee_id, shift_start, shift_end } = req.body || {};
     if (!employee_id || !shift_start || !shift_end) {
         return res.status(400).json({ success: false, message: "employee_id, shift_start, shift_end required" });
     }
@@ -997,7 +1004,8 @@ exports.saveShift = async (req, res) => {
         );
         return res.json({ success: true, message: "Shift saved" });
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -1014,7 +1022,7 @@ exports.saveShift = async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 exports.changeRole = async (req, res) => {
     const { employee_id } = req.params;
-    const { role } = req.body;
+    const { role } = req.body || {};
 
     if (!employee_id || !role) {
         return res.status(400).json({
@@ -1111,6 +1119,7 @@ exports.changeRole = async (req, res) => {
         });
 
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

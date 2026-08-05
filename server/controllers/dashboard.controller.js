@@ -44,13 +44,8 @@ exports.getStats = async (req, res) => {
 
     } catch (error) {
 
-        return res.status(500).json({
-
-            success: false,
-
-            error: error.message
-
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
 
     }
 
@@ -126,10 +121,8 @@ exports.getAdminSummary = async (req, res) => {
         });
 
     } catch (error) {
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 
 };
@@ -183,10 +176,8 @@ exports.getRecentActivity = async (req, res) => {
         });
 
     } catch (error) {
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 
 };
@@ -242,7 +233,8 @@ exports.getChartsData = async (req, res) => {
             }
         });
     } catch (error) {
-        return res.status(500).json({ success: false, error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -364,6 +356,7 @@ exports.getMySummary = async (req, res) => {
             },
         });
     } catch (error) {
-        return res.status(500).json({ success: false, error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

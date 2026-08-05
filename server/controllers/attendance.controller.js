@@ -61,13 +61,14 @@ exports.getAttendance = async (req, res) => {
         });
 
     } catch (error) {
-        return res.status(500).json({ success: false, error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
 exports.loginAttendance = async (req, res) => {
     try {
-        let { employee_id, login_time } = req.body;
+        let { employee_id, login_time } = req.body || {};
 
         if (!isElevated(req.employee?.role)) {
             employee_id = req.employee?.employee_id;
@@ -101,13 +102,14 @@ exports.loginAttendance = async (req, res) => {
         res.json({ success: true, id: result.rows[0].id });
 
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        Noneres.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
 exports.logoutAttendance = async (req, res) => {
     try {
-        let { employee_id } = req.body;
+        let { employee_id } = req.body || {};
 
         if (!isElevated(req.employee?.role)) {
             employee_id = req.employee?.employee_id;
@@ -145,6 +147,7 @@ exports.logoutAttendance = async (req, res) => {
         res.json({ success: true });
 
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        Noneres.status(500).json({ success: false, message: "Internal server error" });
     }
 };
