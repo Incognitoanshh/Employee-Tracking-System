@@ -5,6 +5,12 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # Rebuild on demand, without inventing a commit to trigger one.
+  # Needed whenever the installers have to be regenerated but the code has
+  # not changed — artifacts expire, and a run's artifacts stopped being
+  # reachable once the repository was made private.
+  #   gh workflow run "Build Cross-Platform Desktop Apps" --ref main
+  workflow_dispatch:
 
 jobs:
   build-windows:
