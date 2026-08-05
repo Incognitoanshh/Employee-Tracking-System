@@ -14,5 +14,9 @@ router.get(
     "/all",
     logController.getLogs
 );
+router.post(
+    "/idle-daily",
+    logController.recordIdleDaily
+);
 
 module.exports = router;

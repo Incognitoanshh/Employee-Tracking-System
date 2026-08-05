@@ -219,6 +219,66 @@ class SyncManager:
             LoggerService.log(f"SyncManager: cleanup_old_orphans error — {e}")
 
     @staticmethod
+    def push_idle_totals(max_days: int = 7):
+        """
+        Send any day whose idle total has moved since it was last sent.
+
+        A day's total keeps growing while somebody is signed in, so a day is
+        re-sent rather than sent once — the `uploaded` flag is cleared every
+        time the tracker adds to it. Only recent days are attempted: a total
+        from three weeks ago that has never gone through is not going to
+        start working now, and retrying it forever would hold up today's.
+        """
+        headers = SyncManager._auth_headers()
+        if headers is None:
+            return
+
+        try:
+            connection = Database.connect()
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT day, idle_seconds FROM idle_daily
+                 WHERE employee_id = ? AND uploaded = 0
+                 ORDER BY day DESC LIMIT ?
+                """,
+                (SessionManager.employee_id, max_days),
+            )
+            pending = [(row["day"], row["idle_seconds"]) for row in cursor.fetchall()]
+            connection.close()
+        except Exception:
+            return
+
+        for day, seconds in pending:
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/logs/idle-daily",
+                    json={"day": day, "idle_seconds": int(seconds)},
+                    headers=headers,
+                    timeout=10,
+                )
+                if response.status_code != 200:
+                    continue
+                connection = Database.connect()
+                cursor = connection.cursor()
+                # Guarded on the value that was actually sent: the tracker may
+                # have added more while the request was in flight, and marking
+                # the row clean would lose that.
+                cursor.execute(
+                    """
+                    UPDATE idle_daily SET uploaded = 1
+                     WHERE employee_id = ? AND day = ? AND idle_seconds = ?
+                    """,
+                    (SessionManager.employee_id, day, seconds),
+                )
+                connection.commit()
+                connection.close()
+            except Exception:
+                # Offline or the server is down — the row stays unuploaded
+                # and the next sync tick tries again.
+                break
+
+    @staticmethod
     def retry_logs(max_retries: int = 20):
         headers = SyncManager._auth_headers()
         if headers is None:

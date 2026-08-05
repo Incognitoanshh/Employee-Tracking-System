@@ -119,6 +119,29 @@ exports.getAttendanceReport = async (req, res) => {
         );
         const shotsByEmployee = new Map(shots.rows.map((r) => [r.employee_id, r.n]));
 
+        // Idle comes from idle_daily, which the client accumulates as time
+        // passes. It is NOT derived from the IDLE/ACTIVE events in
+        // activity_logs — pairing those leaves a pair open on every crash and
+        // produces a total that is wrong by an unknown amount.
+        //
+        // A day with no row means the client never reported one (an older
+        // build, or it never ran that day), which is different from a day
+        // with zero idle time. Days present are counted so the report can say
+        // when the figure is incomplete rather than quietly under-reporting.
+        const idle = await pool.query(
+            `SELECT employee_id,
+                    COALESCE(SUM(idle_seconds), 0)::bigint AS seconds,
+                    COUNT(*)::int AS days_reported
+               FROM idle_daily
+              WHERE employee_id = ANY($1) AND day BETWEEN $2::date AND $3::date
+              GROUP BY employee_id`,
+            [ids, from, to]
+        );
+        const idleByEmployee = new Map(
+            idle.rows.map((r) => [r.employee_id,
+                { seconds: Number(r.seconds), days: r.days_reported }])
+        );
+
         // ── configs, with the usual fallback to the global row ──────────
         const configs = await pool.query(
             `SELECT employee_id, shift_start, shift_end, weekly_offs, late_grace_minutes
@@ -215,6 +238,12 @@ exports.getAttendanceReport = async (req, res) => {
                 // performance problem.
                 avg_hours:     present ? Number((hours / present).toFixed(2)) : 0,
                 screenshots:   shotsByEmployee.get(employee.employee_id) || 0,
+                idle_hours:    Number(((idleByEmployee.get(employee.employee_id)?.seconds || 0) / 3600).toFixed(2)),
+                // How many of the days they were present actually reported an
+                // idle figure. Anything short of present_days means the total
+                // covers only part of the range — worth saying rather than
+                // presenting a partial number as complete.
+                idle_days_reported: idleByEmployee.get(employee.employee_id)?.days || 0,
                 // Capped: the point is to show which days, not to ship an
                 // unbounded list into a table cell.
                 absent_dates:  absentDates.slice(0, 40),

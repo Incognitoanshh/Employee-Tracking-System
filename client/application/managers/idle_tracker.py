@@ -1,5 +1,6 @@
 import ctypes
 import platform
+import time
 from datetime import datetime
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -9,6 +10,7 @@ from client.services.settings_service import SettingsService
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
 from client.core.config.settings import Settings
+from client.core.time_ist import ist_day_str, now_ist
 
 try:
     import Quartz
@@ -37,6 +39,10 @@ class IdleTracker(QObject):
         )
         self._reload_every_n_checks = 10
         self._check_counter = 0
+        # Idle time is accumulated as it passes rather than derived from
+        # IDLE/ACTIVE pairs — see the idle_daily table for why.
+        self._last_tick: float | None = None
+        self._idle_carry = 0.0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_idle)
 
@@ -94,6 +100,59 @@ class IdleTracker(QObject):
         LoggerService.log(f"[IdleTracker] Unsupported platform: {system} — idle detection disabled")
         return 0.0
 
+    def _accumulate_idle(self, idle_seconds: float):
+        """
+        Add the time since the last check to today's idle total.
+
+        Counted from wall-clock elapsed rather than from the OS idle figure,
+        so a machine that slept or a timer that was starved does not inflate
+        the total. `_last_tick` is None on the first check after start, which
+        is why nothing is added then.
+
+        Anything longer than a minute between ticks is discarded: that is the
+        machine having been asleep or suspended, not somebody sitting there
+        idle, and counting it would quietly turn an overnight sleep into
+        eight hours of idle time.
+        """
+        now = time.monotonic()
+        previous, self._last_tick = self._last_tick, now
+        if previous is None:
+            return
+
+        elapsed = now - previous
+        if elapsed <= 0 or elapsed > 60:
+            return
+        if idle_seconds < self.idle_threshold:
+            return
+
+        self._idle_carry += elapsed
+        # Written in whole seconds so the row is not rewritten on every tick.
+        whole = int(self._idle_carry)
+        if whole < 1:
+            return
+        self._idle_carry -= whole
+
+        try:
+            day = ist_day_str(now_ist())
+            connection = Database.connect()
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO idle_daily (employee_id, day, idle_seconds, uploaded)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(employee_id, day) DO UPDATE SET
+                    idle_seconds = idle_seconds + excluded.idle_seconds,
+                    uploaded = 0
+                """,
+                (SessionManager.employee_id, day, whole),
+            )
+            connection.commit()
+            connection.close()
+        except Exception:
+            # Losing a second of idle time is not worth interrupting
+            # tracking for. The next tick tries again.
+            self._idle_carry += whole
+
     def check_idle(self):
         self._check_counter += 1
         if self._check_counter >= self._reload_every_n_checks:
@@ -101,6 +160,7 @@ class IdleTracker(QObject):
             self._check_counter = 0
 
         idle_seconds = self._get_idle_seconds()
+        self._accumulate_idle(idle_seconds)
 
         if idle_seconds >= self.idle_threshold:
             if not self.is_idle:

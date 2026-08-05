@@ -70,6 +70,50 @@ exports.createLog = async (req, res) => {
 
 };
 
+/**
+ * The client reporting how much of a day it spent idle.
+ *
+ * Upsert rather than insert: a day's total keeps growing while the employee
+ * is signed in, so the client re-sends the same day whenever it changes.
+ *
+ * GREATEST() so a stale client cannot walk the number backwards. Two devices
+ * signed in as the same person each hold their own running total, and
+ * whichever posts second would otherwise overwrite the larger figure with
+ * its own smaller one.
+ */
+exports.recordIdleDaily = async (req, res) => {
+    const { day, idle_seconds } = req.body || {};
+    const employeeId = req.employee?.employee_id;
+
+    if (!employeeId) {
+        return res.status(401).json({ success: false, message: "Not authenticated" });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day || ""))) {
+        return res.status(400).json({ success: false, message: "day must be YYYY-MM-DD" });
+    }
+    const seconds = parseInt(idle_seconds, 10);
+    // A day holds 86400 seconds; anything past that is a broken client, not
+    // a very tired employee.
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 86400) {
+        return res.status(400).json({ success: false, message: "idle_seconds must be 0-86400" });
+    }
+
+    try {
+        await pool.query(
+            `INSERT INTO idle_daily (employee_id, day, idle_seconds, updated_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (employee_id, day) DO UPDATE
+                 SET idle_seconds = GREATEST(idle_daily.idle_seconds, EXCLUDED.idle_seconds),
+                     updated_at = NOW()`,
+            [employeeId, day, seconds]
+        );
+        return res.json({ success: true });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.getLogs = async (req, res) => {
 
     try {

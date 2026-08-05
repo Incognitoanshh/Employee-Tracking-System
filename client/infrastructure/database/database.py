@@ -53,6 +53,34 @@ class Database:
             )
             """)
 
+            # How much of each IST day was spent idle, in seconds.
+            #
+            # idle_logs above records the MOMENT someone went idle or active.
+            # Turning those into a daily total means pairing each IDLE with
+            # the ACTIVE that follows it — and a crash, a dropped connection
+            # or a logout leaves a pair open forever, so the total comes out
+            # wrong by an unknown amount. A wrong idle figure in a payroll
+            # report is worse than no figure at all, which is why reports
+            # shipped without one.
+            #
+            # This is accumulated instead: the tracker already asks the OS how
+            # long the machine has been idle, every two seconds, so the time
+            # is simply added up as it passes. A crash costs at most one
+            # tick's worth, and there is no pair left open to go wrong.
+            #
+            # `uploaded` marks rows the server has already been told about.
+            # The total for a day keeps growing, so a day is re-sent whenever
+            # it changes rather than being sent once.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS idle_daily (
+                employee_id TEXT NOT NULL,
+                day         TEXT NOT NULL,
+                idle_seconds INTEGER NOT NULL DEFAULT 0,
+                uploaded    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (employee_id, day)
+            )
+            """)
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS shifts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

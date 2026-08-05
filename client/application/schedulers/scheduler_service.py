@@ -241,6 +241,7 @@ class SchedulerService(QObject):
             try:
                 SyncManager.retry_uploads()
                 SyncManager.retry_logs()
+                SyncManager.push_idle_totals()
                 # Success - reset to base interval (60s)
                 self._sync_failures = 0
                 self._sync_interval = 60

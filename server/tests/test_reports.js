@@ -63,6 +63,7 @@ async function main() {
             path.join(root, "server", "migrations", "2026_08_05_password_management.sql"),
             path.join(root, "server", "migrations", "2026_08_05_work_calendar.sql"),
             path.join(root, "server", "migrations", "2026_08_05_late_grace.sql"),
+            path.join(root, "server", "migrations", "2026_08_05_idle_daily.sql"),
         ]) {
             execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f", file],
                 { stdio: "pipe" });
@@ -162,6 +163,66 @@ async function main() {
         check("and has no hours rather than a divide-by-zero",
             e3?.avg_hours === 0 && e3?.total_hours === 0,
             JSON.stringify({ avg: e3?.avg_hours, total: e3?.total_hours }));
+
+        // ── idle time ───────────────────────────────────────────────────
+        //
+        // Reported by the client, one row per IST day. A day with no row is
+        // "never reported", which is not the same as zero idle — the report
+        // has to be able to tell the difference or it under-reports silently.
+        check("no idle rows means nothing reported",
+            e1?.idle_hours === 0 && e1?.idle_days_reported === 0,
+            JSON.stringify({ h: e1?.idle_hours, d: e1?.idle_days_reported }));
+
+        const empRes0 = await api("POST", "/auth/login",
+            { body: { username: "emp1", password: "SuperSecret123" } });
+        const e1Token = empRes0.body.token;
+
+        res = await api("POST", "/logs/idle-daily",
+            { token: e1Token, body: { day: "2026-08-03", idle_seconds: 3600 } });
+        check("the client can report a day's idle time",
+            res.status === 200, `status ${res.status}`);
+
+        res = await api("POST", "/logs/idle-daily",
+            { token: e1Token, body: { day: "2026-08-04", idle_seconds: 1800 } });
+
+        res = await api("GET", `/admin/reports/attendance?${range}`, { token });
+        const withIdle = (res.body.rows || []).find((r) => r.employee_id === "E001");
+        check("idle hours are summed across days",
+            withIdle?.idle_hours === 1.5, JSON.stringify(withIdle?.idle_hours));
+        check("the report says how many days reported",
+            withIdle?.idle_days_reported === 2,
+            JSON.stringify(withIdle?.idle_days_reported));
+        check("which is fewer than the days present, so partial",
+            withIdle.idle_days_reported < withIdle.present_days,
+            JSON.stringify({ r: withIdle.idle_days_reported, p: withIdle.present_days }));
+
+        // A day grows while somebody is signed in, so it is re-sent.
+        await api("POST", "/logs/idle-daily",
+            { token: e1Token, body: { day: "2026-08-03", idle_seconds: 7200 } });
+        res = await api("GET", `/admin/reports/attendance?${range}`, { token });
+        const grown = (res.body.rows || []).find((r) => r.employee_id === "E001");
+        check("re-sending a day replaces rather than adds",
+            grown?.idle_hours === 2.5, JSON.stringify(grown?.idle_hours));
+
+        // Two devices each hold their own running total; the smaller one
+        // must not walk the figure backwards.
+        await api("POST", "/logs/idle-daily",
+            { token: e1Token, body: { day: "2026-08-03", idle_seconds: 60 } });
+        res = await api("GET", `/admin/reports/attendance?${range}`, { token });
+        const notLowered = (res.body.rows || []).find((r) => r.employee_id === "E001");
+        check("a smaller total from another device cannot lower it",
+            notLowered?.idle_hours === 2.5, JSON.stringify(notLowered?.idle_hours));
+
+        res = await api("POST", "/logs/idle-daily",
+            { token: e1Token, body: { day: "not-a-day", idle_seconds: 60 } });
+        check("a malformed day is refused", res.status === 400, `status ${res.status}`);
+        res = await api("POST", "/logs/idle-daily",
+            { token: e1Token, body: { day: "2026-08-03", idle_seconds: 999999 } });
+        check("more idle than a day contains is refused",
+            res.status === 400, `status ${res.status}`);
+        res = await api("POST", "/logs/idle-daily",
+            { body: { day: "2026-08-03", idle_seconds: 60 } });
+        check("reporting idle time needs a token", res.status === 401, `status ${res.status}`);
 
         // ── filters and guards ──────────────────────────────────────────
         res = await api("GET", `/admin/reports/attendance?${range}&employee_id=E001`, { token });

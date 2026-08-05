@@ -1161,6 +1161,18 @@ class _ConfigTab(QWidget):
         self._min_spin = QSpinBox(); self._min_spin.setRange(1, 60)
         self._max_spin = QSpinBox(); self._max_spin.setRange(1, 120)
         self._cnt_spin = QSpinBox(); self._cnt_spin.setRange(1, 20)   # daily budget
+        # Kept only so the load/save round trip stays intact — the control
+        # itself is gone from the page.
+        #
+        # It was labelled "how often captured data is synced" and did nothing:
+        # screenshots upload the moment they are captured, and the 60 second
+        # loop it appeared to control is the RETRY for uploads that failed.
+        # Wiring it up would have made things worse, not better — the stored
+        # default is 60, read as minutes, so a failed upload would have sat
+        # for an hour instead of retrying within the minute.
+        #
+        # Rather than offer a knob that must not be turned, the page no longer
+        # shows one. The column stays so no data is thrown away.
         self._upl_spin = QSpinBox(); self._upl_spin.setRange(1, 240)
         self._idle_spin = QSpinBox(); self._idle_spin.setRange(10, 150)
         self._grace_spin = QSpinBox(); self._grace_spin.setRange(0, 120)
@@ -1250,9 +1262,6 @@ class _ConfigTab(QWidget):
             "⚙", "Advanced",
             "Only change these if you need to.",
             [
-                self._setting_row("Upload interval",
-                                  "How often captured data is synced to the server.",
-                                  self._upl_spin, "minutes"),
                 self._setting_row("Verbose logging",
                                   "Logs every sync and schedule event. Turn on only for "
                                   "debugging — it fills the database quickly.",
@@ -2184,7 +2193,7 @@ class _ReportsTab(QWidget):
         ("Employee",    150), ("Shift",       110), ("Working",  80),
         ("Present",      80), ("Absent",       80), ("Late",     70),
         ("Late time",   100), ("Total hours", 100), ("Avg/day",  90),
-        ("Screenshots", 100),
+        ("Idle",         90), ("Screenshots", 100),
     ]
 
     def __init__(self):
@@ -2333,7 +2342,26 @@ class _ReportsTab(QWidget):
                 f"{row.get('total_hours', 0):.2f}", mono=True, align_right=True))
             self._table.setItem(i, 8, _cell(
                 f"{row.get('avg_hours', 0):.2f}", mono=True, align_right=True))
-            self._table.setItem(i, 9, _cell(
+
+            # Only meaningful once every present day has reported one. An
+            # older client never sends these, and a partial total presented as
+            # complete would under-report somebody's idle time.
+            reported = row.get("idle_days_reported", 0)
+            present = row.get("present_days", 0)
+            if reported == 0:
+                idle_cell = _cell("—", mono=True, align_right=True, muted=True)
+                idle_cell.setToolTip("No idle data reported for this range.")
+            else:
+                idle_cell = _cell(f"{row.get('idle_hours', 0):.2f}",
+                                  mono=True, align_right=True)
+                if reported < present:
+                    idle_cell.setForeground(QColor(C["warning"]))
+                    idle_cell.setToolTip(
+                        f"Partial — {reported} of {present} present day(s) "
+                        f"reported idle time.")
+            self._table.setItem(i, 9, idle_cell)
+
+            self._table.setItem(i, 10, _cell(
                 str(row.get("screenshots", 0)), mono=True, align_right=True))
 
         span = data.get("days", 0)
@@ -2355,13 +2383,15 @@ class _ReportsTab(QWidget):
 
         headers = ["Employee ID", "Name", "Shift", "Working days", "Present",
                    "Absent", "Absent dates", "Late days", "Late minutes",
-                   "Total hours", "Avg hours per present day", "Screenshots"]
+                   "Total hours", "Avg hours per present day",
+                   "Idle hours", "Idle days reported", "Screenshots"]
         rows = [[
             r.get("employee_id", ""), r.get("full_name", ""), r.get("shift", ""),
             r.get("working_days", 0), r.get("present_days", 0), r.get("absent_days", 0),
             " ".join(r.get("absent_dates") or []),
             r.get("late_days", 0), r.get("late_minutes", 0),
             f"{r.get('total_hours', 0):.2f}", f"{r.get('avg_hours', 0):.2f}",
+            f"{r.get('idle_hours', 0):.2f}", r.get("idle_days_reported", 0),
             r.get("screenshots", 0),
         ] for r in self._rows]
 

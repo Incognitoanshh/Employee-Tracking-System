@@ -128,6 +128,19 @@ ALTER TABLE employees
 ALTER TABLE employees
     ADD COLUMN IF NOT EXISTS password_changed_at  TIMESTAMP WITHOUT TIME ZONE;
 
+-- Idle time per day (2026_08_05_idle_daily.sql)
+--
+-- Accumulated by the client as time passes, NOT derived from the IDLE/ACTIVE
+-- events in activity_logs — pairing those leaves a pair open on every crash.
+CREATE TABLE IF NOT EXISTS idle_daily (
+    employee_id  VARCHAR(50) NOT NULL,
+    day          DATE        NOT NULL,
+    idle_seconds INTEGER     NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (employee_id, day)
+);
+CREATE INDEX IF NOT EXISTS idle_daily_day_idx ON idle_daily (day);
+
 -- Usernames are matched without case (2026_08_05_username_case_insensitive.sql)
 --
 -- This index is what makes the case-insensitive login safe: without it,
