@@ -61,9 +61,12 @@ async function main() {
     try {
         execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q",
             "-f", path.join(root, "ets.sql")], { stdio: "pipe" });
-        execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f",
-            path.join(root, "server", "migrations", "2026_08_05_password_management.sql")],
-            { stdio: "pipe" });
+        for (const migration of ["2026_08_05_password_management",
+                                 "2026_08_05_username_case_insensitive"]) {
+            execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f",
+                path.join(root, "server", "migrations", `${migration}.sql`)],
+                { stdio: "pipe" });
+        }
 
         // Seed a super admin directly — the API needs one to exist before it
         // can create anybody else.
@@ -230,6 +233,31 @@ async function main() {
 
         res = await api("POST", "/admin/employees/NOSUCH/password", { token: saToken });
         check("resetting a missing account gives 404", res.status === 404, `status ${res.status}`);
+
+        // ── usernames are matched without case ──────────────────────────
+        //
+        // The super admin registered as "Amazeinternet" could not sign in by
+        // typing "amazeinternet" — right password, "Invalid credentials", no
+        // way to tell the difference from the outside.
+        for (const attempt of ["EMP1", "Emp1", "eMp1", "  emp1  "]) {
+            res = await api("POST", "/auth/login",
+                { body: { username: attempt, password: "ThirdPass99" } });
+            check(`username ${JSON.stringify(attempt)} signs in`,
+                res.status === 200, `status ${res.status}`);
+        }
+
+        // The dangerous half: if a case-variant account could be created,
+        // a login would match two rows and the planner would pick the winner.
+        res = await api("POST", "/admin/employees", { token: saToken, body: {
+            employee_id: "E999", username: "EMP1",
+            password: "LookAlike99", role: "employee" } });
+        check("a username differing only by case cannot be created",
+            res.status === 409, `status ${res.status}`);
+
+        res = await api("POST", "/auth/login",
+            { body: { username: "emp1", password: "LookAlike99" } });
+        check("and the lookalike's password does not work",
+            res.status === 401, `status ${res.status}`);
 
         // ── the hash never leaves the database ──────────────────────────
         res = await api("GET", "/admin/employees", { token: saToken });

@@ -128,6 +128,14 @@ ALTER TABLE employees
 ALTER TABLE employees
     ADD COLUMN IF NOT EXISTS password_changed_at  TIMESTAMP WITHOUT TIME ZONE;
 
+-- Usernames are matched without case (2026_08_05_username_case_insensitive.sql)
+--
+-- This index is what makes the case-insensitive login safe: without it,
+-- "admin" and "Admin" can both exist and a login for either would match two
+-- rows. Fails loudly on an existing pair rather than migrating half way.
+CREATE UNIQUE INDEX IF NOT EXISTS employees_username_lower_idx
+    ON employees (LOWER(username));
+
 -- Late arrival grace period (2026_08_05_late_grace.sql)
 ALTER TABLE employee_configs
     ADD COLUMN IF NOT EXISTS late_grace_minutes INTEGER NOT NULL DEFAULT 10;

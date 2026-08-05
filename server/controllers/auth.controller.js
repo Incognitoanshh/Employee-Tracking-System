@@ -62,9 +62,20 @@ exports.login = async (req, res) => {
     }
 
     try {
+        // Matched without regard to case. The super admin registered as
+        // "Amazeinternet" could not sign in by typing "amazeinternet": the
+        // password was right and the only feedback was "Invalid credentials",
+        // which reads as a wrong password and sends people round in circles.
+        //
+        // Safe only because employees_username_lower_idx makes two accounts
+        // differing by case impossible — otherwise this would match more than
+        // one row and let a lookalike account take over a real one.
+        //
+        // Uses the same LOWER(username) expression as that index so the
+        // lookup stays indexed rather than scanning the table.
         const result = await pool.query(
-            "SELECT * FROM employees WHERE username = $1",
-            [username]
+            "SELECT * FROM employees WHERE LOWER(username) = LOWER($1)",
+            [String(username).trim()]
         );
 
         if (result.rows.length === 0) {

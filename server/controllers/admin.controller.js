@@ -272,7 +272,13 @@ exports.createEmployee = async (req, res) => {
         if (err.code === "23505") {
             return res.status(409).json({
                 success: false,
-                message: "An employee with this employee_id or username already exists"
+                // Usernames are compared without case since login stopped
+                // being case-sensitive, so "Admin" collides with "admin".
+                // Saying so beats leaving the admin staring at a name that
+                // looks unused.
+                message: "An employee with this employee_id or username already "
+                       + "exists. Usernames are not case-sensitive, so 'Admin' "
+                       + "and 'admin' count as the same name."
             });
         }
         console.error("[500]", req.method, req.originalUrl, err.message);
