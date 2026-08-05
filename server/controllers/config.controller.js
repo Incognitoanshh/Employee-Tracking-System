@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { istToday } = require("../utils/ist_sql");
 
 const DEFAULT_CONFIG = {
     screenshot_min_minutes:  3,
@@ -103,10 +104,56 @@ exports.syncConfig = async (req, res) => {
         }
 
 
+        // Which days this employee does not work. Sent as policy rather than
+        // as a yes/no for today, because the client re-plans by itself at
+        // midnight and must be able to answer the question for the new date
+        // without waiting for another sync.
+        //
+        // Any failure here leaves both fields absent. The client treats a
+        // missing calendar as "every day is a working day", which keeps
+        // monitoring on — the safe direction when the alternative is
+        // switching it off because a query timed out.
+        let calendar = {};
+        try {
+            // Two queries rather than a UNION, because the fallback has to
+            // turn on whether the employee HAS a row — not on whether their
+            // value is empty. An employee deliberately set to no weekly off
+            // ('') must not silently inherit the global Sunday.
+            let offs = await pool.query(
+                `SELECT weekly_offs FROM employee_configs WHERE employee_id = $1 LIMIT 1`,
+                [employee_id]
+            );
+            if (offs.rows.length === 0) {
+                offs = await pool.query(
+                    `SELECT weekly_offs FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
+                );
+            }
+            const weeklyOffs = offs.rows[0]?.weekly_offs || "";
+
+            // A window rather than the whole table: the client only needs
+            // enough to cover the days it might schedule before its next
+            // sync, and this keeps the payload small on a 5 second poll.
+            const dates = await pool.query(
+                `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS d
+                   FROM holidays
+                  WHERE holiday_date BETWEEN (${istToday()} - INTERVAL '2 days')
+                                         AND (${istToday()} + INTERVAL '60 days')
+                  ORDER BY holiday_date`
+            );
+
+            calendar = {
+                weekly_offs: weeklyOffs,
+                holidays:    dates.rows.map((r) => r.d).join(","),
+            };
+        } catch (e) {
+            console.error(`[CONFIG SYNC] calendar lookup failed for ${employee_id}:`, e.message);
+        }
+
         return res.status(200).json({
             success: true,
             config: {
                 ...config,
+                ...calendar,
                 ...(shift ? { shift } : {}),
             }
         });
