@@ -134,15 +134,20 @@ app.use((err, req, res, next) => {
             body: req && req.body ? req.body : undefined,
         });
 
-        // Normalize message for clients
-        const message = err && err.message ? err.message : "Internal server error";
-
-        // If express.json() failed to parse, return 400 with explicit error message
-        if (status === 400) {
-            return res.status(400).json({ success: false, message });
+        // A 4xx is the caller's fault, so telling them what was wrong with
+        // their request is useful. A 5xx is ours, and err.message there is
+        // an internal detail — an unauthenticated caller was being handed
+        // things like "Cannot destructure property 'username' of 'req.body'",
+        // which describes our source code. Log it, do not return it.
+        if (status < 500) {
+            const message = err && err.message ? err.message : "Bad request";
+            return res.status(status).json({ success: false, message });
         }
 
-        return res.status(status).json({ success: false, message });
+        return res.status(status).json({
+            success: false,
+            message: "Internal server error",
+        });
     } catch (e) {
         // Fallback: never let the error handler crash PM2
         console.error("[ERROR_HANDLER_CRASH]", e);
