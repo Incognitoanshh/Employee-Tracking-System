@@ -93,6 +93,8 @@ PAGES = [
      "subtitle": "Track login, logout times and shift hours."},
     {"key": "screenshots", "icon": "📸", "title": "Screenshots",
      "subtitle": "Browse captured screenshots by employee and date."},
+    {"key": "reports",     "icon": "📈", "title": "Reports",
+     "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
      "subtitle": "Detailed activity history for compliance and review."},
 ]
@@ -496,6 +498,20 @@ def _card(padding: int = 0) -> QFrame:
         f" border: 1px solid {C['border']}; border-radius: 14px; }}"
     )
     return f
+
+
+def _fmt_minutes(total) -> str:
+    """95 -> "1h 35m". Matches the Attendance page's Late column."""
+    try:
+        total = int(total or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if total <= 0:
+        return "—"
+    if total < 60:
+        return f"{total}m"
+    hours, rest = divmod(total, 60)
+    return f"{hours}h {rest}m" if rest else f"{hours}h"
 
 
 def _muted_label(text: str) -> QLabel:
@@ -2150,6 +2166,211 @@ class _LogsTab(QWidget):
     def _next_page(self): self._load(self._page + 1)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  Reports Tab
+#
+#  Every figure here already existed in the database and had never been added
+#  up. The Attendance page answers "what happened on this row"; this answers
+#  "how did this person do over the month", which is the question payroll
+#  actually asks.
+#
+#  Absence lives here rather than on the Attendance page for a structural
+#  reason: an absence is the absence of a row, so it only exists once you walk
+#  a date range. This page has a date range; that one has pagination.
+# ──────────────────────────────────────────────────────────────────────────────
+class _ReportsTab(QWidget):
+
+    COLUMNS = [
+        ("Employee",    150), ("Shift",       110), ("Working",  80),
+        ("Present",      80), ("Absent",       80), ("Late",     70),
+        ("Late time",   100), ("Total hours", 100), ("Avg/day",  90),
+        ("Screenshots", 100),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self._workers: list = []
+        self._rows: list[dict] = []
+        self._build_ui()
+        self._load_employees()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+
+        toolbar = _card()
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(16, 12, 16, 12)
+        bar.setSpacing(12)
+
+        today = QDate.currentDate()
+        self._from = QDateEdit(); self._from.setCalendarPopup(True)
+        self._from.setDisplayFormat("dd MMM yyyy")
+        # Opens on the current month, which is what a report is asked for
+        # nine times out of ten.
+        self._from.setDate(QDate(today.year(), today.month(), 1))
+        self._to = QDateEdit(); self._to.setCalendarPopup(True)
+        self._to.setDisplayFormat("dd MMM yyyy")
+        self._to.setDate(today)
+        for box in (self._from, self._to):
+            box.setFixedHeight(36)
+
+        self._emp = QComboBox()
+        self._emp.setFixedHeight(36)
+        self._emp.setMinimumWidth(200)
+        self._emp.addItem("All employees", "all")
+
+        run = _btn("📊  Generate", variant="primary", height=36)
+        run.clicked.connect(self.refresh)
+        self._export_btn = _btn("⬇  Export CSV", variant="secondary", height=36)
+        self._export_btn.clicked.connect(self._export)
+        self._export_btn.setEnabled(False)
+
+        bar.addWidget(_muted_label("From"))
+        bar.addWidget(self._from)
+        bar.addWidget(_muted_label("To"))
+        bar.addWidget(self._to)
+        bar.addWidget(_muted_label("Employee"))
+        bar.addWidget(self._emp)
+        bar.addWidget(run)
+        bar.addWidget(self._export_btn)
+        bar.addStretch()
+        root.addWidget(toolbar)
+
+        self._table = _tune_table(QTableWidget(0, len(self.COLUMNS)))
+        self._table.setHorizontalHeaderLabels([c[0] for c in self.COLUMNS])
+        self._table.horizontalHeader().setStretchLastSection(False)
+        for i, (_, width) in enumerate(self.COLUMNS):
+            mode = (QHeaderView.ResizeMode.Stretch if i == 0
+                    else QHeaderView.ResizeMode.Fixed)
+            self._table.horizontalHeader().setSectionResizeMode(i, mode)
+            if i:
+                self._table.setColumnWidth(i, width)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        root.addWidget(self._table, 1)
+
+        self._status = QLabel("Choose a range and press Generate.")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
+        )
+        root.addWidget(self._status)
+
+    def _load_employees(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/employees", {"limit": 200})
+
+        def fill(data: dict):
+            for emp in data.get("employees", data.get("data", [])) or []:
+                if emp.get("role") == "super_admin":
+                    continue
+                label = f"{emp.get('employee_id')} — {emp.get('username', '')}"
+                self._emp.addItem(label, emp.get("employee_id"))
+
+        w.result.connect(fill)
+        w.error.connect(lambda _e: None)
+        _track_worker(self._workers, w)
+        w.start()
+
+    def refresh(self):
+        params = {
+            "from": self._from.date().toString("yyyy-MM-dd"),
+            "to":   self._to.date().toString("yyyy-MM-dd"),
+            "employee_id": self._emp.currentData() or "all",
+        }
+        if params["from"] > params["to"]:
+            self._status.setText("The From date is after the To date.")
+            return
+
+        self._status.setText("Generating…")
+        self._export_btn.setEnabled(False)
+        w = _FetchWorker(f"{API_BASE_URL}/admin/reports/attendance", params)
+        w.result.connect(self._populate)
+        w.error.connect(lambda e: self._status.setText(f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _populate(self, data: dict):
+        if not data.get("success"):
+            self._status.setText(data.get("message", "The report could not be generated."))
+            self._table.setRowCount(0)
+            return
+
+        rows = data.get("rows", [])
+        self._rows = rows
+        self._table.setRowCount(len(rows))
+        self._export_btn.setEnabled(bool(rows))
+
+        for i, row in enumerate(rows):
+            self._table.setItem(i, 0, _cell(
+                f"{row.get('employee_id', '')} — {row.get('full_name', '')}"))
+            self._table.setItem(i, 1, _cell(row.get("shift", "—"), mono=True, muted=True))
+            self._table.setItem(i, 2, _cell(str(row.get("working_days", 0)),
+                                            mono=True, align_right=True))
+
+            present = _cell(str(row.get("present_days", 0)), mono=True, align_right=True)
+            present.setForeground(QColor(C["success"]))
+            self._table.setItem(i, 3, present)
+
+            absent_days = row.get("absent_days", 0)
+            absent = _cell(str(absent_days), mono=True, align_right=True)
+            absent.setForeground(QColor(C["danger"] if absent_days else C["text_muted"]))
+            dates = row.get("absent_dates") or []
+            if dates:
+                # The count alone prompts "which days?" every single time.
+                absent.setToolTip("Absent on:\n" + "\n".join(dates))
+            self._table.setItem(i, 4, absent)
+
+            late_days = row.get("late_days", 0)
+            late = _cell(str(late_days), mono=True, align_right=True)
+            late.setForeground(QColor(C["warning"] if late_days else C["text_muted"]))
+            self._table.setItem(i, 5, late)
+
+            self._table.setItem(i, 6, _cell(
+                _fmt_minutes(row.get("late_minutes", 0)), mono=True, align_right=True))
+            self._table.setItem(i, 7, _cell(
+                f"{row.get('total_hours', 0):.2f}", mono=True, align_right=True))
+            self._table.setItem(i, 8, _cell(
+                f"{row.get('avg_hours', 0):.2f}", mono=True, align_right=True))
+            self._table.setItem(i, 9, _cell(
+                str(row.get("screenshots", 0)), mono=True, align_right=True))
+
+        span = data.get("days", 0)
+        self._status.setText(
+            f"{len(rows)} employee(s) over {span} day(s), "
+            f"{data.get('from')} to {data.get('to')}.  "
+            f"Weekly offs and holidays are not counted as absences. "
+            f"Hover an absent count to see the dates."
+        )
+
+    def _export(self):
+        if not self._rows:
+            return
+        default = (f"ets-report-{self._from.date().toString('yyyyMMdd')}"
+                   f"-{self._to.date().toString('yyyyMMdd')}.csv")
+        path, _ = QFileDialog.getSaveFileName(self, "Export report", default, "CSV (*.csv)")
+        if not path:
+            return
+
+        headers = ["Employee ID", "Name", "Shift", "Working days", "Present",
+                   "Absent", "Absent dates", "Late days", "Late minutes",
+                   "Total hours", "Avg hours per present day", "Screenshots"]
+        rows = [[
+            r.get("employee_id", ""), r.get("full_name", ""), r.get("shift", ""),
+            r.get("working_days", 0), r.get("present_days", 0), r.get("absent_days", 0),
+            " ".join(r.get("absent_dates") or []),
+            r.get("late_days", 0), r.get("late_minutes", 0),
+            f"{r.get('total_hours', 0):.2f}", f"{r.get('avg_hours', 0):.2f}",
+            r.get("screenshots", 0),
+        ] for r in self._rows]
+
+        if _export_to_csv(path, headers, rows):
+            self._status.setText(f"Exported {len(rows)} row(s) to {path}")
+        else:
+            self._status.setText("Could not write that file.")
+
+
 class _AttendanceTab(QWidget):
 
     def __init__(self):
@@ -3570,6 +3791,7 @@ class AdminConfigPanel(QMainWindow):
         self._employees_tab   = _EmployeesTab()
         self._attendance_tab  = _AttendanceTab()
         self._screenshots_tab = _ScreenshotsTab()
+        self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
 
         # Workers ka intezaar timers band karne ke baad, destroy se pehle.
@@ -3583,6 +3805,7 @@ class AdminConfigPanel(QMainWindow):
             self._employees_tab,
             self._attendance_tab,
             self._screenshots_tab,
+            self._reports_tab,
             self._logs_tab,
         ):
             self.stack.addWidget(tab)
