@@ -128,6 +128,10 @@ ALTER TABLE employees
 ALTER TABLE employees
     ADD COLUMN IF NOT EXISTS password_changed_at  TIMESTAMP WITHOUT TIME ZONE;
 
+-- Late arrival grace period (2026_08_05_late_grace.sql)
+ALTER TABLE employee_configs
+    ADD COLUMN IF NOT EXISTS late_grace_minutes INTEGER NOT NULL DEFAULT 10;
+
 -- Weekly offs and holidays (2026_08_05_work_calendar.sql)
 ALTER TABLE employee_configs
     ADD COLUMN IF NOT EXISTS weekly_offs VARCHAR(20) NOT NULL DEFAULT '';

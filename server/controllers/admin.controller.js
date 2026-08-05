@@ -478,6 +478,7 @@ exports.getConfig = async (req, res) => {
             shift_start:             null,
             shift_end:               null,
             weekly_offs:             "",
+            late_grace_minutes:      10,
         };
 
         // BUG FIX: jis employee ka apna config row nahi hai, uske liye pehle
@@ -529,6 +530,7 @@ exports.saveConfig = async (req, res) => {
         shift_start = undefined,
         shift_end = undefined,
         weekly_offs = undefined,
+        late_grace_minutes = 10,
     } = req.body || {};
 
 
@@ -571,6 +573,11 @@ exports.saveConfig = async (req, res) => {
     // out of sync the aur dono hi requirement se zyada the.
     if (isNaN(idle) || idle < 10 || idle > 150)
         return res.status(400).json({ success: false, message: "idle_threshold_seconds must be 10–150" });
+    // 0 means "flag any lateness at all"; 120 is as generous as a grace
+    // period can be before it stops meaning anything.
+    const grace = parseInt(late_grace_minutes);
+    if (isNaN(grace) || grace < 0 || grace > 120)
+        return res.status(400).json({ success: false, message: "late_grace_minutes must be 0–120" });
 
     try {
         // BUG FIX: shift_start/shift_end pehle bina kisi validation ke seedha
@@ -645,9 +652,10 @@ exports.saveConfig = async (req, res) => {
                          shift_start = COALESCE($8, shift_start),
                          shift_end   = COALESCE($9, shift_end),
                          weekly_offs = COALESCE($10, weekly_offs),
+                         late_grace_minutes = $11,
                          updated_at=NOW()
                      WHERE employee_id IS NULL`,
-                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr]
+                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr, grace]
                 );
             } else {
                 await pool.query(
@@ -655,9 +663,9 @@ exports.saveConfig = async (req, res) => {
                      (employee_id, screenshot_min_minutes, screenshot_max_minutes,
                       screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
                       force_logout, verbose_logging, shift_start, shift_end,
-                      weekly_offs, updated_at)
-                     VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,''),NOW())`,
-                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr]
+                      weekly_offs, late_grace_minutes, updated_at)
+                     VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,''),$11,NOW())`,
+                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr, grace]
                 );
             }
         } else {
@@ -666,8 +674,8 @@ exports.saveConfig = async (req, res) => {
                  (employee_id, screenshot_min_minutes, screenshot_max_minutes,
                   screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
                   force_logout, verbose_logging, shift_start, shift_end,
-                  weekly_offs, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,''),NOW())
+                  weekly_offs, late_grace_minutes, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,''),$12,NOW())
                  ON CONFLICT (employee_id) DO UPDATE SET
                      screenshot_min_minutes = EXCLUDED.screenshot_min_minutes,
                      screenshot_max_minutes = EXCLUDED.screenshot_max_minutes,
@@ -679,8 +687,9 @@ exports.saveConfig = async (req, res) => {
                      shift_start = COALESCE(EXCLUDED.shift_start, employee_configs.shift_start),
                      shift_end   = COALESCE(EXCLUDED.shift_end, employee_configs.shift_end),
                      weekly_offs = COALESCE($11, employee_configs.weekly_offs),
+                     late_grace_minutes = EXCLUDED.late_grace_minutes,
                      updated_at = NOW()`,
-                [employee_id, min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr]
+                [employee_id, min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr, grace]
             );
         }
 

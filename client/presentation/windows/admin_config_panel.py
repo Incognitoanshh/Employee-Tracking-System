@@ -1147,8 +1147,9 @@ class _ConfigTab(QWidget):
         self._cnt_spin = QSpinBox(); self._cnt_spin.setRange(1, 20)   # daily budget
         self._upl_spin = QSpinBox(); self._upl_spin.setRange(1, 240)
         self._idle_spin = QSpinBox(); self._idle_spin.setRange(10, 150)
+        self._grace_spin = QSpinBox(); self._grace_spin.setRange(0, 120)
         for s in (self._min_spin, self._max_spin, self._cnt_spin,
-                  self._upl_spin, self._idle_spin):
+                  self._upl_spin, self._idle_spin, self._grace_spin):
             s.setFixedHeight(36)
             s.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -1214,6 +1215,12 @@ class _ConfigTab(QWidget):
                 self._setting_row("Shift end time",
                                   "For an overnight shift set end before start (22:00 → 06:00).",
                                   self._shift_end, "HH:MM"),
+                self._setting_row("Late after",
+                                  "How much lateness to ignore. Signing in later "
+                                  "than this past the shift start is marked Late "
+                                  "on the Attendance page. 0 flags any lateness "
+                                  "at all.",
+                                  self._grace_spin, "minutes"),
                 self._setting_row("Weekly off",
                                   "No screenshots on these days. An overnight shift "
                                   "belongs to the day it starts — a Saturday 22:00 shift "
@@ -1290,6 +1297,7 @@ class _ConfigTab(QWidget):
         self._cnt_spin.setValue(cfg.get("screenshots_per_day",     10))
         self._upl_spin.setValue(cfg.get("upload_interval_minutes", 60))
         self._idle_spin.setValue(cfg.get("idle_threshold_seconds", 60))
+        self._grace_spin.setValue(cfg.get("late_grace_minutes", 10))
         self._verbose_check.setChecked(bool(cfg.get("verbose_logging", False)))
         self._shift_start.setText(str(cfg.get("shift_start") or "")[:5])
         self._shift_end.setText(str(cfg.get("shift_end") or "")[:5])
@@ -1400,6 +1408,7 @@ class _ConfigTab(QWidget):
             )
             return
         body["weekly_offs"] = offs
+        body["late_grace_minutes"] = self._grace_spin.value()
 
         self._save_btn.setEnabled(False)
         self._save_btn.setText("Saving…")
@@ -2198,17 +2207,20 @@ class _AttendanceTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = _tune_table(QTableWidget(0, 5))
-        self._table.setHorizontalHeaderLabels(["ID", "Employee", "Login Time", "Logout Time", "Total Hours"])
+        self._table = _tune_table(QTableWidget(0, 6))
+        self._table.setHorizontalHeaderLabels(
+            ["ID", "Employee", "Login Time", "Logout Time", "Total Hours", "Status"])
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self._table.setColumnWidth(0, 80)
         self._table.setColumnWidth(1, 110)
         self._table.setColumnWidth(4, 120)
+        self._table.setColumnWidth(5, 130)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         root.addWidget(self._table, 1)
@@ -2284,6 +2296,20 @@ class _AttendanceTab(QWidget):
                 self._format_total_hours(row.get("total_hours")),
                 mono=True, align_right=True))
 
+            # Computed by the server against the shift the employee has now,
+            # so a corrected shift fixes the history with it. Older servers do
+            # not send these fields at all — fall back to a dash rather than
+            # showing every row as on time.
+            status = row.get("status")
+            cell = _cell(row.get("status_label") or "—")
+            cell.setForeground(QColor({
+                "late":          C["danger"],
+                "on_time":       C["success"],
+                "day_off":       C["text_muted"],
+                "outside_shift": C["warning"],
+            }.get(status, C["text_muted"])))
+            self._table.setItem(i, 5, cell)
+
     def _format_total_hours(self, value):
         """Backend may send None, an HH:MM:SS string, or a dict-like
         string such as "{'hours': 0, 'minutes': 6, 'seconds': 0}".
@@ -2334,7 +2360,8 @@ class _AttendanceTab(QWidget):
         def _done(all_rows):
             self._export_btn.setEnabled(True)
             self._export_btn.setText("📥  Export CSV")
-            headers = ["ID", "Employee ID", "Login Time (IST)", "Logout Time (IST)", "Total Hours"]
+            headers = ["ID", "Employee ID", "Login Time (IST)", "Logout Time (IST)",
+                       "Total Hours", "Status", "Late (minutes)"]
             rows = []
             for row in all_rows:
                 rows.append([
@@ -2345,6 +2372,11 @@ class _AttendanceTab(QWidget):
                     _fmt_ts(row.get("login_time")),
                     _fmt_ts(row.get("logout_time"), fallback="ACTIVE"),
                     self._format_total_hours(row.get("total_hours")),
+                    # Payroll reads the CSV, not the screen. Leaving Status out
+                    # of the export would mean the one place lateness actually
+                    # gets used is the one place it is missing.
+                    row.get("status_label") or "",
+                    row.get("late_minutes") if row.get("late_minutes") is not None else "",
                 ])
             if _export_to_csv(path, headers, rows):
                 QMessageBox.information(

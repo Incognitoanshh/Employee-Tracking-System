@@ -1,10 +1,106 @@
 const pool = require("../config/db");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
+const {
+    classifyLogin,
+    isNonWorkingDay,
+    shiftDayOffset,
+    shiftIsoDate,
+    toMinutes,
+} = require("../utils/attendance_status");
 
 // super_admin ko har jagah admin ke barabar (ya usse upar) treat karo.
 // BUG: ye checks pehle sirf "admin" dekhte the, is liye super_admin ko
 // sirf apna hi data dikhta — poori company ka nahi.
 const isElevated = (role) => role === "admin" || role === "super_admin";
+
+/**
+ * Attach an on-time / late / day-off status to attendance rows.
+ *
+ * Everything needed comes from three small queries rather than a join per
+ * row: the page holds at most 50 records covering a handful of employees and
+ * a narrow band of dates, so this is two round trips regardless of page size.
+ *
+ * Any failure leaves the rows exactly as they came out of the table, minus
+ * the helper columns. The attendance page existed for months without this
+ * column and must not start failing to load because a status could not be
+ * worked out.
+ */
+async function annotateAttendance(rows) {
+    if (rows.length === 0) return rows;
+
+    const strip = (row) => {
+        const { ist_day, ist_minutes, day_first_login, ...rest } = row;
+        return rest;
+    };
+
+    try {
+        const employeeIds = [...new Set(rows.map((r) => r.employee_id))];
+
+        const configResult = await pool.query(
+            `SELECT employee_id, shift_start, shift_end, weekly_offs, late_grace_minutes
+               FROM employee_configs
+              WHERE employee_id = ANY($1) OR employee_id IS NULL`,
+            [employeeIds]
+        );
+        const global = configResult.rows.find((r) => r.employee_id === null) || {};
+        const byEmployee = new Map(
+            configResult.rows
+                .filter((r) => r.employee_id !== null)
+                .map((r) => [r.employee_id, r])
+        );
+
+        // A day either side of the range covers overnight shifts, whose
+        // status is decided against the previous day.
+        const days = rows.map((r) => r.ist_day).filter(Boolean).sort();
+        const holidayResult = await pool.query(
+            `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS d
+               FROM holidays
+              WHERE holiday_date BETWEEN $1::date - 1 AND $2::date + 1`,
+            [days[0], days[days.length - 1]]
+        );
+        const holidays = new Set(holidayResult.rows.map((r) => r.d));
+
+        return rows.map((row) => {
+            const config = byEmployee.get(row.employee_id) || global;
+            const shiftStart = config.shift_start ? String(config.shift_start) : null;
+            const shiftEnd   = config.shift_end   ? String(config.shift_end)   : null;
+
+            // A reconnect mid-day is not an arrival.
+            const isFirst = row.day_first_login
+                && String(row.day_first_login) === String(row.login_time);
+            if (!isFirst) {
+                return { ...strip(row), status: "reconnect", status_label: "—", late_minutes: null };
+            }
+
+            const loginMinutes = Number(row.ist_minutes);
+            const offset = shiftDayOffset(
+                loginMinutes,
+                toMinutes(shiftStart) ?? 0,
+                toMinutes(shiftEnd) ?? 0
+            );
+            const shiftDay = offset === 0 ? row.ist_day : shiftIsoDate(row.ist_day, offset);
+
+            const verdict = classifyLogin({
+                loginMinutes,
+                shiftStart,
+                shiftEnd,
+                graceMinutes: config.late_grace_minutes ?? global.late_grace_minutes ?? 10,
+                isDayOff: isNonWorkingDay(shiftDay, config.weekly_offs ?? global.weekly_offs, holidays),
+            });
+
+            return {
+                ...strip(row),
+                status:       verdict.status,
+                status_label: verdict.label,
+                late_minutes: verdict.late_minutes,
+            };
+        });
+
+    } catch (error) {
+        console.error("[attendance] status annotation failed:", error.message);
+        return rows.map(strip);
+    }
+}
 
 
 exports.getAttendance = async (req, res) => {
@@ -42,7 +138,21 @@ exports.getAttendance = async (req, res) => {
         const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
         const result = await pool.query(
-            `SELECT id, employee_id, login_time, logout_time, total_hours
+            `SELECT id, employee_id, login_time, logout_time, total_hours,
+                    ${istDate("login_time")} ::text                    AS ist_day,
+                    EXTRACT(HOUR   FROM (login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata') * 60
+                  + EXTRACT(MINUTE FROM (login_time AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
+                                                                       AS ist_minutes,
+                    -- Only the FIRST sign-in of a day can be late. Someone who
+                    -- reconnects at 14:00 after a dropped session has not
+                    -- arrived five hours late, and flagging it that way would
+                    -- make the column worthless within a day.
+                    --
+                    -- The window runs over the filtered set before LIMIT, so
+                    -- this stays correct across pagination.
+                    MIN(login_time) OVER (
+                        PARTITION BY employee_id, ${istDate("login_time")}
+                    )                                                  AS day_first_login
              FROM attendance ${where}
              ORDER BY id DESC
              LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -53,9 +163,11 @@ exports.getAttendance = async (req, res) => {
             `SELECT COUNT(*) FROM attendance ${where}`, values
         );
 
+        const data = await annotateAttendance(result.rows);
+
         return res.json({
             success: true,
-            data:    result.rows,
+            data,
             total:   Number(countResult.rows[0].count),
             page:    Number(page),
         });
