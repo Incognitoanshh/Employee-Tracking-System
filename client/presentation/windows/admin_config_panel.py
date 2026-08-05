@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QDialog,
     QDialogButtonBox,
-    QHeaderView
+    QHeaderView,
+    QSizePolicy
 )
 
 from client.application.managers.session_manager import SessionManager
@@ -893,6 +894,13 @@ class _ConfigTab(QWidget):
 
         if isinstance(widget, QCheckBox):
             widget.setFixedWidth(24)
+        elif widget.objectName() == "cfgWeekly":
+            # Seven labelled checkboxes need their natural width. Forcing the
+            # 104px used for spin boxes squeezed them into an unreadable strip
+            # with no visible day names — the admin could not tell which day
+            # was ticked, or that one was ticked at all.
+            widget.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                 QSizePolicy.Policy.Fixed)
         else:
             widget.setFixedWidth(104)
         f_lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
