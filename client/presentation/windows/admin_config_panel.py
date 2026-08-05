@@ -2710,6 +2710,19 @@ class _EmployeesTab(QWidget):
                 tip="" if can_force else "The super admin cannot be force logged out.",
             )
 
+            # Reset password — same rule as any other write on the account
+            # (`can_config`), which is what the server enforces too. An admin
+            # resetting another admin's password would be a way to become
+            # them, so the server refuses it and the menu greys it out.
+            add_action(
+                "🔑  Reset password",
+                lambda _=False, e=emp: self._reset_password(e),
+                enabled=can_config,
+                tip="" if can_config else (
+                    "Only a super admin can manage this account." if tgt_super
+                    else "Admins cannot modify other admin accounts."),
+            )
+
             # Role management — sirf super admin
             if i_am_super and not is_self:
                 menu.addSeparator()
@@ -2779,6 +2792,55 @@ class _EmployeesTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
         
+    def _reset_password(self, emp: dict):
+        emp_id   = emp.get("employee_id")
+        username = emp.get("username", emp_id)
+        if not emp_id:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Reset Password",
+            f"Reset the password for {username}?\n\n"
+            "They will be signed out on every device, and a temporary "
+            "password will be shown here once. They must choose their own "
+            "the next time they sign in.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        def show(data: dict):
+            if not data.get("success"):
+                QMessageBox.warning(
+                    self, "Reset failed",
+                    data.get("message", "The password could not be reset."),
+                )
+                return
+
+            temporary = data.get("temporary_password", "")
+            # Shown exactly once — the server stores only the bcrypt hash,
+            # so there is no way to look this up again afterwards.
+            box = QMessageBox(self)
+            box.setWindowTitle("Password reset")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(f"Temporary password for {username}")
+            box.setInformativeText(
+                f"{temporary}\n\n"
+                "Give this to them directly. It is shown only now and cannot "
+                "be recovered later. They will be asked to choose their own "
+                "password as soon as they sign in with it."
+            )
+            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            box.exec()
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/employees/{emp_id}/password", {})
+        w.result.connect(show)
+        w.error.connect(lambda e: QMessageBox.warning(
+            self, "Reset failed", f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
     def _toggle_verbose(self, emp: dict):
         emp_id = emp.get("employee_id")
         if not emp_id:
@@ -2992,6 +3054,7 @@ class _Sidebar(QFrame):
         self.setObjectName("sidebar")
         self.setFixedWidth(248)
         self.logout_btn: QPushButton | None = None
+        self.password_btn: QPushButton | None = None
         self._user_searched = False
         self._build()
 
@@ -3097,6 +3160,11 @@ class _Sidebar(QFrame):
         role_row.addLayout(role_col)
         role_row.addStretch()
         f_lay.addLayout(role_row)
+
+        # Admins are accounts too — before this there was no way for one to
+        # change their own password anywhere in the app.
+        self.password_btn = _btn("🔑  Change Password", variant="secondary", height=34)
+        f_lay.addWidget(self.password_btn)
 
         self.logout_btn = _btn("🔒  Logout", variant="danger", height=38)
         f_lay.addWidget(self.logout_btn)
@@ -3329,6 +3397,7 @@ class AdminConfigPanel(QMainWindow):
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
         self.sidebar.logout_btn.clicked.connect(self.logout)
+        self.sidebar.password_btn.clicked.connect(self._change_own_password)
         self._on_page_changed(0)
         self.scheduler = SchedulerService()
         self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
@@ -3570,6 +3639,18 @@ class AdminConfigPanel(QMainWindow):
                         w.wait(300)
                 except Exception:
                     pass
+
+    def _change_own_password(self):
+        from client.presentation.windows.change_password_dialog import (
+            ChangePasswordDialog,
+        )
+        dialog = ChangePasswordDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            QMessageBox.information(
+                self, "Password changed",
+                "Your password has been changed.\n\n"
+                "Any other device you were signed in on has been signed out.",
+            )
 
     def logout(self):
         from client.application.managers.session_manager import SessionManager

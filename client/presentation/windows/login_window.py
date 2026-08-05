@@ -9,12 +9,14 @@ from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
     QSpacerItem,
+    QDialog,
 )
 
 from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.services.logger_service import LoggerService
 from client.presentation.windows.base_window import BaseWindow
+from client.presentation.windows.change_password_dialog import ChangePasswordDialog
 from client.presentation.windows.employee_panel import EmployeePanel
 from client.presentation.windows.admin_config_panel import AdminConfigPanel
 from client.application.services.auth_service import AuthService
@@ -368,6 +370,24 @@ class LoginWindow(BaseWindow):
             post.start()
 
             role = result.get("role", "employee")
+
+            # An admin has issued a temporary password. Replace it before the
+            # panel opens — a temporary password that reaches the desktop is
+            # one that stays in use, and it was handed over in the open.
+            if result.get("must_change_password"):
+                dialog = ChangePasswordDialog(self, forced=True)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    # The dialog cannot be dismissed, so this only happens if
+                    # it failed to open at all. Do not fall through into the
+                    # panel still holding the temporary password.
+                    SessionManager.clear_session()
+                    self.status_label.setStyleSheet(
+                        "color: #f59e0b; font-size: 13px; background: transparent;"
+                    )
+                    self.status_label.setText("⚠  You must set a new password to continue.")
+                    self.login_button.setEnabled(True)
+                    self.login_button.setText("Sign In")
+                    return
 
             if role in ("admin", "super_admin"):
                 self.next_window = AdminConfigPanel()

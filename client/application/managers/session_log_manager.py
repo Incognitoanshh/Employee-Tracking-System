@@ -87,6 +87,37 @@ class SessionLogManager:
         conn.close()
 
     @staticmethod
+    def update_active_token():
+        """
+        Rewrite the stored token for the open session from SessionManager.
+
+        The token saved at login is what AutoLoginManager presents on the
+        next app start. Changing a password issues a new token and ends
+        every session tied to the old one, so without this the stored copy
+        is dead the moment the change succeeds: the app keeps working until
+        it is closed, then silently fails to auto-login and drops the
+        employee at the sign-in screen with no explanation.
+        """
+        if not SessionManager.employee_id or not SessionManager.auth_token:
+            return
+
+        conn = Database.connect()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            UPDATE sessions
+            SET auth_token = ?
+            WHERE employee_id = ? AND status = 'ACTIVE'
+            """,
+            (
+                CryptoEngine.encrypt_token(SessionManager.auth_token),
+                SessionManager.employee_id,
+            )
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
     def end_session():
 
         conn = Database.connect()
