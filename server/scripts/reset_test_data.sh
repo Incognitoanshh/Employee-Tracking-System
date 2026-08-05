@@ -21,8 +21,23 @@
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-DB_NAME="${DB_NAME:-ets}"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Read the database name from the app's own .env, exactly as backup.sh,
+# restore_test.sh and purge_screenshots.sh do.
+#
+# BUG this fixes: this script alone hardcoded a default of "ets". The real
+# database is named something else, so every psql call failed with
+# `database "ets" does not exist`. The counts printed empty, the backup
+# step failed, and `set -e` aborted the run — after the operator had
+# already typed DELETE. Nothing was deleted, which is the one thing that
+# went right, but the script was unusable and looked like the database was
+# missing.
+if [ ! -f "$APP_DIR/.env" ]; then
+    echo "ERROR: $APP_DIR/.env not found — cannot determine the database name"
+    exit 1
+fi
+set -a; . "$APP_DIR/.env"; set +a
+: "${DB_NAME:?DB_NAME missing from .env}"
 UPLOAD_DIR="$APP_DIR/uploads/screenshots"
 BACKUP_DIR="$HOME/ets-backups"
 STAMP="$(date +%Y%m%d-%H%M%S)"
