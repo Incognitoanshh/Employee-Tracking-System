@@ -853,6 +853,7 @@ class _ConfigTab(QWidget):
         self._workers:   list       = []
         self._build_ui()
         self._load_employees()
+        self._refresh_holidays()
 
     def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
         """Ek setting ki row — koi divider nahi, sirf spacing aur alignment."""
@@ -946,6 +947,139 @@ class _ConfigTab(QWidget):
             lay.addWidget(row)
         return card
 
+    # ── Holidays ─────────────────────────────────────────────────────────
+    #
+    # Company-wide, unlike everything else on this page, which is why it
+    # says so on the card. Selecting an employee above does not scope it —
+    # a public holiday is a property of the calendar, not of a person.
+    def _build_holidays_section(self) -> QFrame:
+        self._holiday_date = QDateEdit()
+        self._holiday_date.setCalendarPopup(True)
+        self._holiday_date.setDisplayFormat("dd MMM yyyy")
+        self._holiday_date.setDate(QDate.currentDate())
+        self._holiday_date.setFixedHeight(36)
+
+        self._holiday_name = QLineEdit()
+        self._holiday_name.setPlaceholderText("Name, for example Diwali")
+        self._holiday_name.setFixedHeight(36)
+        self._holiday_name.setMaxLength(120)
+        self._holiday_name.returnPressed.connect(self._add_holiday)
+
+        add_btn = _btn("＋  Add", variant="primary", height=36)
+        add_btn.clicked.connect(self._add_holiday)
+
+        entry = QWidget()
+        entry.setObjectName("holEntry")
+        entry.setStyleSheet("QWidget#holEntry { background: transparent; }")
+        entry_lay = QHBoxLayout(entry)
+        entry_lay.setContentsMargins(0, 0, 0, 0)
+        entry_lay.setSpacing(10)
+        entry_lay.addWidget(self._holiday_date, 0)
+        entry_lay.addWidget(self._holiday_name, 1)
+        entry_lay.addWidget(add_btn, 0)
+
+        self._holiday_list = QWidget()
+        self._holiday_list.setObjectName("holList")
+        self._holiday_list.setStyleSheet("QWidget#holList { background: transparent; }")
+        self._holiday_list_lay = QVBoxLayout(self._holiday_list)
+        self._holiday_list_lay.setContentsMargins(0, 6, 0, 0)
+        self._holiday_list_lay.setSpacing(4)
+
+        self._holiday_status = QLabel("")
+        self._holiday_status.setWordWrap(True)
+        self._holiday_status.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+        )
+
+        card = self._build_section(
+            "🎌", "Holidays  ·  applies to everyone",
+            "No screenshots on these dates, whichever employee is selected above.",
+            [entry, self._holiday_list, self._holiday_status],
+        )
+        return card
+
+    def _refresh_holidays(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/holidays")
+        w.result.connect(self._populate_holidays)
+        w.error.connect(lambda e: self._holiday_status.setText(f"Could not load holidays: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _populate_holidays(self, data: dict):
+        while self._holiday_list_lay.count():
+            item = self._holiday_list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        rows = data.get("holidays", []) if data.get("success") else []
+        if not rows:
+            self._holiday_status.setText("No holidays set.")
+            return
+        self._holiday_status.setText(f"{len(rows)} holiday(s) set.")
+
+        for row in rows:
+            iso = str(row.get("holiday_date", ""))
+            line = QWidget()
+            line.setObjectName("holRow")
+            line.setStyleSheet("QWidget#holRow { background: transparent; }")
+            line_lay = QHBoxLayout(line)
+            line_lay.setContentsMargins(0, 0, 0, 0)
+            line_lay.setSpacing(10)
+
+            pretty = QDate.fromString(iso, "yyyy-MM-dd")
+            when = QLabel(pretty.toString("ddd, dd MMM yyyy") if pretty.isValid() else iso)
+            when.setFixedWidth(160)
+            when.setStyleSheet(
+                f"color:{C['text_primary']}; font-size:12px; font-weight:600;"
+                f"background:transparent;"
+            )
+            name = QLabel(str(row.get("name", "")))
+            name.setStyleSheet(
+                f"color:{C['text_muted']}; font-size:12px; background:transparent;"
+            )
+            remove = _btn("Remove", variant="danger", height=28, width=84)
+            remove.clicked.connect(lambda _=False, d=iso: self._remove_holiday(d))
+
+            line_lay.addWidget(when)
+            line_lay.addWidget(name, 1)
+            line_lay.addWidget(remove)
+            self._holiday_list_lay.addWidget(line)
+
+    def _add_holiday(self):
+        iso = self._holiday_date.date().toString("yyyy-MM-dd")
+        name = self._holiday_name.text().strip()
+        if not name:
+            self._holiday_status.setText("Give the holiday a name before adding it.")
+            self._holiday_name.setFocus()
+            return
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/holidays",
+                        {"holiday_date": iso, "name": name})
+
+        def done(result: dict):
+            if result.get("success"):
+                self._holiday_name.clear()
+                self._refresh_holidays()
+            else:
+                self._holiday_status.setText(
+                    result.get("message", "Could not add that holiday."))
+
+        w.result.connect(done)
+        w.error.connect(lambda e: self._holiday_status.setText(f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _remove_holiday(self, iso: str):
+        w = _DeleteWorker(f"{API_BASE_URL}/admin/holidays/{iso}")
+
+        def done(_result=None):
+            self._refresh_holidays()
+
+        w.result.connect(done)
+        w.error.connect(lambda e: self._holiday_status.setText(f"Could not remove it: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1018,6 +1152,23 @@ class _ConfigTab(QWidget):
             e.setAlignment(Qt.AlignmentFlag.AlignCenter)
             e.setMaxLength(5)
 
+        # Weekly offs — ISO weekday numbers, matching the server and the
+        # client's work_calendar (1 = Monday ... 7 = Sunday).
+        self._weekly_offs = {}
+        weekly_row = QWidget()
+        weekly_row.setObjectName("cfgWeekly")
+        weekly_row.setStyleSheet("QWidget#cfgWeekly { background: transparent; }")
+        weekly_lay = QHBoxLayout(weekly_row)
+        weekly_lay.setContentsMargins(0, 0, 0, 0)
+        weekly_lay.setSpacing(6)
+        for iso, short in ((1, "Mon"), (2, "Tue"), (3, "Wed"), (4, "Thu"),
+                           (5, "Fri"), (6, "Sat"), (7, "Sun")):
+            day = QCheckBox(short)
+            day.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._weekly_offs[iso] = day
+            weekly_lay.addWidget(day)
+        self._weekly_offs_row = weekly_row
+
         # ── Sections ──────────────────────────────────────────────────────
         body.addWidget(self._build_section(
             "📸", "Screenshot Capture",
@@ -1055,7 +1206,14 @@ class _ConfigTab(QWidget):
                 self._setting_row("Shift end time",
                                   "For an overnight shift set end before start (22:00 → 06:00).",
                                   self._shift_end, "HH:MM"),
+                self._setting_row("Weekly off",
+                                  "No screenshots on these days. An overnight shift "
+                                  "belongs to the day it starts — a Saturday 22:00 shift "
+                                  "running into Sunday is still captured.",
+                                  self._weekly_offs_row),
             ]))
+
+        body.addWidget(self._build_holidays_section())
 
         body.addWidget(self._build_section(
             "⚙", "Advanced",
@@ -1127,6 +1285,20 @@ class _ConfigTab(QWidget):
         self._verbose_check.setChecked(bool(cfg.get("verbose_logging", False)))
         self._shift_start.setText(str(cfg.get("shift_start") or "")[:5])
         self._shift_end.setText(str(cfg.get("shift_end") or "")[:5])
+
+        # weekly_offs arrives as ISO weekday numbers in a comma-separated
+        # string ("6,7"). Anything unrecognised leaves the box unticked, so a
+        # value the admin cannot see is never one they can accidentally save.
+        selected = {
+            int(piece.strip())
+            for piece in str(cfg.get("weekly_offs") or "").split(",")
+            if piece.strip().isdigit() and 1 <= int(piece.strip()) <= 7
+        }
+        for iso, box in self._weekly_offs.items():
+            box.blockSignals(True)
+            box.setChecked(iso in selected)
+            box.blockSignals(False)
+
         self._update_scope_banner(bool(cfg.get("inherited")))
 
     def _update_scope_banner(self, inherited: bool = False):
@@ -1206,6 +1378,20 @@ class _ConfigTab(QWidget):
                     return
             body["shift_start"] = shift_start
             body["shift_end"]   = shift_end
+
+        # Always sent, including when empty — that is how an admin clears a
+        # weekly off. Omitting it would leave the previous value in place and
+        # make unticking every box look like it did nothing.
+        offs = sorted(iso for iso, box in self._weekly_offs.items() if box.isChecked())
+        if len(offs) == 7:
+            self._status_label.setText(
+                "❌ Every day cannot be a weekly off — leave at least one working day."
+            )
+            self._status_label.setStyleSheet(
+                f"color:{C['danger']}; font-size:12px; background:transparent;"
+            )
+            return
+        body["weekly_offs"] = offs
 
         self._save_btn.setEnabled(False)
         self._save_btn.setText("Saving…")
