@@ -48,6 +48,9 @@ SHIFT_FORMATS = [
 # (label, IST moment the scheduler sees)
 MOMENTS = [
     ("mid-shift 12:00",        datetime(2026, 8, 4, 12, 0)),
+    # Logging in before the shift used to spend the entire day's budget in
+    # the gap before work started, leaving nothing for the shift itself.
+    ("pre-shift 07:31",        datetime(2026, 8, 4, 7, 31)),
     ("before shift 07:00",     datetime(2026, 8, 4, 7, 0)),
     ("after shift 20:00",      datetime(2026, 8, 4, 20, 0)),
     ("overnight inside 23:00", datetime(2026, 8, 4, 23, 0)),

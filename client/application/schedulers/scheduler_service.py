@@ -118,24 +118,6 @@ class SchedulerService(QObject):
             )
 
 
-        # ── OVERNIGHT (NIGHT SHIFT) NORMALISATION ─────────────────────────
-        #
-        # BUG (production me night-shift employees ko poora blind kar deta
-        # tha): ye adjustment pehle SIRF ISO-parse wali branch ke andar tha.
-        # Lekin config_sync_manager hamesha plain "HH:MM" store karta hai
-        # (wo `start_ist` wali ISO value ko overwrite kar deta hai), aur
-        # `datetime.fromisoformat("22:00")` ValueError deti hai — yaani
-        # asal me HAMESHA neeche wali strptime fallback branch chalti thi,
-        # jisme ye adjustment tha hi nahi.
-        #
-        # Nateeja: 22:00–06:00 shift ka window "aaj 22:00 → aaj 06:00" ban
-        # jaata tha, yaani MINUS 16 ghante. Negative window me koi slot fit
-        # nahi hota, is liye night-shift employee ka ek bhi screenshot
-        # schedule nahi hota tha. Day shift (09:00–18:00) theek chalti thi,
-        # is liye ye kabhi pakda nahi gaya.
-        #
-        # Ab ye dono branches ke BAAD ek hi jagah lagta hai. Jahan end pehle
-        # se start ke aage hai (normal day shift) wahan ye no-op hai.
         # ── OVERNIGHT NORMALISATION ───────────────────────────────────────
         # A shift whose end is not after its start crosses midnight, so the
         # end belongs to the following day. No-op for an ordinary day shift.
@@ -172,9 +154,19 @@ class SchedulerService(QObject):
         day_end = end_of_ist_day(now)
 
         if now < shift_start:
-            # Logged in before the shift starts. Cover until it does; the
-            # rollover then re-plans across the shift itself.
-            window_end = min(shift_start, day_end)
+            # Logged in before the shift starts.
+            #
+            # BUG FIX: this used to end the window AT shift_start, so the
+            # whole day's budget was spent in the gap before work began.
+            # Observed in production: logging in at 07:31 with a 09:00-18:00
+            # shift scheduled all ten captures between 07:33 and 08:51 and
+            # left zero for the nine hours that actually mattered. A
+            # monitoring tool that stops monitoring when the shift starts is
+            # exactly backwards.
+            #
+            # The window now runs to the end of the shift, so the budget is
+            # spread across both the early period and the shift itself.
+            window_end = min(shift_end, day_end)
             label = "pre-shift"
         elif now < shift_end:
             window_end = min(shift_end, day_end)
