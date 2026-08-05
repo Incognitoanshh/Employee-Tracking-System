@@ -5,6 +5,10 @@ const {
     ROLE_SUPER_ADMIN,
     ROLE_ADMIN,
 } = require("../middleware/admin.middleware");
+const {
+    validatePassword,
+    generateTemporaryPassword,
+} = require("../utils/password_policy");
 
 const VALID_ROLES = ["employee", ROLE_ADMIN, ROLE_SUPER_ADMIN];
 
@@ -217,6 +221,14 @@ exports.createEmployee = async (req, res) => {
         });
     }
 
+    // Same rules as a change or a reset. Account creation used to accept any
+    // non-empty string, which would have made it the way around the policy
+    // the other two enforce.
+    const weak = validatePassword(password, { username, employeeId: employee_id });
+    if (weak) {
+        return res.status(400).json({ success: false, message: weak });
+    }
+
     // Kaun kis role ka account bana sakta hai
     const denial = canCreateRole(req.employee?.role, role);
     if (denial) {
@@ -263,6 +275,89 @@ exports.createEmployee = async (req, res) => {
                 message: "An employee with this employee_id or username already exists"
             });
         }
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+/**
+ * An admin issues a new password for someone who cannot sign in.
+ *
+ * There is no email on file for anybody, so there is nothing to send a reset
+ * link to — the admin hands the password over in person, and the account is
+ * marked `must_change_password` so that temporary password is replaced the
+ * moment the employee signs in with it.
+ *
+ * The admin may supply the password or let the server generate a readable
+ * one. Either way it is returned in the response exactly once: the column
+ * only ever holds the bcrypt hash, so this is the sole opportunity to read
+ * it, and there is no way to recover it afterwards.
+ *
+ * Who may reset whom follows the same hierarchy as every other write here
+ * (assertCanManage): an admin can reset employees but not other admins, and
+ * only a super admin can reset an admin. Deliberately unlike forceLogout,
+ * which is looser on purpose.
+ */
+exports.resetPassword = async (req, res) => {
+    const { employee_id } = req.params;
+    const { new_password } = req.body || {};
+
+    if (!employee_id) {
+        return res.status(400).json({ success: false, message: "employee_id required" });
+    }
+    if (!(await assertCanManage(req, res, employee_id))) return;
+
+    try {
+        const target = await pool.query(
+            `SELECT employee_id, username FROM employees WHERE employee_id = $1`,
+            [employee_id]
+        );
+        if (target.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+        const employee = target.rows[0];
+
+        const password = new_password || generateTemporaryPassword();
+        const problem = validatePassword(password, {
+            username:   employee.username,
+            employeeId: employee.employee_id,
+        });
+        if (problem) {
+            return res.status(400).json({ success: false, message: problem });
+        }
+
+        const bcrypt = require("bcryptjs");
+        const hashed = await bcrypt.hash(password, 10);
+
+        await pool.query(
+            `UPDATE employees
+                SET password = $1, must_change_password = true, password_changed_at = NOW()
+              WHERE employee_id = $2`,
+            [hashed, employee_id]
+        );
+
+        // Sign the account out everywhere. Without this, a session already
+        // open on the employee's machine keeps working on the old password,
+        // so a reset issued because an account was compromised would not
+        // actually end the intruder's access.
+        await pool.query(
+            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+            [employee_id]
+        );
+
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [employee_id, `PASSWORD RESET : by ${req.employee?.employee_id || "an admin"}`]
+        ).catch(() => {});
+
+        return res.json({
+            success: true,
+            message: `Password reset for ${employee_id}. They must change it at next login.`,
+            // Shown once in the admin panel and never stored anywhere.
+            temporary_password: password,
+        });
+
+    } catch (err) {
         console.error("[500]", req.method, req.originalUrl, err.message);
         return res.status(500).json({ success: false, message: "Internal server error" });
     }

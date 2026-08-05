@@ -13,6 +13,7 @@ router.delete("/employees/:employee_id", adminCtrl.deleteEmployee);
 
 // Role change — sirf super_admin
 router.post("/employees/:employee_id/role", superAdminOnly, adminCtrl.changeRole);
+router.post("/employees/:employee_id/password", adminCtrl.resetPassword);
 
 // Config
 router.get("/config/:employee_id", adminCtrl.getConfig);   // GET config for one employee or "global"

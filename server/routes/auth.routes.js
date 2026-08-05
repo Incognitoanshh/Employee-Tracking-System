@@ -6,6 +6,7 @@ const router = express.Router();
 const authController = require(
     "../controllers/auth.controller"
 );
+const { verifyToken } = require("../middleware/auth.middleware");
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BUG FIX (production lockout risk):
@@ -93,6 +94,31 @@ router.post(
     "/logout",
     generalLimiter,
     authController.logout
+);
+
+// Changing your own password needs the current one, which makes this
+// endpoint another place to guess it. Keyed on the account rather than the
+// IP for the same reason as login: a whole office shares one public IP, and
+// one person changing their password must not lock out everyone else.
+const passwordChangeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: true,
+    keyGenerator: (req) => `pwd:${req.employee?.employee_id || "unknown"}`,
+    validate: { keyGeneratorIpFallback: false },
+    message: {
+        success: false,
+        message: "Too many password attempts for this account, try after 15 minutes",
+    },
+});
+
+router.post(
+    "/password",
+    verifyToken,
+    passwordChangeLimiter,
+    authController.changePassword
 );
 
 module.exports = router;
