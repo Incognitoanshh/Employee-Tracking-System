@@ -19,6 +19,11 @@ router.post("/employees/:employee_id/password", adminCtrl.resetPassword);
 router.get("/config/:employee_id", adminCtrl.getConfig);   // GET config for one employee or "global"
 router.post("/config",             adminCtrl.saveConfig);   // Save/update config
 router.post("/config/shift",       adminCtrl.saveShift);    // Lightweight shift-only save (no full config payload needed)
+
+// Holidays — company-wide, so any admin may manage them
+router.get("/holidays",                  adminCtrl.getHolidays);
+router.post("/holidays",                 adminCtrl.addHoliday);
+router.delete("/holidays/:holiday_date", adminCtrl.deleteHoliday);
 router.post("/force-logout",       adminCtrl.forceLogout);  // Force logout employee
 router.post("/toggle-verbose-logging", adminCtrl.toggleVerboseLogging);  // Quick per-employee verbose toggle
 

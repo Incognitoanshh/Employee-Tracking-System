@@ -11,6 +11,7 @@ from client.core.time_ist import (
     parse_shift_time,
     ShiftTimeParseError,
 )
+from client.core.work_calendar import day_off_reason
 from client.application.managers.session_manager import SessionManager
 from client.services.settings_service import SettingsService
 from client.services.logger_service import LoggerService
@@ -140,6 +141,27 @@ class SchedulerService(QObject):
             previous_end   = shift_end - timedelta(days=1)
             if previous_start <= now < previous_end:
                 shift_start, shift_end = previous_start, previous_end
+
+        # ── NON-WORKING DAYS ──────────────────────────────────────────────
+        #
+        # Checked against the day the shift STARTS, not against `now`. A
+        # 22:00-06:00 shift beginning on Saturday night runs into Sunday; it
+        # is Saturday's shift and it should be captured normally even when
+        # Sunday is the weekly off. Testing `now` instead would cut that
+        # shift in half at midnight — and only for overnight workers, which
+        # is exactly the kind of fault nobody notices for weeks.
+        #
+        # This sits after the overnight normalisation above so shift_start
+        # is already the real start, including the roll back to yesterday.
+        day_off = day_off_reason(shift_start.date())
+        if day_off:
+            self._scheduled_until = end_of_ist_day(now)
+            LoggerService.log_verbose(
+                f"SchedulerService: {shift_start.strftime('%d %b')} is a non-working "
+                f"day ({day_off}) — no captures scheduled"
+            )
+            self._arm_timers([], now)
+            return
 
         # ── CAPTURE WINDOW — THE SHIFT, AND ONLY THE SHIFT ────────────────
         #
@@ -278,7 +300,7 @@ class SchedulerService(QObject):
         self._config_sync.start()
         LoggerService.log_verbose("SchedulerService: ConfigSync started")
 
-    def _apply_new_config(self, config: dict):
+    def _apply_new_config(self, config: dict, changed_keys: set[str] | None = None):
         """
         Server se naya config aaya — settings update karo.
 
@@ -288,30 +310,31 @@ class SchedulerService(QObject):
         trigger karo. Saath hi, sirf tab reschedule karo jab values
         actually badli hon — warna har poll (5s) pe naya schedule
         generate hoga, chahe server same config hi baar baar bheje.
+
+        `changed_keys` comes from ConfigSyncManager._persist_config, which is
+        the only code that still holds the previous values by the time this
+        runs. This method used to work it out by reading the settings table —
+        but it is called after those settings have already been written, so
+        it compared each new value against itself, found no difference, and
+        skipped every reschedule. A changed Screenshots per day was stored
+        and then ignored until the next midnight rollover or app restart,
+        which is why config edits appeared to need a logout to take effect.
         """
-        min_m  = config.get("screenshot_min_minutes")
-        max_m  = config.get("screenshot_max_minutes")
-        count  = config.get("screenshots_per_day")
+        keys = changed_keys or set()
 
-        old_min   = SettingsService.get_setting("screenshot_min_minutes")
-        old_max   = SettingsService.get_setting("screenshot_max_minutes")
-        old_count = SettingsService.get_setting("screenshots_per_day")
+        # These matter to the schedule: how many captures, how far apart, and
+        # which days are working days at all.
+        changed = bool(keys & {
+            "screenshot_min_minutes",
+            "screenshot_max_minutes",
+            "screenshots_per_day",
+            "weekly_offs",
+            "holidays",
+        })
 
-        # Sirf un fields ko diff karo jo is payload mein actually present hain.
-        # (Partial config aane par missing fields ko false-positive "changed"
-        # na maana jaaye.)
-        changed = (
-            (min_m is not None and str(old_min) != str(min_m))
-            or (max_m is not None and str(old_max) != str(max_m))
-            or (count is not None and str(old_count) != str(count))
-        )
-
-        if min_m is not None:
-            SettingsService.save_setting("screenshot_min_minutes", str(min_m))
-        if max_m is not None:
-            SettingsService.save_setting("screenshot_max_minutes", str(max_m))
-        if count is not None:
-            SettingsService.save_setting("screenshots_per_day", str(count))
+        count = config.get("screenshots_per_day")
+        min_m = config.get("screenshot_min_minutes")
+        max_m = config.get("screenshot_max_minutes")
 
         # Shift timing update karo SessionManager mein bhi
         shift = config.get("shift")

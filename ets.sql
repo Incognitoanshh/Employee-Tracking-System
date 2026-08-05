@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS employee_configs (
     employee_id             VARCHAR(50) UNIQUE,   -- NULL = global default
     screenshot_min_minutes  INTEGER  NOT NULL DEFAULT 3,
     screenshot_max_minutes  INTEGER  NOT NULL DEFAULT 10,
-    screenshot_count        INTEGER  NOT NULL DEFAULT 3,
+    screenshots_per_day     INTEGER  NOT NULL DEFAULT 10,
     upload_interval_minutes INTEGER  NOT NULL DEFAULT 60,
     idle_threshold_seconds  INTEGER  NOT NULL DEFAULT 60,
     force_logout            BOOLEAN  NOT NULL DEFAULT false,
@@ -63,6 +63,30 @@ CREATE TABLE IF NOT EXISTS employee_configs (
     created_at              TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     updated_at              TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
 );
+
+-- screenshots_per_day — was screenshot_count, and meant "per shift".
+--
+-- This has to run BEFORE the global-default INSERT below, which names
+-- screenshots_per_day. On a server still on the old schema the INSERT would
+-- otherwise fail on a column that has not been renamed yet, and ON_ERROR_STOP
+-- would abort the whole file — leaving that database on the old schema with
+-- no sign anything went wrong beyond one line of psql output.
+--
+-- The lines this replaces read `ADD COLUMN IF NOT EXISTS screenshot_count`,
+-- which on an already-migrated database added the OLD column straight back
+-- next to the live one. Nothing read it, which is why nobody would notice.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'employee_configs' AND column_name = 'screenshot_count')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'employee_configs' AND column_name = 'screenshots_per_day')
+    THEN
+        ALTER TABLE employee_configs RENAME COLUMN screenshot_count TO screenshots_per_day;
+    END IF;
+END $$;
+ALTER TABLE employee_configs
+    ADD COLUMN IF NOT EXISTS screenshots_per_day INTEGER NOT NULL DEFAULT 10;
 
 -- Sirf EK global-default row ho sake. Normal UNIQUE constraint yahan kaam
 -- nahi karta: Postgres NULLs ko ek doosre se DISTINCT maanta hai, is liye
@@ -76,9 +100,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS employee_configs_single_global
 -- Global default config row (sirf tab jab pehle se na ho)
 INSERT INTO employee_configs
     (employee_id, screenshot_min_minutes, screenshot_max_minutes,
-     screenshot_count, upload_interval_minutes, idle_threshold_seconds,
+     screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
      force_logout, verbose_logging)
-SELECT NULL, 3, 10, 3, 60, 60, false, false
+SELECT NULL, 3, 10, 10, 60, 60, false, false
 WHERE NOT EXISTS (
     SELECT 1 FROM employee_configs WHERE employee_id IS NULL
 );
@@ -86,8 +110,6 @@ WHERE NOT EXISTS (
 -- ═══════════════════════════════════════════════════════════════
 -- MIGRATION: existing DB pe run karo agar already tables hain
 -- ═══════════════════════════════════════════════════════════════
-ALTER TABLE employee_configs
-    ADD COLUMN IF NOT EXISTS screenshot_count   INTEGER NOT NULL DEFAULT 3;
 ALTER TABLE employee_configs
     ADD COLUMN IF NOT EXISTS verbose_logging    BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE employees
@@ -100,5 +122,21 @@ ALTER TABLE employee_configs ADD COLUMN IF NOT EXISTS shift_end   TIME DEFAULT '
 -- verbose_logging column
 ALTER TABLE employee_configs ADD COLUMN IF NOT EXISTS verbose_logging BOOLEAN NOT NULL DEFAULT false;
 
--- screenshot_count column
-ALTER TABLE employee_configs ADD COLUMN IF NOT EXISTS screenshot_count INTEGER NOT NULL DEFAULT 3;
+-- Password change and reset (2026_08_05_password_management.sql)
+ALTER TABLE employees
+    ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE employees
+    ADD COLUMN IF NOT EXISTS password_changed_at  TIMESTAMP WITHOUT TIME ZONE;
+
+-- Weekly offs and holidays (2026_08_05_work_calendar.sql)
+ALTER TABLE employee_configs
+    ADD COLUMN IF NOT EXISTS weekly_offs VARCHAR(20) NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS holidays (
+    id           SERIAL PRIMARY KEY,
+    holiday_date DATE         NOT NULL UNIQUE,
+    name         VARCHAR(120) NOT NULL,
+    created_by   VARCHAR(50),
+    created_at   TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS holidays_date_idx ON holidays (holiday_date);

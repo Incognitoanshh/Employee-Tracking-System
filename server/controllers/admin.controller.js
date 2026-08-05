@@ -363,6 +363,98 @@ exports.resetPassword = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────────────────────
+//  Holidays — company-wide non-working dates
+//
+//  Kept in their own table rather than in employee_configs because a holiday
+//  belongs to the calendar, not to a person, and the admin needs to list and
+//  remove them one at a time.
+//
+//  The client never calls these. It receives the dates that matter to it
+//  through /config/sync, which sends a window around today rather than the
+//  whole table.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const ISO_DATE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+exports.getHolidays = async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+                    name, created_by
+               FROM holidays
+              ORDER BY holiday_date DESC`
+        );
+        return res.json({ success: true, holidays: result.rows });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+exports.addHoliday = async (req, res) => {
+    const { holiday_date, name } = req.body || {};
+
+    // Validated here rather than left to Postgres: an invalid date would
+    // otherwise come back as a raw type error that leaks the column type and
+    // means nothing to the admin who typed it.
+    if (!ISO_DATE.test(String(holiday_date || ""))) {
+        return res.status(400).json({
+            success: false,
+            message: "holiday_date must be a real date in YYYY-MM-DD format",
+        });
+    }
+    const label = String(name || "").trim();
+    if (!label) {
+        return res.status(400).json({ success: false, message: "A name is required" });
+    }
+    if (label.length > 120) {
+        return res.status(400).json({ success: false, message: "Name must be 120 characters or fewer" });
+    }
+
+    try {
+        await pool.query(
+            `INSERT INTO holidays (holiday_date, name, created_by)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (holiday_date) DO UPDATE
+                 SET name = EXCLUDED.name, created_by = EXCLUDED.created_by`,
+            [holiday_date, label, req.employee?.employee_id || null]
+        );
+        return res.json({ success: true, message: `${holiday_date} saved as ${label}` });
+    } catch (err) {
+        // A date Postgres rejects despite the regex (30 February) lands here.
+        if (err.code === "22008" || err.code === "22007") {
+            return res.status(400).json({ success: false, message: "That is not a real date" });
+        }
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+exports.deleteHoliday = async (req, res) => {
+    const { holiday_date } = req.params;
+
+    if (!ISO_DATE.test(String(holiday_date || ""))) {
+        return res.status(400).json({
+            success: false,
+            message: "holiday_date must be a date in YYYY-MM-DD format",
+        });
+    }
+
+    try {
+        const result = await pool.query(
+            `DELETE FROM holidays WHERE holiday_date = $1`, [holiday_date]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, message: "No holiday on that date" });
+        }
+        return res.json({ success: true, message: `${holiday_date} removed` });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.getConfig = async (req, res) => {
     const { employee_id } = req.params;
     const isGlobal = employee_id === "global";
@@ -385,6 +477,7 @@ exports.getConfig = async (req, res) => {
             verbose_logging:         false,
             shift_start:             null,
             shift_end:               null,
+            weekly_offs:             "",
         };
 
         // BUG FIX: jis employee ka apna config row nahi hai, uske liye pehle
@@ -435,6 +528,7 @@ exports.saveConfig = async (req, res) => {
         verbose_logging = false,
         shift_start = undefined,
         shift_end = undefined,
+        weekly_offs = undefined,
     } = req.body || {};
 
 
@@ -502,6 +596,29 @@ exports.saveConfig = async (req, res) => {
             return text;
         };
 
+        // Weekly offs arrive as ISO weekday numbers (1 = Monday ... 7 =
+        // Sunday), either as an array or already comma-joined. Normalised to
+        // a sorted, de-duplicated string so the value the client diffs
+        // against is stable — '7,1' and '1,7' mean the same thing, and an
+        // unstable ordering would make every sync look like a change and
+        // rebuild the schedule every five seconds.
+        let weeklyOffsStr;
+        if (weekly_offs !== undefined) {
+            const parts = (Array.isArray(weekly_offs)
+                ? weekly_offs
+                : String(weekly_offs).split(","))
+                .map((d) => parseInt(String(d).trim(), 10))
+                .filter((d) => Number.isInteger(d) && d >= 1 && d <= 7);
+            const unique = [...new Set(parts)].sort((a, b) => a - b);
+            if (unique.length === 7) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Every day cannot be a weekly off — at least one working day is required.",
+                });
+            }
+            weeklyOffsStr = unique.join(",");
+        }
+
         let shiftStartStr, shiftEndStr;
         try {
             shiftStartStr = normaliseTime(shift_start, "Shift start time");
@@ -527,18 +644,20 @@ exports.saveConfig = async (req, res) => {
                          verbose_logging=$7,
                          shift_start = COALESCE($8, shift_start),
                          shift_end   = COALESCE($9, shift_end),
+                         weekly_offs = COALESCE($10, weekly_offs),
                          updated_at=NOW()
                      WHERE employee_id IS NULL`,
-                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
+                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr]
                 );
             } else {
                 await pool.query(
                     `INSERT INTO employee_configs
                      (employee_id, screenshot_min_minutes, screenshot_max_minutes,
                       screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
-                      force_logout, verbose_logging, shift_start, shift_end, updated_at)
-                     VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())`,
-                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
+                      force_logout, verbose_logging, shift_start, shift_end,
+                      weekly_offs, updated_at)
+                     VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,''),NOW())`,
+                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr]
                 );
             }
         } else {
@@ -546,8 +665,9 @@ exports.saveConfig = async (req, res) => {
                 `INSERT INTO employee_configs
                  (employee_id, screenshot_min_minutes, screenshot_max_minutes,
                   screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
-                  force_logout, verbose_logging, shift_start, shift_end, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+                  force_logout, verbose_logging, shift_start, shift_end,
+                  weekly_offs, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,''),NOW())
                  ON CONFLICT (employee_id) DO UPDATE SET
                      screenshot_min_minutes = EXCLUDED.screenshot_min_minutes,
                      screenshot_max_minutes = EXCLUDED.screenshot_max_minutes,
@@ -558,8 +678,9 @@ exports.saveConfig = async (req, res) => {
                      verbose_logging = EXCLUDED.verbose_logging,
                      shift_start = COALESCE(EXCLUDED.shift_start, employee_configs.shift_start),
                      shift_end   = COALESCE(EXCLUDED.shift_end, employee_configs.shift_end),
+                     weekly_offs = COALESCE($11, employee_configs.weekly_offs),
                      updated_at = NOW()`,
-                [employee_id, min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
+                [employee_id, min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr]
             );
         }
 
