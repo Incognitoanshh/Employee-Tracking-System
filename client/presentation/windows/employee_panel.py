@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget, QAbstractItemView,
+    QVBoxLayout, QWidget, QAbstractItemView, QDialog,
 )
 
 from client.core.config import API_BASE_URL, STORAGE_DIR, APP_VERSION
@@ -803,8 +803,10 @@ class SettingsPage(QWidget):
         ], button_text="Open Data Folder", button_slot=self._open_folder))
         body.addWidget(self._section("Security", [
             ("Encryption", "enc"), ("Client version", "ver"), ("Platform", "plat"),
-        ], note="Screenshots are encrypted on this device before upload — they are "
-                "never stored or transmitted as plain images."))
+        ], button_text="Change Password", button_slot=self._change_password,
+           note="Screenshots are encrypted on this device before upload — they are "
+                "never stored or transmitted as plain images. Changing your password "
+                "signs you out on every other device."))
         body.addStretch()
 
     def _section(self, title, fields, note="", button_text="", button_slot=None):
@@ -854,6 +856,18 @@ class SettingsPage(QWidget):
             hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
             layout.addWidget(hint)
         return card
+
+    def _change_password(self):
+        from client.presentation.windows.change_password_dialog import (
+            ChangePasswordDialog,
+        )
+        dialog = ChangePasswordDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            QMessageBox.information(
+                self, "Password changed",
+                "Your password has been changed.\n\n"
+                "Any other device you were signed in on has been signed out.",
+            )
 
     def _open_folder(self):
         import subprocess, sys as _sys

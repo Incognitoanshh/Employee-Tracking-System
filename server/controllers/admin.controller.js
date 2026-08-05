@@ -5,6 +5,10 @@ const {
     ROLE_SUPER_ADMIN,
     ROLE_ADMIN,
 } = require("../middleware/admin.middleware");
+const {
+    validatePassword,
+    generateTemporaryPassword,
+} = require("../utils/password_policy");
 
 const VALID_ROLES = ["employee", ROLE_ADMIN, ROLE_SUPER_ADMIN];
 
@@ -217,6 +221,14 @@ exports.createEmployee = async (req, res) => {
         });
     }
 
+    // Same rules as a change or a reset. Account creation used to accept any
+    // non-empty string, which would have made it the way around the policy
+    // the other two enforce.
+    const weak = validatePassword(password, { username, employeeId: employee_id });
+    if (weak) {
+        return res.status(400).json({ success: false, message: weak });
+    }
+
     // Kaun kis role ka account bana sakta hai
     const denial = canCreateRole(req.employee?.role, role);
     if (denial) {
@@ -268,6 +280,181 @@ exports.createEmployee = async (req, res) => {
     }
 };
 
+/**
+ * An admin issues a new password for someone who cannot sign in.
+ *
+ * There is no email on file for anybody, so there is nothing to send a reset
+ * link to — the admin hands the password over in person, and the account is
+ * marked `must_change_password` so that temporary password is replaced the
+ * moment the employee signs in with it.
+ *
+ * The admin may supply the password or let the server generate a readable
+ * one. Either way it is returned in the response exactly once: the column
+ * only ever holds the bcrypt hash, so this is the sole opportunity to read
+ * it, and there is no way to recover it afterwards.
+ *
+ * Who may reset whom follows the same hierarchy as every other write here
+ * (assertCanManage): an admin can reset employees but not other admins, and
+ * only a super admin can reset an admin. Deliberately unlike forceLogout,
+ * which is looser on purpose.
+ */
+exports.resetPassword = async (req, res) => {
+    const { employee_id } = req.params;
+    const { new_password } = req.body || {};
+
+    if (!employee_id) {
+        return res.status(400).json({ success: false, message: "employee_id required" });
+    }
+    if (!(await assertCanManage(req, res, employee_id))) return;
+
+    try {
+        const target = await pool.query(
+            `SELECT employee_id, username FROM employees WHERE employee_id = $1`,
+            [employee_id]
+        );
+        if (target.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+        const employee = target.rows[0];
+
+        const password = new_password || generateTemporaryPassword();
+        const problem = validatePassword(password, {
+            username:   employee.username,
+            employeeId: employee.employee_id,
+        });
+        if (problem) {
+            return res.status(400).json({ success: false, message: problem });
+        }
+
+        const bcrypt = require("bcryptjs");
+        const hashed = await bcrypt.hash(password, 10);
+
+        await pool.query(
+            `UPDATE employees
+                SET password = $1, must_change_password = true, password_changed_at = NOW()
+              WHERE employee_id = $2`,
+            [hashed, employee_id]
+        );
+
+        // Sign the account out everywhere. Without this, a session already
+        // open on the employee's machine keeps working on the old password,
+        // so a reset issued because an account was compromised would not
+        // actually end the intruder's access.
+        await pool.query(
+            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+            [employee_id]
+        );
+
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [employee_id, `PASSWORD RESET : by ${req.employee?.employee_id || "an admin"}`]
+        ).catch(() => {});
+
+        return res.json({
+            success: true,
+            message: `Password reset for ${employee_id}. They must change it at next login.`,
+            // Shown once in the admin panel and never stored anywhere.
+            temporary_password: password,
+        });
+
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Holidays — company-wide non-working dates
+//
+//  Kept in their own table rather than in employee_configs because a holiday
+//  belongs to the calendar, not to a person, and the admin needs to list and
+//  remove them one at a time.
+//
+//  The client never calls these. It receives the dates that matter to it
+//  through /config/sync, which sends a window around today rather than the
+//  whole table.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const ISO_DATE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+exports.getHolidays = async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+                    name, created_by
+               FROM holidays
+              ORDER BY holiday_date DESC`
+        );
+        return res.json({ success: true, holidays: result.rows });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+exports.addHoliday = async (req, res) => {
+    const { holiday_date, name } = req.body || {};
+
+    // Validated here rather than left to Postgres: an invalid date would
+    // otherwise come back as a raw type error that leaks the column type and
+    // means nothing to the admin who typed it.
+    if (!ISO_DATE.test(String(holiday_date || ""))) {
+        return res.status(400).json({
+            success: false,
+            message: "holiday_date must be a real date in YYYY-MM-DD format",
+        });
+    }
+    const label = String(name || "").trim();
+    if (!label) {
+        return res.status(400).json({ success: false, message: "A name is required" });
+    }
+    if (label.length > 120) {
+        return res.status(400).json({ success: false, message: "Name must be 120 characters or fewer" });
+    }
+
+    try {
+        await pool.query(
+            `INSERT INTO holidays (holiday_date, name, created_by)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (holiday_date) DO UPDATE
+                 SET name = EXCLUDED.name, created_by = EXCLUDED.created_by`,
+            [holiday_date, label, req.employee?.employee_id || null]
+        );
+        return res.json({ success: true, message: `${holiday_date} saved as ${label}` });
+    } catch (err) {
+        // A date Postgres rejects despite the regex (30 February) lands here.
+        if (err.code === "22008" || err.code === "22007") {
+            return res.status(400).json({ success: false, message: "That is not a real date" });
+        }
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+exports.deleteHoliday = async (req, res) => {
+    const { holiday_date } = req.params;
+
+    if (!ISO_DATE.test(String(holiday_date || ""))) {
+        return res.status(400).json({
+            success: false,
+            message: "holiday_date must be a date in YYYY-MM-DD format",
+        });
+    }
+
+    try {
+        const result = await pool.query(
+            `DELETE FROM holidays WHERE holiday_date = $1`, [holiday_date]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ success: false, message: "No holiday on that date" });
+        }
+        return res.json({ success: true, message: `${holiday_date} removed` });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.getConfig = async (req, res) => {
     const { employee_id } = req.params;
     const isGlobal = employee_id === "global";
@@ -290,6 +477,8 @@ exports.getConfig = async (req, res) => {
             verbose_logging:         false,
             shift_start:             null,
             shift_end:               null,
+            weekly_offs:             "",
+            late_grace_minutes:      10,
         };
 
         // BUG FIX: jis employee ka apna config row nahi hai, uske liye pehle
@@ -340,6 +529,8 @@ exports.saveConfig = async (req, res) => {
         verbose_logging = false,
         shift_start = undefined,
         shift_end = undefined,
+        weekly_offs = undefined,
+        late_grace_minutes = 10,
     } = req.body || {};
 
 
@@ -382,6 +573,11 @@ exports.saveConfig = async (req, res) => {
     // out of sync the aur dono hi requirement se zyada the.
     if (isNaN(idle) || idle < 10 || idle > 150)
         return res.status(400).json({ success: false, message: "idle_threshold_seconds must be 10–150" });
+    // 0 means "flag any lateness at all"; 120 is as generous as a grace
+    // period can be before it stops meaning anything.
+    const grace = parseInt(late_grace_minutes);
+    if (isNaN(grace) || grace < 0 || grace > 120)
+        return res.status(400).json({ success: false, message: "late_grace_minutes must be 0–120" });
 
     try {
         // BUG FIX: shift_start/shift_end pehle bina kisi validation ke seedha
@@ -406,6 +602,29 @@ exports.saveConfig = async (req, res) => {
             }
             return text;
         };
+
+        // Weekly offs arrive as ISO weekday numbers (1 = Monday ... 7 =
+        // Sunday), either as an array or already comma-joined. Normalised to
+        // a sorted, de-duplicated string so the value the client diffs
+        // against is stable — '7,1' and '1,7' mean the same thing, and an
+        // unstable ordering would make every sync look like a change and
+        // rebuild the schedule every five seconds.
+        let weeklyOffsStr;
+        if (weekly_offs !== undefined) {
+            const parts = (Array.isArray(weekly_offs)
+                ? weekly_offs
+                : String(weekly_offs).split(","))
+                .map((d) => parseInt(String(d).trim(), 10))
+                .filter((d) => Number.isInteger(d) && d >= 1 && d <= 7);
+            const unique = [...new Set(parts)].sort((a, b) => a - b);
+            if (unique.length === 7) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Every day cannot be a weekly off — at least one working day is required.",
+                });
+            }
+            weeklyOffsStr = unique.join(",");
+        }
 
         let shiftStartStr, shiftEndStr;
         try {
@@ -432,18 +651,21 @@ exports.saveConfig = async (req, res) => {
                          verbose_logging=$7,
                          shift_start = COALESCE($8, shift_start),
                          shift_end   = COALESCE($9, shift_end),
+                         weekly_offs = COALESCE($10, weekly_offs),
+                         late_grace_minutes = $11,
                          updated_at=NOW()
                      WHERE employee_id IS NULL`,
-                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
+                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr, grace]
                 );
             } else {
                 await pool.query(
                     `INSERT INTO employee_configs
                      (employee_id, screenshot_min_minutes, screenshot_max_minutes,
                       screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
-                      force_logout, verbose_logging, shift_start, shift_end, updated_at)
-                     VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())`,
-                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
+                      force_logout, verbose_logging, shift_start, shift_end,
+                      weekly_offs, late_grace_minutes, updated_at)
+                     VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,''),$11,NOW())`,
+                    [min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr, grace]
                 );
             }
         } else {
@@ -451,8 +673,9 @@ exports.saveConfig = async (req, res) => {
                 `INSERT INTO employee_configs
                  (employee_id, screenshot_min_minutes, screenshot_max_minutes,
                   screenshots_per_day, upload_interval_minutes, idle_threshold_seconds,
-                  force_logout, verbose_logging, shift_start, shift_end, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+                  force_logout, verbose_logging, shift_start, shift_end,
+                  weekly_offs, late_grace_minutes, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,''),$12,NOW())
                  ON CONFLICT (employee_id) DO UPDATE SET
                      screenshot_min_minutes = EXCLUDED.screenshot_min_minutes,
                      screenshot_max_minutes = EXCLUDED.screenshot_max_minutes,
@@ -463,8 +686,10 @@ exports.saveConfig = async (req, res) => {
                      verbose_logging = EXCLUDED.verbose_logging,
                      shift_start = COALESCE(EXCLUDED.shift_start, employee_configs.shift_start),
                      shift_end   = COALESCE(EXCLUDED.shift_end, employee_configs.shift_end),
+                     weekly_offs = COALESCE($11, employee_configs.weekly_offs),
+                     late_grace_minutes = EXCLUDED.late_grace_minutes,
                      updated_at = NOW()`,
-                [employee_id, min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr]
+                [employee_id, min_ss, max_ss, count, upload, idle, force_logout, verbose_logging, shiftStartStr, shiftEndStr, weeklyOffsStr, grace]
             );
         }
 

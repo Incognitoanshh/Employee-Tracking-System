@@ -184,6 +184,15 @@ process.on("unhandledRejection", (reason) => {
     console.error("UNHANDLED REJECTION:", reason);
 });
 
+// `unref` so this heartbeat never becomes the reason the process stays up.
+// The listening socket already keeps the server alive; without unref an
+// integration test that closes the server would hang here forever instead
+// of exiting.
 setInterval(() => {
     console.log(`[ALIVE] ${new Date().toISOString()}`);
-}, 10000);
+}, 10000).unref();
+
+// Exported so tests can start the real app against a scratch database and
+// shut it down again. Nothing here runs differently when the server is
+// started normally with `node server.js`.
+module.exports = { app, server, pool };

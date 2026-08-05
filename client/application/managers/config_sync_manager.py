@@ -107,10 +107,22 @@ class ConfigSyncManager:
                 # _persist_config() call hota tha aur on_new_config bhi, jo wrong tha.
                 return config
 
-            # Normal flow
-            self._persist_config(config)
+            # Normal flow.
+            #
+            # `_persist_config` reports which stored values actually moved,
+            # and that set is handed to the listener.
+            #
+            # BUG this fixes: the listener used to work out "did anything
+            # change?" by reading the settings table itself — but it ran
+            # AFTER _persist_config had already written the new values there,
+            # so it compared each new value against itself and concluded
+            # nothing had changed. Every reschedule was skipped. Changing
+            # Screenshots per day saved the number and then did nothing with
+            # it until the midnight rollover or the next app start, which is
+            # why config edits looked like they needed a logout to apply.
+            changed = self._persist_config(config)
             if self._on_new_config:
-                self._on_new_config(config)
+                self._on_new_config(config, changed)
             # NOTE: pehle yahan har successful sync (default har 5 min) pe
             # ek "sync OK" heartbeat unconditionally log hoti thi — chahe
             # config me kuch badla ho ya nahi. Lambe time tak app chalte
@@ -134,7 +146,8 @@ class ConfigSyncManager:
         return None
 
     @staticmethod
-    def _persist_config(config: dict) -> None:
+    def _persist_config(config: dict) -> set[str]:
+        """Save the config and return the keys whose stored value changed."""
         field_map = {
             "screenshot_min_minutes":  "screenshot_min_minutes",
             "screenshot_max_minutes":  "screenshot_max_minutes",
@@ -142,11 +155,24 @@ class ConfigSyncManager:
             "upload_interval_minutes": "upload_interval_minutes",
             "idle_threshold_seconds":  "idle_threshold_seconds",
             "verbose_logging":         "verbose_logging",
+            # Non-working days. Absent from the payload when the server could
+            # not read them, in which case the previous values stay — see the
+            # `is not None` guard below. work_calendar.py treats anything it
+            # cannot parse as a working day, so monitoring never switches
+            # itself off because this arrived malformed.
+            "weekly_offs":             "weekly_offs",
+            "holidays":                "holidays",
         }
+        changed: set[str] = set()
         for server_key, db_key in field_map.items():
             value = config.get(server_key)
-            if value is not None:
-                SettingsService.save_setting(db_key, str(value))
+            if value is None:
+                continue
+            # Compare BEFORE writing — this is the only moment the previous
+            # value still exists anywhere.
+            if str(SettingsService.get_setting(db_key, "")) != str(value):
+                changed.add(db_key)
+            SettingsService.save_setting(db_key, str(value))
 
         # shift nested object se bhi kaam karo aur direct fields se bhi
         shift = config.get("shift")
@@ -168,3 +194,5 @@ class ConfigSyncManager:
         SettingsService.save_setting(
             "config_last_synced", _dt.now().strftime("%Y-%m-%d %H:%M:%S")
         )
+
+        return changed

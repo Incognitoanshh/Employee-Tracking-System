@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QDialog,
     QDialogButtonBox,
-    QHeaderView
+    QHeaderView,
+    QSizePolicy
 )
 
 from client.application.managers.session_manager import SessionManager
@@ -92,6 +93,8 @@ PAGES = [
      "subtitle": "Track login, logout times and shift hours."},
     {"key": "screenshots", "icon": "📸", "title": "Screenshots",
      "subtitle": "Browse captured screenshots by employee and date."},
+    {"key": "reports",     "icon": "📈", "title": "Reports",
+     "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
      "subtitle": "Detailed activity history for compliance and review."},
 ]
@@ -497,6 +500,20 @@ def _card(padding: int = 0) -> QFrame:
     return f
 
 
+def _fmt_minutes(total) -> str:
+    """95 -> "1h 35m". Matches the Attendance page's Late column."""
+    try:
+        total = int(total or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if total <= 0:
+        return "—"
+    if total < 60:
+        return f"{total}m"
+    hours, rest = divmod(total, 60)
+    return f"{hours}h {rest}m" if rest else f"{hours}h"
+
+
 def _muted_label(text: str) -> QLabel:
     l = QLabel(text)
     l.setStyleSheet(f"color:{C['text_secondary']}; font-size:12px; font-weight:600; background:transparent;")
@@ -853,6 +870,7 @@ class _ConfigTab(QWidget):
         self._workers:   list       = []
         self._build_ui()
         self._load_employees()
+        self._refresh_holidays()
 
     def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
         """Ek setting ki row — koi divider nahi, sirf spacing aur alignment."""
@@ -892,6 +910,13 @@ class _ConfigTab(QWidget):
 
         if isinstance(widget, QCheckBox):
             widget.setFixedWidth(24)
+        elif widget.objectName() == "cfgWeekly":
+            # Seven labelled checkboxes need their natural width. Forcing the
+            # 104px used for spin boxes squeezed them into an unreadable strip
+            # with no visible day names — the admin could not tell which day
+            # was ticked, or that one was ticked at all.
+            widget.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                 QSizePolicy.Policy.Fixed)
         else:
             widget.setFixedWidth(104)
         f_lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -945,6 +970,139 @@ class _ConfigTab(QWidget):
         for row in rows:
             lay.addWidget(row)
         return card
+
+    # ── Holidays ─────────────────────────────────────────────────────────
+    #
+    # Company-wide, unlike everything else on this page, which is why it
+    # says so on the card. Selecting an employee above does not scope it —
+    # a public holiday is a property of the calendar, not of a person.
+    def _build_holidays_section(self) -> QFrame:
+        self._holiday_date = QDateEdit()
+        self._holiday_date.setCalendarPopup(True)
+        self._holiday_date.setDisplayFormat("dd MMM yyyy")
+        self._holiday_date.setDate(QDate.currentDate())
+        self._holiday_date.setFixedHeight(36)
+
+        self._holiday_name = QLineEdit()
+        self._holiday_name.setPlaceholderText("Name, for example Diwali")
+        self._holiday_name.setFixedHeight(36)
+        self._holiday_name.setMaxLength(120)
+        self._holiday_name.returnPressed.connect(self._add_holiday)
+
+        add_btn = _btn("＋  Add", variant="primary", height=36)
+        add_btn.clicked.connect(self._add_holiday)
+
+        entry = QWidget()
+        entry.setObjectName("holEntry")
+        entry.setStyleSheet("QWidget#holEntry { background: transparent; }")
+        entry_lay = QHBoxLayout(entry)
+        entry_lay.setContentsMargins(0, 0, 0, 0)
+        entry_lay.setSpacing(10)
+        entry_lay.addWidget(self._holiday_date, 0)
+        entry_lay.addWidget(self._holiday_name, 1)
+        entry_lay.addWidget(add_btn, 0)
+
+        self._holiday_list = QWidget()
+        self._holiday_list.setObjectName("holList")
+        self._holiday_list.setStyleSheet("QWidget#holList { background: transparent; }")
+        self._holiday_list_lay = QVBoxLayout(self._holiday_list)
+        self._holiday_list_lay.setContentsMargins(0, 6, 0, 0)
+        self._holiday_list_lay.setSpacing(4)
+
+        self._holiday_status = QLabel("")
+        self._holiday_status.setWordWrap(True)
+        self._holiday_status.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+        )
+
+        card = self._build_section(
+            "🎌", "Holidays  ·  applies to everyone",
+            "No screenshots on these dates, whichever employee is selected above.",
+            [entry, self._holiday_list, self._holiday_status],
+        )
+        return card
+
+    def _refresh_holidays(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/holidays")
+        w.result.connect(self._populate_holidays)
+        w.error.connect(lambda e: self._holiday_status.setText(f"Could not load holidays: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _populate_holidays(self, data: dict):
+        while self._holiday_list_lay.count():
+            item = self._holiday_list_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        rows = data.get("holidays", []) if data.get("success") else []
+        if not rows:
+            self._holiday_status.setText("No holidays set.")
+            return
+        self._holiday_status.setText(f"{len(rows)} holiday(s) set.")
+
+        for row in rows:
+            iso = str(row.get("holiday_date", ""))
+            line = QWidget()
+            line.setObjectName("holRow")
+            line.setStyleSheet("QWidget#holRow { background: transparent; }")
+            line_lay = QHBoxLayout(line)
+            line_lay.setContentsMargins(0, 0, 0, 0)
+            line_lay.setSpacing(10)
+
+            pretty = QDate.fromString(iso, "yyyy-MM-dd")
+            when = QLabel(pretty.toString("ddd, dd MMM yyyy") if pretty.isValid() else iso)
+            when.setFixedWidth(160)
+            when.setStyleSheet(
+                f"color:{C['text_primary']}; font-size:12px; font-weight:600;"
+                f"background:transparent;"
+            )
+            name = QLabel(str(row.get("name", "")))
+            name.setStyleSheet(
+                f"color:{C['text_muted']}; font-size:12px; background:transparent;"
+            )
+            remove = _btn("Remove", variant="danger", height=28, width=84)
+            remove.clicked.connect(lambda _=False, d=iso: self._remove_holiday(d))
+
+            line_lay.addWidget(when)
+            line_lay.addWidget(name, 1)
+            line_lay.addWidget(remove)
+            self._holiday_list_lay.addWidget(line)
+
+    def _add_holiday(self):
+        iso = self._holiday_date.date().toString("yyyy-MM-dd")
+        name = self._holiday_name.text().strip()
+        if not name:
+            self._holiday_status.setText("Give the holiday a name before adding it.")
+            self._holiday_name.setFocus()
+            return
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/holidays",
+                        {"holiday_date": iso, "name": name})
+
+        def done(result: dict):
+            if result.get("success"):
+                self._holiday_name.clear()
+                self._refresh_holidays()
+            else:
+                self._holiday_status.setText(
+                    result.get("message", "Could not add that holiday."))
+
+        w.result.connect(done)
+        w.error.connect(lambda e: self._holiday_status.setText(f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _remove_holiday(self, iso: str):
+        w = _DeleteWorker(f"{API_BASE_URL}/admin/holidays/{iso}")
+
+        def done(_result=None):
+            self._refresh_holidays()
+
+        w.result.connect(done)
+        w.error.connect(lambda e: self._holiday_status.setText(f"Could not remove it: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1005,8 +1163,9 @@ class _ConfigTab(QWidget):
         self._cnt_spin = QSpinBox(); self._cnt_spin.setRange(1, 20)   # daily budget
         self._upl_spin = QSpinBox(); self._upl_spin.setRange(1, 240)
         self._idle_spin = QSpinBox(); self._idle_spin.setRange(10, 150)
+        self._grace_spin = QSpinBox(); self._grace_spin.setRange(0, 120)
         for s in (self._min_spin, self._max_spin, self._cnt_spin,
-                  self._upl_spin, self._idle_spin):
+                  self._upl_spin, self._idle_spin, self._grace_spin):
             s.setFixedHeight(36)
             s.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -1017,6 +1176,23 @@ class _ConfigTab(QWidget):
             e.setFixedHeight(36)
             e.setAlignment(Qt.AlignmentFlag.AlignCenter)
             e.setMaxLength(5)
+
+        # Weekly offs — ISO weekday numbers, matching the server and the
+        # client's work_calendar (1 = Monday ... 7 = Sunday).
+        self._weekly_offs = {}
+        weekly_row = QWidget()
+        weekly_row.setObjectName("cfgWeekly")
+        weekly_row.setStyleSheet("QWidget#cfgWeekly { background: transparent; }")
+        weekly_lay = QHBoxLayout(weekly_row)
+        weekly_lay.setContentsMargins(0, 0, 0, 0)
+        weekly_lay.setSpacing(6)
+        for iso, short in ((1, "Mon"), (2, "Tue"), (3, "Wed"), (4, "Thu"),
+                           (5, "Fri"), (6, "Sat"), (7, "Sun")):
+            day = QCheckBox(short)
+            day.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._weekly_offs[iso] = day
+            weekly_lay.addWidget(day)
+        self._weekly_offs_row = weekly_row
 
         # ── Sections ──────────────────────────────────────────────────────
         body.addWidget(self._build_section(
@@ -1055,7 +1231,20 @@ class _ConfigTab(QWidget):
                 self._setting_row("Shift end time",
                                   "For an overnight shift set end before start (22:00 → 06:00).",
                                   self._shift_end, "HH:MM"),
+                self._setting_row("Late after",
+                                  "How much lateness to ignore. Signing in later "
+                                  "than this past the shift start is marked Late "
+                                  "on the Attendance page. 0 flags any lateness "
+                                  "at all.",
+                                  self._grace_spin, "minutes"),
+                self._setting_row("Weekly off",
+                                  "No screenshots on these days. An overnight shift "
+                                  "belongs to the day it starts — a Saturday 22:00 shift "
+                                  "running into Sunday is still captured.",
+                                  self._weekly_offs_row),
             ]))
+
+        body.addWidget(self._build_holidays_section())
 
         body.addWidget(self._build_section(
             "⚙", "Advanced",
@@ -1124,9 +1313,24 @@ class _ConfigTab(QWidget):
         self._cnt_spin.setValue(cfg.get("screenshots_per_day",     10))
         self._upl_spin.setValue(cfg.get("upload_interval_minutes", 60))
         self._idle_spin.setValue(cfg.get("idle_threshold_seconds", 60))
+        self._grace_spin.setValue(cfg.get("late_grace_minutes", 10))
         self._verbose_check.setChecked(bool(cfg.get("verbose_logging", False)))
         self._shift_start.setText(str(cfg.get("shift_start") or "")[:5])
         self._shift_end.setText(str(cfg.get("shift_end") or "")[:5])
+
+        # weekly_offs arrives as ISO weekday numbers in a comma-separated
+        # string ("6,7"). Anything unrecognised leaves the box unticked, so a
+        # value the admin cannot see is never one they can accidentally save.
+        selected = {
+            int(piece.strip())
+            for piece in str(cfg.get("weekly_offs") or "").split(",")
+            if piece.strip().isdigit() and 1 <= int(piece.strip()) <= 7
+        }
+        for iso, box in self._weekly_offs.items():
+            box.blockSignals(True)
+            box.setChecked(iso in selected)
+            box.blockSignals(False)
+
         self._update_scope_banner(bool(cfg.get("inherited")))
 
     def _update_scope_banner(self, inherited: bool = False):
@@ -1206,6 +1410,21 @@ class _ConfigTab(QWidget):
                     return
             body["shift_start"] = shift_start
             body["shift_end"]   = shift_end
+
+        # Always sent, including when empty — that is how an admin clears a
+        # weekly off. Omitting it would leave the previous value in place and
+        # make unticking every box look like it did nothing.
+        offs = sorted(iso for iso, box in self._weekly_offs.items() if box.isChecked())
+        if len(offs) == 7:
+            self._status_label.setText(
+                "❌ Every day cannot be a weekly off — leave at least one working day."
+            )
+            self._status_label.setStyleSheet(
+                f"color:{C['danger']}; font-size:12px; background:transparent;"
+            )
+            return
+        body["weekly_offs"] = offs
+        body["late_grace_minutes"] = self._grace_spin.value()
 
         self._save_btn.setEnabled(False)
         self._save_btn.setText("Saving…")
@@ -1947,6 +2166,211 @@ class _LogsTab(QWidget):
     def _next_page(self): self._load(self._page + 1)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  Reports Tab
+#
+#  Every figure here already existed in the database and had never been added
+#  up. The Attendance page answers "what happened on this row"; this answers
+#  "how did this person do over the month", which is the question payroll
+#  actually asks.
+#
+#  Absence lives here rather than on the Attendance page for a structural
+#  reason: an absence is the absence of a row, so it only exists once you walk
+#  a date range. This page has a date range; that one has pagination.
+# ──────────────────────────────────────────────────────────────────────────────
+class _ReportsTab(QWidget):
+
+    COLUMNS = [
+        ("Employee",    150), ("Shift",       110), ("Working",  80),
+        ("Present",      80), ("Absent",       80), ("Late",     70),
+        ("Late time",   100), ("Total hours", 100), ("Avg/day",  90),
+        ("Screenshots", 100),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self._workers: list = []
+        self._rows: list[dict] = []
+        self._build_ui()
+        self._load_employees()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+
+        toolbar = _card()
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(16, 12, 16, 12)
+        bar.setSpacing(12)
+
+        today = QDate.currentDate()
+        self._from = QDateEdit(); self._from.setCalendarPopup(True)
+        self._from.setDisplayFormat("dd MMM yyyy")
+        # Opens on the current month, which is what a report is asked for
+        # nine times out of ten.
+        self._from.setDate(QDate(today.year(), today.month(), 1))
+        self._to = QDateEdit(); self._to.setCalendarPopup(True)
+        self._to.setDisplayFormat("dd MMM yyyy")
+        self._to.setDate(today)
+        for box in (self._from, self._to):
+            box.setFixedHeight(36)
+
+        self._emp = QComboBox()
+        self._emp.setFixedHeight(36)
+        self._emp.setMinimumWidth(200)
+        self._emp.addItem("All employees", "all")
+
+        run = _btn("📊  Generate", variant="primary", height=36)
+        run.clicked.connect(self.refresh)
+        self._export_btn = _btn("⬇  Export CSV", variant="secondary", height=36)
+        self._export_btn.clicked.connect(self._export)
+        self._export_btn.setEnabled(False)
+
+        bar.addWidget(_muted_label("From"))
+        bar.addWidget(self._from)
+        bar.addWidget(_muted_label("To"))
+        bar.addWidget(self._to)
+        bar.addWidget(_muted_label("Employee"))
+        bar.addWidget(self._emp)
+        bar.addWidget(run)
+        bar.addWidget(self._export_btn)
+        bar.addStretch()
+        root.addWidget(toolbar)
+
+        self._table = _tune_table(QTableWidget(0, len(self.COLUMNS)))
+        self._table.setHorizontalHeaderLabels([c[0] for c in self.COLUMNS])
+        self._table.horizontalHeader().setStretchLastSection(False)
+        for i, (_, width) in enumerate(self.COLUMNS):
+            mode = (QHeaderView.ResizeMode.Stretch if i == 0
+                    else QHeaderView.ResizeMode.Fixed)
+            self._table.horizontalHeader().setSectionResizeMode(i, mode)
+            if i:
+                self._table.setColumnWidth(i, width)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        root.addWidget(self._table, 1)
+
+        self._status = QLabel("Choose a range and press Generate.")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
+        )
+        root.addWidget(self._status)
+
+    def _load_employees(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/employees", {"limit": 200})
+
+        def fill(data: dict):
+            for emp in data.get("employees", data.get("data", [])) or []:
+                if emp.get("role") == "super_admin":
+                    continue
+                label = f"{emp.get('employee_id')} — {emp.get('username', '')}"
+                self._emp.addItem(label, emp.get("employee_id"))
+
+        w.result.connect(fill)
+        w.error.connect(lambda _e: None)
+        _track_worker(self._workers, w)
+        w.start()
+
+    def refresh(self):
+        params = {
+            "from": self._from.date().toString("yyyy-MM-dd"),
+            "to":   self._to.date().toString("yyyy-MM-dd"),
+            "employee_id": self._emp.currentData() or "all",
+        }
+        if params["from"] > params["to"]:
+            self._status.setText("The From date is after the To date.")
+            return
+
+        self._status.setText("Generating…")
+        self._export_btn.setEnabled(False)
+        w = _FetchWorker(f"{API_BASE_URL}/admin/reports/attendance", params)
+        w.result.connect(self._populate)
+        w.error.connect(lambda e: self._status.setText(f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _populate(self, data: dict):
+        if not data.get("success"):
+            self._status.setText(data.get("message", "The report could not be generated."))
+            self._table.setRowCount(0)
+            return
+
+        rows = data.get("rows", [])
+        self._rows = rows
+        self._table.setRowCount(len(rows))
+        self._export_btn.setEnabled(bool(rows))
+
+        for i, row in enumerate(rows):
+            self._table.setItem(i, 0, _cell(
+                f"{row.get('employee_id', '')} — {row.get('full_name', '')}"))
+            self._table.setItem(i, 1, _cell(row.get("shift", "—"), mono=True, muted=True))
+            self._table.setItem(i, 2, _cell(str(row.get("working_days", 0)),
+                                            mono=True, align_right=True))
+
+            present = _cell(str(row.get("present_days", 0)), mono=True, align_right=True)
+            present.setForeground(QColor(C["success"]))
+            self._table.setItem(i, 3, present)
+
+            absent_days = row.get("absent_days", 0)
+            absent = _cell(str(absent_days), mono=True, align_right=True)
+            absent.setForeground(QColor(C["danger"] if absent_days else C["text_muted"]))
+            dates = row.get("absent_dates") or []
+            if dates:
+                # The count alone prompts "which days?" every single time.
+                absent.setToolTip("Absent on:\n" + "\n".join(dates))
+            self._table.setItem(i, 4, absent)
+
+            late_days = row.get("late_days", 0)
+            late = _cell(str(late_days), mono=True, align_right=True)
+            late.setForeground(QColor(C["warning"] if late_days else C["text_muted"]))
+            self._table.setItem(i, 5, late)
+
+            self._table.setItem(i, 6, _cell(
+                _fmt_minutes(row.get("late_minutes", 0)), mono=True, align_right=True))
+            self._table.setItem(i, 7, _cell(
+                f"{row.get('total_hours', 0):.2f}", mono=True, align_right=True))
+            self._table.setItem(i, 8, _cell(
+                f"{row.get('avg_hours', 0):.2f}", mono=True, align_right=True))
+            self._table.setItem(i, 9, _cell(
+                str(row.get("screenshots", 0)), mono=True, align_right=True))
+
+        span = data.get("days", 0)
+        self._status.setText(
+            f"{len(rows)} employee(s) over {span} day(s), "
+            f"{data.get('from')} to {data.get('to')}.  "
+            f"Weekly offs and holidays are not counted as absences. "
+            f"Hover an absent count to see the dates."
+        )
+
+    def _export(self):
+        if not self._rows:
+            return
+        default = (f"ets-report-{self._from.date().toString('yyyyMMdd')}"
+                   f"-{self._to.date().toString('yyyyMMdd')}.csv")
+        path, _ = QFileDialog.getSaveFileName(self, "Export report", default, "CSV (*.csv)")
+        if not path:
+            return
+
+        headers = ["Employee ID", "Name", "Shift", "Working days", "Present",
+                   "Absent", "Absent dates", "Late days", "Late minutes",
+                   "Total hours", "Avg hours per present day", "Screenshots"]
+        rows = [[
+            r.get("employee_id", ""), r.get("full_name", ""), r.get("shift", ""),
+            r.get("working_days", 0), r.get("present_days", 0), r.get("absent_days", 0),
+            " ".join(r.get("absent_dates") or []),
+            r.get("late_days", 0), r.get("late_minutes", 0),
+            f"{r.get('total_hours', 0):.2f}", f"{r.get('avg_hours', 0):.2f}",
+            r.get("screenshots", 0),
+        ] for r in self._rows]
+
+        if _export_to_csv(path, headers, rows):
+            self._status.setText(f"Exported {len(rows)} row(s) to {path}")
+        else:
+            self._status.setText("Could not write that file.")
+
+
 class _AttendanceTab(QWidget):
 
     def __init__(self):
@@ -2004,17 +2428,20 @@ class _AttendanceTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = _tune_table(QTableWidget(0, 5))
-        self._table.setHorizontalHeaderLabels(["ID", "Employee", "Login Time", "Logout Time", "Total Hours"])
+        self._table = _tune_table(QTableWidget(0, 6))
+        self._table.setHorizontalHeaderLabels(
+            ["ID", "Employee", "Login Time", "Logout Time", "Total Hours", "Status"])
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self._table.setColumnWidth(0, 80)
         self._table.setColumnWidth(1, 110)
         self._table.setColumnWidth(4, 120)
+        self._table.setColumnWidth(5, 130)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         root.addWidget(self._table, 1)
@@ -2090,6 +2517,20 @@ class _AttendanceTab(QWidget):
                 self._format_total_hours(row.get("total_hours")),
                 mono=True, align_right=True))
 
+            # Computed by the server against the shift the employee has now,
+            # so a corrected shift fixes the history with it. Older servers do
+            # not send these fields at all — fall back to a dash rather than
+            # showing every row as on time.
+            status = row.get("status")
+            cell = _cell(row.get("status_label") or "—")
+            cell.setForeground(QColor({
+                "late":          C["danger"],
+                "on_time":       C["success"],
+                "day_off":       C["text_muted"],
+                "outside_shift": C["warning"],
+            }.get(status, C["text_muted"])))
+            self._table.setItem(i, 5, cell)
+
     def _format_total_hours(self, value):
         """Backend may send None, an HH:MM:SS string, or a dict-like
         string such as "{'hours': 0, 'minutes': 6, 'seconds': 0}".
@@ -2140,7 +2581,8 @@ class _AttendanceTab(QWidget):
         def _done(all_rows):
             self._export_btn.setEnabled(True)
             self._export_btn.setText("📥  Export CSV")
-            headers = ["ID", "Employee ID", "Login Time (IST)", "Logout Time (IST)", "Total Hours"]
+            headers = ["ID", "Employee ID", "Login Time (IST)", "Logout Time (IST)",
+                       "Total Hours", "Status", "Late (minutes)"]
             rows = []
             for row in all_rows:
                 rows.append([
@@ -2151,6 +2593,11 @@ class _AttendanceTab(QWidget):
                     _fmt_ts(row.get("login_time")),
                     _fmt_ts(row.get("logout_time"), fallback="ACTIVE"),
                     self._format_total_hours(row.get("total_hours")),
+                    # Payroll reads the CSV, not the screen. Leaving Status out
+                    # of the export would mean the one place lateness actually
+                    # gets used is the one place it is missing.
+                    row.get("status_label") or "",
+                    row.get("late_minutes") if row.get("late_minutes") is not None else "",
                 ])
             if _export_to_csv(path, headers, rows):
                 QMessageBox.information(
@@ -2710,6 +3157,19 @@ class _EmployeesTab(QWidget):
                 tip="" if can_force else "The super admin cannot be force logged out.",
             )
 
+            # Reset password — same rule as any other write on the account
+            # (`can_config`), which is what the server enforces too. An admin
+            # resetting another admin's password would be a way to become
+            # them, so the server refuses it and the menu greys it out.
+            add_action(
+                "🔑  Reset password",
+                lambda _=False, e=emp: self._reset_password(e),
+                enabled=can_config,
+                tip="" if can_config else (
+                    "Only a super admin can manage this account." if tgt_super
+                    else "Admins cannot modify other admin accounts."),
+            )
+
             # Role management — sirf super admin
             if i_am_super and not is_self:
                 menu.addSeparator()
@@ -2779,6 +3239,55 @@ class _EmployeesTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
         
+    def _reset_password(self, emp: dict):
+        emp_id   = emp.get("employee_id")
+        username = emp.get("username", emp_id)
+        if not emp_id:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Reset Password",
+            f"Reset the password for {username}?\n\n"
+            "They will be signed out on every device, and a temporary "
+            "password will be shown here once. They must choose their own "
+            "the next time they sign in.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        def show(data: dict):
+            if not data.get("success"):
+                QMessageBox.warning(
+                    self, "Reset failed",
+                    data.get("message", "The password could not be reset."),
+                )
+                return
+
+            temporary = data.get("temporary_password", "")
+            # Shown exactly once — the server stores only the bcrypt hash,
+            # so there is no way to look this up again afterwards.
+            box = QMessageBox(self)
+            box.setWindowTitle("Password reset")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(f"Temporary password for {username}")
+            box.setInformativeText(
+                f"{temporary}\n\n"
+                "Give this to them directly. It is shown only now and cannot "
+                "be recovered later. They will be asked to choose their own "
+                "password as soon as they sign in with it."
+            )
+            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            box.exec()
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/employees/{emp_id}/password", {})
+        w.result.connect(show)
+        w.error.connect(lambda e: QMessageBox.warning(
+            self, "Reset failed", f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
     def _toggle_verbose(self, emp: dict):
         emp_id = emp.get("employee_id")
         if not emp_id:
@@ -2992,6 +3501,7 @@ class _Sidebar(QFrame):
         self.setObjectName("sidebar")
         self.setFixedWidth(248)
         self.logout_btn: QPushButton | None = None
+        self.password_btn: QPushButton | None = None
         self._user_searched = False
         self._build()
 
@@ -3097,6 +3607,11 @@ class _Sidebar(QFrame):
         role_row.addLayout(role_col)
         role_row.addStretch()
         f_lay.addLayout(role_row)
+
+        # Admins are accounts too — before this there was no way for one to
+        # change their own password anywhere in the app.
+        self.password_btn = _btn("🔑  Change Password", variant="secondary", height=34)
+        f_lay.addWidget(self.password_btn)
 
         self.logout_btn = _btn("🔒  Logout", variant="danger", height=38)
         f_lay.addWidget(self.logout_btn)
@@ -3276,6 +3791,7 @@ class AdminConfigPanel(QMainWindow):
         self._employees_tab   = _EmployeesTab()
         self._attendance_tab  = _AttendanceTab()
         self._screenshots_tab = _ScreenshotsTab()
+        self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
 
         # Workers ka intezaar timers band karne ke baad, destroy se pehle.
@@ -3289,6 +3805,7 @@ class AdminConfigPanel(QMainWindow):
             self._employees_tab,
             self._attendance_tab,
             self._screenshots_tab,
+            self._reports_tab,
             self._logs_tab,
         ):
             self.stack.addWidget(tab)
@@ -3329,6 +3846,7 @@ class AdminConfigPanel(QMainWindow):
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
         self.sidebar.logout_btn.clicked.connect(self.logout)
+        self.sidebar.password_btn.clicked.connect(self._change_own_password)
         self._on_page_changed(0)
         self.scheduler = SchedulerService()
         self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
@@ -3570,6 +4088,18 @@ class AdminConfigPanel(QMainWindow):
                         w.wait(300)
                 except Exception:
                     pass
+
+    def _change_own_password(self):
+        from client.presentation.windows.change_password_dialog import (
+            ChangePasswordDialog,
+        )
+        dialog = ChangePasswordDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            QMessageBox.information(
+                self, "Password changed",
+                "Your password has been changed.\n\n"
+                "Any other device you were signed in on has been signed out.",
+            )
 
     def logout(self):
         from client.application.managers.session_manager import SessionManager
