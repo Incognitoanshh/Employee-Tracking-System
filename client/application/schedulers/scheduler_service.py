@@ -141,51 +141,54 @@ class SchedulerService(QObject):
             if previous_start <= now < previous_end:
                 shift_start, shift_end = previous_start, previous_end
 
-        # ── DAILY BUDGET WINDOW ───────────────────────────────────────────
+        # ── CAPTURE WINDOW — THE SHIFT, AND ONLY THE SHIFT ────────────────
         #
-        # The count is per IST calendar day, not per shift. There is no
-        # separate "off-shift" mode with its own cadence any more — that was
-        # the path that ignored the count and produced 157 extra captures a
-        # night. One budget, spread over whatever monitoring time is left
-        # today.
+        # The Configuration page promises "Screenshots are only scheduled
+        # inside this window (IST)". This is what makes that true.
         #
-        # The shift decides WHEN the day's captures are placed; it no longer
-        # decides HOW MANY.
+        # There used to be off-shift coverage: an employee logged in outside
+        # their shift was captured anyway, on a separate cadence. That was
+        # added to fix a real gap — someone logged in from 00:40 to 09:12 got
+        # no screenshots at all — but it contradicted the label, and it meant
+        # capturing people outside the hours the admin had defined. On
+        # personal machines that is somebody's own time.
+        #
+        # The shift is the admin's decision and it now means what it says:
+        # inside it, capture; outside it, nothing.
         day_end = end_of_ist_day(now)
 
-        if now < shift_start:
-            # Logged in before the shift starts.
-            #
-            # BUG FIX: this used to end the window AT shift_start, so the
-            # whole day's budget was spent in the gap before work began.
-            # Observed in production: logging in at 07:31 with a 09:00-18:00
-            # shift scheduled all ten captures between 07:33 and 08:51 and
-            # left zero for the nine hours that actually mattered. A
-            # monitoring tool that stops monitoring when the shift starts is
-            # exactly backwards.
-            #
-            # The window now runs to the end of the shift, so the budget is
-            # spread across both the early period and the shift itself.
-            window_end = min(shift_end, day_end)
-            label = "pre-shift"
-        elif now < shift_end:
-            window_end = min(shift_end, day_end)
-            label = "in-shift"
-        else:
-            # Shift is over but the employee is still logged in. Cover the
-            # rest of today only — tomorrow gets its own budget at midnight.
-            window_end = day_end
-            label = "post-shift"
+        if now >= shift_end:
+            # Today's shift is over. Nothing more today; the midnight
+            # rollover plans tomorrow against tomorrow's budget.
+            self._scheduled_until = day_end
+            LoggerService.log_verbose(
+                f"SchedulerService: shift ended at {shift_end.strftime('%H:%M')} IST — "
+                f"no further captures today "
+                f"({ScreenshotManager.captures_today()}/"
+                f"{ScreenshotManager.screenshots_per_day()} used)"
+            )
+            self._arm_timers([], now)
+            return
 
-        self._scheduled_until = window_end
-        timestamps = ScreenshotManager.generate_daily_schedule(now, window_end)
+        # Before the shift, plan from its start — the timers simply fire
+        # later. Inside it, plan from now. Either way the window ends with
+        # the shift, capped at the IST day boundary so an overnight shift
+        # spends tonight's budget tonight and gets a fresh one after
+        # midnight.
+        window_start = max(now, shift_start)
+        window_end   = min(shift_end, day_end)
+        label = "in-shift" if now >= shift_start else "before shift"
+
+        timestamps = ScreenshotManager.generate_daily_schedule(window_start, window_end)
 
         LoggerService.log_verbose(
             f"SchedulerService: {label} — {len(timestamps)} capture(s) planned "
-            f"until {window_end.strftime('%d %b %H:%M')} IST "
+            f"between {window_start.strftime('%d %b %H:%M')} and "
+            f"{window_end.strftime('%d %b %H:%M')} IST "
             f"({ScreenshotManager.captures_today()}/"
             f"{ScreenshotManager.screenshots_per_day()} used today)"
         )
+        self._scheduled_until = window_end
         self._arm_timers(timestamps, now)
 
     def _arm_timers(self, timestamps, now: datetime):

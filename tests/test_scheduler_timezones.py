@@ -45,6 +45,26 @@ SHIFT_FORMATS = [
     ("malformed",         "not a time",                "also not a time"),
 ]
 
+# Formats 0-5 all describe the same 09:00-18:00 IST day shift; 6-7 describe
+# a 22:00-06:00 overnight shift; the last two have no usable shift at all and
+# fall back to a window around login.
+DAY_SHIFT_FORMATS = {
+    "ISO with +05:30", "ISO in UTC", "ISO, no offset", "ISO, stale date",
+    "HH:MM", "HH:MM:SS",
+}
+
+# Captures are scheduled inside the shift and nowhere else. For a 09:00-18:00
+# shift, a client still running at 20:00 or 23:00 has no shift left today and
+# must schedule nothing — the day's remaining budget is simply not spent.
+# 02:00 is *before* that day's shift, not after it, so it still plans a full
+# day. Overnight and fallback shifts are never empty at any of these moments.
+AFTER_DAY_SHIFT = {"after shift 20:00", "overnight inside 23:00"}
+
+
+def expects_zero(fmt_label: str, moment_label: str) -> bool:
+    return fmt_label in DAY_SHIFT_FORMATS and moment_label in AFTER_DAY_SHIFT
+
+
 # (label, IST moment the scheduler sees)
 MOMENTS = [
     ("mid-shift 12:00",        datetime(2026, 8, 4, 12, 0)),
@@ -145,16 +165,27 @@ def main() -> int:
             failures.append(f"{key}: raised {row['error']}")
             print(f"  FAIL  {key:44} {row['error']}")
             continue
-        # Every format must schedule something. Silently scheduling nothing
-        # is the failure mode that reached production.
-        if row["count"] == 0:
+        fmt_label, moment_label = key.split(" | ", 1)
+        want_zero = expects_zero(fmt_label, moment_label)
+
+        # Silently scheduling nothing is the failure mode that reached
+        # production, so an unexpected 0 is still a hard failure. But an
+        # expected 0 has to be asserted just as strictly the other way:
+        # scheduling anything outside the shift is the bug this policy fixes.
+        if row["count"] == 0 and not want_zero:
             failures.append(f"{key}: scheduled nothing")
             print(f"  FAIL  {key:44} scheduled 0")
+            continue
+        if row["count"] != 0 and want_zero:
+            failures.append(f"{key}: scheduled {row['count']} outside the shift")
+            print(f"  FAIL  {key:44} scheduled {row['count']} outside the shift")
             continue
         differing = [t for t in TIMEZONES if per_tz[t][key] != row]
         if differing:
             failures.append(f"{key}: differs in {', '.join(differing)}")
             print(f"  FAIL  {key:44} differs in {', '.join(differing)}")
+        elif want_zero:
+            print(f"  PASS  {key:44} n=0   off-shift, nothing scheduled anywhere")
         else:
             print(f"  PASS  {key:44} n={row['count']:<3} identical in all {len(TIMEZONES)} timezones")
 
