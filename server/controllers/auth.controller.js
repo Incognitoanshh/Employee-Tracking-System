@@ -1,6 +1,7 @@
 const pool = require("../config/db");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const { validatePassword } = require("../utils/password_policy");
 
 exports.logout = async (req, res) => {
     const authHeader = req.headers["authorization"];
@@ -125,6 +126,10 @@ exports.login = async (req, res) => {
             success: true,
             employee_id: employee.employee_id,
             role: employee.role,
+            // The client shows the change-password screen instead of the
+            // panel while this is true, so an admin-issued temporary
+            // password cannot become someone's permanent one.
+            must_change_password: employee.must_change_password === true,
             // Naye employee panel ke header ke liye — naam na ho to username.
             full_name:   employee.full_name || employee.username,
             designation: employee.designation
@@ -144,6 +149,107 @@ exports.login = async (req, res) => {
         });
 
     } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
         return res.status(500).json({ success: false, message: "Server error" });
+    }
+};
+
+/**
+ * An employee changes their own password.
+ *
+ * Requires the current password even though the caller already holds a valid
+ * token: a token left behind on a machine someone else can reach must not be
+ * enough to lock the real owner out of their own account.
+ *
+ * Every other device is signed out. `active_sessions` holds one token per
+ * employee, so writing the new token here is what does it — anything
+ * presenting the old one fails `verifyToken`'s mismatch check. The caller
+ * gets that new token back so the device they are sitting at stays working;
+ * without it, changing your password would immediately log you out of the
+ * app you changed it in.
+ */
+exports.changePassword = async (req, res) => {
+    const { current_password, new_password } = req.body || {};
+    const employeeId = req.employee?.employee_id;
+
+    if (!employeeId) {
+        return res.status(401).json({ success: false, message: "Not authenticated" });
+    }
+    if (!current_password || !new_password) {
+        return res.status(400).json({
+            success: false,
+            message: "current_password and new_password are required",
+        });
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT employee_id, username, password, role FROM employees WHERE employee_id = $1`,
+            [employeeId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Account not found" });
+        }
+        const employee = result.rows[0];
+
+        const isMatch = await bcrypt.compare(current_password, employee.password);
+        if (!isMatch) {
+            return res.status(401).json({
+                success: false,
+                message: "Current password is incorrect",
+            });
+        }
+
+        const problem = validatePassword(new_password, {
+            username:   employee.username,
+            employeeId: employee.employee_id,
+        });
+        if (problem) {
+            return res.status(400).json({ success: false, message: problem });
+        }
+
+        // Reusing the current password would leave `must_change_password`
+        // cleared without anything actually changing, which defeats a reset.
+        if (await bcrypt.compare(new_password, employee.password)) {
+            return res.status(400).json({
+                success: false,
+                message: "New password must be different from the current one",
+            });
+        }
+
+        const hashed = await bcrypt.hash(new_password, 10);
+        await pool.query(
+            `UPDATE employees
+                SET password = $1, must_change_password = false, password_changed_at = NOW()
+              WHERE employee_id = $2`,
+            [hashed, employeeId]
+        );
+
+        const token = jwt.sign(
+            { employee_id: employee.employee_id, role: employee.role },
+            process.env.JWT_SECRET,
+            { expiresIn: "24h" }
+        );
+        await pool.query(
+            `INSERT INTO active_sessions (employee_id, token, login_time)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (employee_id) DO UPDATE SET token = $2, login_time = NOW()`,
+            [employeeId, token]
+        );
+
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [employeeId, "PASSWORD CHANGED : by the account owner"]
+        ).catch(() => {});
+
+        return res.json({
+            success: true,
+            message: "Password changed. Other devices have been signed out.",
+            token,
+        });
+
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
