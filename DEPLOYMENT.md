@@ -32,8 +32,28 @@ replayable for 24 hours. Screenshot *contents* are safe (AES-256-GCM applied
 on the device); credentials are not.
 
 **Prerequisite:** a domain A-record pointing at `65.21.212.85`. Let's Encrypt
-will not issue a certificate for a bare IP. Substitute your domain for
-`ets.example.com` throughout.
+will not issue a certificate for a bare IP.
+
+**This is now one command.** Get the domain, point it here, then:
+
+```bash
+bash server/scripts/enable_https.sh ets.yourcompany.com you@company.com
+```
+
+It checks DNS first and refuses if the record is missing, installs nginx and
+certbot, issues the certificate, sets `TRUST_PROXY=1` (without which nginx
+makes every request look like `127.0.0.1` and one rate-limit bucket locks out
+the whole office), closes port 8000 to the outside, and verifies over HTTPS.
+
+It finishes by telling you the part that is easy to forget: **the clients must
+be rebuilt.** Each one has the API address compiled in, so until
+`API_BASE_URL` in `.github/workflows/build.yml` is changed to
+`https://ets.yourcompany.com/api` and the new build installed everywhere,
+nobody can sign in — the port they know is now closed.
+
+The manual steps below are kept as reference for what the script does.
+
+Substitute your domain for `ets.example.com` throughout.
 
 ```bash
 # 1.1 — DNS propagated?
@@ -123,7 +143,27 @@ Expect `✅ DB CONNECTED`, no `[DB POOL]` errors.
 
 ## 3. Backups  🔴 BLOCKER
 
-One manual dump exists. There is no schedule and no restore test.
+Nightly dumps, retention and a restore test are all in place and verified.
+What is **not** in place is anywhere off this machine to put them:
+`~/ets-backups` sits on the same disk as the data it protects. That covers a
+bad migration or an accidental delete; it does not cover the disk failing or
+the provider losing the VPS.
+
+**This is now one command**, and it needs your storage account (Google Drive,
+S3, Backblaze — rclone supports most):
+
+```bash
+bash server/scripts/setup_offsite.sh
+```
+
+rclone asks for the credentials in its own prompts and keeps them in its own
+config; nothing else reads or stores them. The script then generates a
+passphrase for the encrypted config archive — **write that down somewhere
+that is not this server**, because the point of it is that you still have it
+when this server is gone — and finally runs a real backup and lists what
+landed on the remote. A backup job that has never run is not a backup.
+
+The historical steps below are kept as reference.
 
 ```bash
 # 3.1 — nightly dump, 14-day retention
@@ -212,6 +252,54 @@ ssh etsadmin@65.21.212.85 'df -h / | tail -1; du -sh ~/ETS-v5/*/server/uploads 2
 ## 5. Rollout
 
 Do **not** push the app to 1000 employees at once.
+
+### What every employee will hit, on every machine
+
+**macOS — Screen Recording.** The first capture fails until it is granted, and
+the app cannot ask for it on the employee's behalf. System Settings → Privacy
+& Security → **Screen & System Audio Recording** → enable **Amaze ETS**, then
+quit from the tray icon (not just closing the window) and reopen. Installing a
+newer build asks again — macOS ties the permission to the app bundle, and a
+rebuilt bundle is a new one to it.
+
+**Windows — Defender.** The app is unsigned, so SmartScreen blocks it and
+Defender may quarantine it outright. These are personal machines, so Group
+Policy is not available. Until a certificate is bought, each employee has to:
+
+1. Click **More info → Run anyway** on the SmartScreen prompt
+2. If the file disappears, restore it from Windows Security → Protection
+   history, and add the install folder to exclusions
+
+That is a poor first impression and it will generate support calls. It is the
+strongest argument for buying a certificate before a wide rollout.
+
+### Code signing — what it costs and what it fixes
+
+An OV code-signing certificate runs roughly $200–400/year (Sectigo, DigiCert,
+SSL.com) and takes a few days of business verification. An EV certificate
+costs more and clears SmartScreen immediately rather than building reputation
+over time.
+
+Once bought, signing goes into `.github/workflows/build.yml` after the
+PyInstaller step, with the certificate and password held as repository
+secrets — never committed:
+
+```yaml
+- name: Sign the Windows executable
+  run: |
+    echo "${{ secrets.WINDOWS_CERT_BASE64 }}" | base64 -d > cert.pfx
+    signtool sign /f cert.pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" \
+      /tr http://timestamp.digicert.com /td sha256 /fd sha256 \
+      "dist/Amaze ETS.exe"
+    rm cert.pfx
+```
+
+Timestamping matters: without `/tr`, every signed build stops validating the
+day the certificate expires.
+
+macOS has the same problem in a milder form — an unsigned app needs
+right-click → Open the first time. An Apple Developer ID is $99/year and
+removes that too.
 
 **Stage 1 — one Windows machine.** The Windows launch-crash fix has only been
 verified by a local PyInstaller build on macOS; it has never run on real
