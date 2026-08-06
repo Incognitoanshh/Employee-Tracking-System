@@ -56,55 +56,61 @@ fi
 echo "═══ WHAT EACH CLIENT PLANNED TODAY (IST) ═══"
 echo
 
-sudo -u postgres psql -d "$DB_NAME" <<SQL
+# One psql call, one CTE. The verdict MUST be computed from the same rows
+# the table shows.
+#
+# BUG this fixes: the table took the latest plan per employee, but the
+# verdict scanned every planning line of the day. A client reschedules on
+# each sign-in and on every config change, each time over a different
+# window — so a single client on its own was enough to report "different
+# windows", and the verdict the whole test depends on was noise.
+sudo -u postgres psql -q -d "$DB_NAME" <<SQL
 \pset border 2
-WITH latest AS (
+CREATE TEMP VIEW latest AS
     SELECT DISTINCT ON (al.employee_id)
            al.employee_id,
-           al.activity,
+           substring(al.activity from '— ([0-9]+) capture')  AS planned,
+           substring(al.activity from 'between (.*) IST')    AS plan_window,
            al.created_at
       FROM activity_logs al
      WHERE al.activity LIKE '%capture(s) planned%'
        AND DATE((al.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
            = DATE(NOW() AT TIME ZONE 'Asia/Kolkata')
        $FILTER
-     ORDER BY al.employee_id, al.created_at DESC
-)
+     ORDER BY al.employee_id, al.created_at DESC;
+
 SELECT
-    l.employee_id                                              AS "Employee",
-    COALESCE(c.screenshots_per_day, g.screenshots_per_day)     AS "Configured",
-    -- "… — 20 capture(s) planned between …"
-    substring(l.activity from '— ([0-9]+) capture')            AS "Planned",
-    substring(l.activity from 'between (.*) IST')              AS "Window (IST)",
+    l.employee_id                                          AS "Employee",
+    COALESCE(c.screenshots_per_day, g.screenshots_per_day) AS "Configured",
+    l.planned                                              AS "Planned",
+    l.plan_window                                          AS "Window (IST)",
     to_char(l.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS')
-                                                               AS "Planned at"
+                                                           AS "Planned at"
 FROM latest l
 LEFT JOIN employee_configs c ON c.employee_id = l.employee_id
 LEFT JOIN employee_configs g ON g.employee_id IS NULL
 ORDER BY l.employee_id;
-SQL
 
-echo
-sudo -u postgres psql -d "$DB_NAME" -tAc "
+\pset border 0
+\pset tuples_only on
+\pset format unaligned
 SELECT CASE
     WHEN COUNT(*) = 0 THEN
-        'No planning lines today. Turn on Verbose logging for these employees
-  in Configuration → Advanced, then have them sign out and back in.'
-    WHEN COUNT(DISTINCT substring(activity from '— ([0-9]+) capture')) = 1
-     AND COUNT(DISTINCT substring(activity from 'between (.*) IST')) = 1
-        THEN '✅ Every client planned the SAME count over the SAME window.'
-    WHEN COUNT(DISTINCT substring(activity from '— ([0-9]+) capture')) > 1
-        THEN '❌ Clients planned DIFFERENT counts. If their shift and daily
-   number are identical, this is a timezone fault — do not ship.'
-    ELSE '⚠️  Same count, different windows. Expected if they signed in at
-   different times or have different shifts; a timezone fault if not.'
-END
-FROM activity_logs al
-WHERE al.activity LIKE '%capture(s) planned%'
-  AND DATE((al.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
-      = DATE(NOW() AT TIME ZONE 'Asia/Kolkata')
-  $FILTER;
-"
+        'No planning lines today. Turn Verbose logging ON for these employees
+  in Configuration, save, then have them sign out and back in.'
+    WHEN COUNT(*) = 1 THEN
+        'Only one client reported. Nothing to compare — the second one is
+  either not signed in, or has Verbose logging OFF.'
+    WHEN COUNT(DISTINCT planned) = 1 AND COUNT(DISTINCT plan_window) = 1 THEN
+        '✅ Every client planned the SAME count over the SAME window.'
+    WHEN COUNT(DISTINCT planned) > 1 THEN
+        '❌ Clients planned DIFFERENT counts. If their shift and daily number
+   are identical, this is a timezone fault — do not ship.'
+    ELSE
+        '⚠️  Same count, different windows. Expected if they signed in at
+   different times; a timezone fault if they signed in together.'
+END FROM latest;
+SQL
 
 echo
 echo "Reading this:"
