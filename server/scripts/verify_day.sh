@@ -21,6 +21,14 @@
 #  A difference means the machine's own timezone is leaking into the
 #  schedule again.
 #
+#
+#  NOTE: this uses `sudo -u postgres`, which needs a terminal to prompt for
+#  a password. Over `ssh host 'command'` there is no terminal and it fails
+#  with "a terminal is required to read the password". Use `ssh -t`:
+#
+#      ssh -t etsadmin@HOST 'bash .../verify_day.sh'
+#
+#  ...or run it from an interactive session on the server.
 #  Usage:
 #      bash server/scripts/verify_day.sh              # yesterday
 #      bash server/scripts/verify_day.sh 2026-08-06   # a specific IST day
