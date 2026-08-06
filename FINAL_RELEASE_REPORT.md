@@ -1,13 +1,32 @@
 # Amaze ETS — Final Release Report
 
-**Date:** 2026-08-04
+**Date:** 2026-08-06
 **Version:** 2.1.0
-**Audited commit:** `3a04db3`
-**Verdict:** **NOT YET PRODUCTION READY** — see Blockers.
+**Audited commit:** `7acefdf`
+**Verdict:** **CODE COMPLETE — NOT YET SAFE TO DEPLOY WIDELY.** Every blocker
+left is a purchase or a decision, not a defect. See Blockers.
+
+### What changed since the 2026-08-04 audit
+
+Four features were added after that report, along with three pre-existing
+bugs found while building them:
+
+| Added | |
+|---|---|
+| Password change and reset | Nobody could change a password anywhere in the system. A forgotten one meant a new account, losing that person's history with it. |
+| Weekly offs and holidays | The scheduler treated Sunday like any other day and captured people through their weekends. |
+| Late / on-time on Attendance | Shift times and login times had both been stored for months and were never once compared. |
+| Reports with absences and idle | Totals payroll actually asks for. Idle is accumulated by the client rather than inferred from event pairs, which could not be made trustworthy. |
+
+| Bug found | Why it had gone unnoticed |
+|---|---|
+| Config changes never rescheduled | The check for "did anything change" read values that had already been overwritten, so it always concluded nothing had. Shift changes still worked — they compare against a different source — and those were the edits people made most often. |
+| `ets.sql` was on the pre-rename schema | A fresh install created the old column name and every config save returned 500. Nobody had done a fresh install since the rename. |
+| Usernames were case-sensitive | The super admin could not sign in by typing their own name in lower case. The error said "Invalid credentials", which reads as a wrong password. |
 
 ---
 
-## Production readiness score: 88 / 100
+## Production readiness score: 89 / 100
 
 | Area | Score | Notes |
 |---|---|---|
@@ -17,14 +36,55 @@
 | Security — transport | **30** | Plain HTTP. Passwords and JWTs cross the network in clear text. |
 | Backups | 95 | Installed on the VPS. Full backup + restore verified against production data. |
 | Monitoring | 85 | Cron jobs installed and running. Alerts go to a log file, not pushed. |
+| Off-site backup | **40** | Written and now a single command (`setup_offsite.sh`), but not yet configured. Backups still sit on the same disk as the data. |
+| Test coverage | 95 | 5 client suites and 5 server suites, the latter driven through the real app against a real database. |
 | Windows deployment | **40** | Defender quarantines the binary on every machine. |
 | macOS deployment | 85 | Builds and runs. Unsigned, so Gatekeeper warns on first launch. |
 | Performance | 90 | Server is not the bottleneck; network RTT is. |
 | Reliability | 90 | Crash handlers, graceful shutdown, offline queue, thread safety verified. |
 
-The score is capped by two items, neither of which is a code defect.
-Both require infrastructure or a business decision. Everything
-resolvable inside the repository or on the VPS is now done.
+The score is capped by three items, none of which is a code defect: HTTPS
+needs a domain, Windows deployment needs a certificate, and off-site backup
+needs a storage account. Each is now reduced to one command or one purchase.
+Everything resolvable inside the repository or on the VPS is done.
+
+**One test has still never been run**, and it is the one guarding the code
+with the worst history — see "Outstanding verification" below.
+
+---
+
+## Outstanding verification
+
+One test has never been run, and it covers the code with the worst record in
+this project.
+
+**Two real machines, two timezones, one full day.**
+
+The scheduler's timezone handling has broken production twice: once producing
+130 captures where 10 were configured, once producing none at all with no
+error anywhere. Sixty scenarios across four timezones pass in CI — but CI runs
+one process on one machine, with the clock faked. What has never been proven
+is two real clients, on real operating systems, in different timezones,
+agreeing over a real day.
+
+How to run it:
+
+1. Give two employees the same shift and the same screenshots per day
+2. Sign one in on a Mac set to IST, the other on Windows left on its own
+   timezone — Pacific is the useful one, it is the case that broke
+3. Leave both signed in for the whole shift
+4. The next morning:
+
+```bash
+bash server/scripts/verify_day.sh
+```
+
+Both rows must show the **same** Captured figure, and it must equal
+Configured. The script flags anything over the configured limit explicitly,
+because exceeding it is the failure that reached production before.
+
+Until this has been run once, treat the scheduler as unproven on real
+hardware regardless of what CI says.
 
 ---
 
@@ -41,8 +101,21 @@ the India→Finland path, can read them. A stolen super-admin token grants
 access to every employee's screenshots.
 
 Certbot cannot issue a certificate for a bare IP address, so this needs a
-domain name pointed at `65.21.212.85`. `deploy/nginx-ets.conf` is ready
-and includes the certbot instructions.
+domain name pointed at `65.21.212.85`.
+
+Once it exists, this is one command:
+
+```bash
+bash server/scripts/enable_https.sh ets.yourcompany.com you@company.com
+```
+
+It refuses to start if DNS is not pointing here, sets `TRUST_PROXY=1` (without
+which nginx makes every request look like `127.0.0.1` and one shared
+rate-limit bucket locks out the whole office), and closes port 8000.
+
+**The clients must then be rebuilt.** Each has the API address compiled in, so
+closing port 8000 without reinstalling them means nobody can sign in at all.
+The script says so at the end rather than leaving it to be remembered.
 
 **After TLS is live**, change `API_BASE_URL` in
 `.github/workflows/build.yml` to the `https://` URL and rebuild.
