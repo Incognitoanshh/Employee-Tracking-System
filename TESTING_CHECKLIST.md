@@ -45,6 +45,24 @@ wrong.
 - Report totals: absences, weekly offs, holidays, mid-range joiners, idle
 - Backup and restore, against production data
 
+## Verified by hand on 2026-08-06
+
+A full manual pass was completed against the production server on a real Mac
+and a real Windows machine: screenshot capture, idle threshold, employee
+creation, reports, attendance, force logout, configuration changes applying
+without a logout, UI refresh, verbose logging and capture timings.
+
+Scheduling was confirmed across time zones — two clients on the same IST
+shift, machines 12.5 hours apart, each tracking its own configured rate with
+every capture inside the IST shift window.
+
+**One thing is still open: the midnight rollover.** Neither machine was
+running at IST midnight, so the code path that plans the new day has never
+executed on real hardware. It is the same path that once produced a session
+with zero captures and no error. Leave both machines signed in across
+midnight once — a 22:00–06:00 shift is the direct way — then run
+`server/scripts/verify_day.sh` the next morning.
+
 ---
 
 ## 1. First launch on a new machine

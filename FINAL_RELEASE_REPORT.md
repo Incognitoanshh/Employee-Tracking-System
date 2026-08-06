@@ -26,11 +26,11 @@ bugs found while building them:
 
 ---
 
-## Production readiness score: 89 / 100
+## Production readiness score: 92 / 100
 
 | Area | Score | Notes |
 |---|---|---|
-| Application code | 95 | No open code-level defects. Audited this pass; two blockers found and fixed. |
+| Application code | 97 | No open code-level defects. Verified by hand against production on 2026-08-06. |
 | Database | 95 | Schema, indexes, migrations idempotent and order-independent. Pool sized for 1000+. |
 | Security — application | 90 | Auth, JWT, SQL injection, upload handling all verified clean. |
 | Security — transport | **30** | Plain HTTP. Passwords and JWTs cross the network in clear text. |
@@ -41,50 +41,85 @@ bugs found while building them:
 | Windows deployment | **40** | Defender quarantines the binary on every machine. |
 | macOS deployment | 85 | Builds and runs. Unsigned, so Gatekeeper warns on first launch. |
 | Performance | 90 | Server is not the bottleneck; network RTT is. |
-| Reliability | 90 | Crash handlers, graceful shutdown, offline queue, thread safety verified. |
+| Reliability | 92 | Crash handlers, graceful shutdown, offline queue, thread safety verified. Scheduling confirmed on two machines 12.5 hours apart; the midnight rollover is still unproven on real hardware. |
 
 The score is capped by three items, none of which is a code defect: HTTPS
 needs a domain, Windows deployment needs a certificate, and off-site backup
 needs a storage account. Each is now reduced to one command or one purchase.
 Everything resolvable inside the repository or on the VPS is done.
 
-**One test has still never been run**, and it is the one guarding the code
-with the worst history — see "Outstanding verification" below.
+A full manual pass was completed on 2026-08-06 and the timezone behaviour is
+now supported by evidence from two real machines in two zones. **One code path
+remains unproven on real hardware** — the midnight rollover. See below.
 
 ---
 
-## Outstanding verification
+## Manual verification — 2026-08-06
 
-One test has never been run, and it covers the code with the worst record in
-this project.
+Everything below was exercised by hand against the production server, on a
+real Mac and a real Windows machine. This is the half that automated tests
+cannot reach.
 
-**Two real machines, two timezones, one full day.**
+| Verified working | |
+|---|---|
+| Screenshot capture | Both platforms, after granting macOS Screen Recording |
+| Idle threshold | Detection and the configured threshold |
+| Employee creation | Account created and able to sign in |
+| Reports | Generated and read |
+| Attendance | Including the on-time / late column |
+| Force logout | Ends the target's session |
+| Configuration | Shift and idle threshold changes apply **without a logout** |
+| UI refresh | Pages update on time, no stale data |
+| Verbose logging | Produces the extra scheduler detail it promises |
+| Timings | Captures land when the schedule says they will |
 
-The scheduler's timezone handling has broken production twice: once producing
-130 captures where 10 were configured, once producing none at all with no
-error anywhere. Sixty scenarios across four timezones pass in CI — but CI runs
-one process on one machine, with the clock faked. What has never been proven
-is two real clients, on real operating systems, in different timezones,
-agreeing over a real day.
+The configuration line matters most: applying a change without signing out
+is exactly what was broken before this release, and it took a re-login to
+see any effect.
 
-How to run it:
+### Timezone — most of the way there
 
-1. Give two employees the same shift and the same screenshots per day
-2. Sign one in on a Mac set to IST, the other on Windows left on its own
-   timezone — Pacific is the useful one, it is the case that broke
-3. Leave both signed in for the whole shift
-4. The next morning:
+Two clients ran the same IST shift on machines 12.5 hours apart — Windows on
+Pacific, Mac on IST — with deliberately different daily counts.
+
+| | Windows (Pacific) | Mac (IST) |
+|---|---|---|
+| Configured per day | 20 | 10 |
+| Fraction of its window elapsed | 48% | 33% |
+| Expected by then | 9.6 | 3.3 |
+| **Actually captured** | **10** | **3** |
+
+Both tracked their own schedule's pace exactly, and every capture on both
+machines fell inside 09:00–18:00 **IST** — while one machine's own clock read
+the previous evening. A timezone leak would have shown as captures landing in
+the local-clock window, or at several times the intended rate, which is
+precisely how the 130-versus-10 incident presented. Neither happened.
+
+Neither client ran a complete shift, so the exact end-of-day figure is still
+unconfirmed.
+
+## Still unverified: the midnight rollover
+
+One code path remains untested on real hardware. At IST midnight the client
+plans the new day, and neither machine was running when that happened.
+
+That is the same path that once produced a whole session with zero captures
+and no error anywhere — the failure mode that is invisible until somebody
+goes looking for screenshots that were never taken. CI cannot reach it: it
+runs one process, on one machine, with a faked clock.
+
+To close it, leave both machines signed in across midnight — a 22:00–06:00
+shift is the direct way — and the next day run:
 
 ```bash
 bash server/scripts/verify_day.sh
 ```
 
-Both rows must show the **same** Captured figure, and it must equal
-Configured. The script flags anything over the configured limit explicitly,
-because exceeding it is the failure that reached production before.
+Both must show their own configured number, with `exact` as the verdict and
+no `OVER THE LIMIT` anywhere. Everything for this is already configured; it
+needs a night, not a setup.
 
-Until this has been run once, treat the scheduler as unproven on real
-hardware regardless of what CI says.
+Until then, treat the rollover as unproven regardless of what CI reports.
 
 ---
 
