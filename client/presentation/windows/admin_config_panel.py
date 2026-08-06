@@ -1903,6 +1903,27 @@ class _DashboardTab(QWidget):
         """Sirf cards + feed — charts apne alag (slow) timer pe chalte hain."""
         self._load_summary()
         self._load_feed()
+        self._load_own_shots()
+
+    def _load_own_shots(self):
+        """The admin's own "Screenshots Today", read from the local database.
+
+        BUG this fixes: the card was driven ONLY by captures taken during the
+        current session. It sat blank until the first one happened — so an
+        admin signing in mid-morning saw nothing where the employee panel
+        would have shown 8 — and after restarting the app it began again from
+        1 while the day already held several.
+
+        captures_today() is the same count the daily cap is enforced against,
+        so the card now cannot disagree with the limit the scheduler applies.
+        """
+        try:
+            from client.application.managers.screenshot_manager import ScreenshotManager
+            self.m_myshots.set_value(str(ScreenshotManager.captures_today()))
+            self.m_myshots.set_subtitle("Captured today")
+        except Exception:
+            # Never let a stat card take the dashboard down with it.
+            pass
 
     def _load_summary(self):
         url = f"{API_BASE_URL}/dashboard/summary"
@@ -4034,11 +4055,12 @@ class AdminConfigPanel(QMainWindow):
 
     def capture_screenshot(self):
         result = ScreenshotManager.capture_screenshot()
-        # Reflect it on the admin's own card. None means the capture was
-        # skipped (super admin) or failed, so the count must not move.
+        # Reflect it immediately rather than waiting for the 30s refresh.
+        # Read from the database rather than incrementing a counter: a
+        # session counter starts at zero every launch and disagrees with the
+        # cap, which is enforced on the same stored count.
         if result is not None:
-            self._own_shots = getattr(self, "_own_shots", 0) + 1
-            self._update_own_shots(self._own_shots)
+            self._update_own_shots(ScreenshotManager.captures_today())
 
     def _drain_workers(self, timeout_ms: int = 3000) -> int:
         """
