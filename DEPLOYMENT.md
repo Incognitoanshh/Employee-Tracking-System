@@ -204,6 +204,22 @@ ssh -t etsadmin@65.21.212.85 'pm2 save && pm2 startup systemd -u etsadmin --hp /
 ```
 
 ```bash
+# 4.2a — push the alerts somewhere a person will see them (FREE, no account)
+#
+#   Alerts used to reach only ~/ets-health.log. A monitor that tells you
+#   after you have already noticed is not a monitor.
+#
+#   1. Install the ntfy app (Android/iOS/web)
+#   2. Subscribe to a long random topic, e.g.  ets-alerts-8fj3kd92ms
+#   3. Put it in server/.env:  ETS_NTFY_TOPIC=ets-alerts-8fj3kd92ms
+#
+#   The topic IS the secret — anyone who knows it reads your alerts. The
+#   messages carry no credentials or employee data, only which check failed.
+#   Repeats are throttled to one an hour per problem, so a server that stays
+#   down does not send twelve alerts an hour until somebody mutes it.
+#
+#   Test it:  ETS_NTFY_TOPIC=<topic> bash server/scripts/healthcheck.sh
+
 # 4.2 — health check every 5 min; alerts on two consecutive failures
 ssh etsadmin@65.21.212.85 'tee ~/health-check.sh > /dev/null <<'"'"'SH'"'"'
 #!/bin/bash
