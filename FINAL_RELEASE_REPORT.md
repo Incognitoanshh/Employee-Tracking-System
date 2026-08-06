@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-06
 **Version:** 2.1.0
-**Audited commit:** `7acefdf`
+**Audited commit:** `a955b02`
 **Verdict:** **CODE COMPLETE — NOT YET SAFE TO DEPLOY WIDELY.** Every blocker
 left is a purchase or a decision, not a defect. See Blockers.
 
