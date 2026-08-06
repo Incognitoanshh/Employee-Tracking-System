@@ -149,8 +149,11 @@ What is **not** in place is anywhere off this machine to put them:
 bad migration or an accidental delete; it does not cover the disk failing or
 the provider losing the VPS.
 
-**This is now one command**, and it needs your storage account (Google Drive,
-S3, Backblaze — rclone supports most):
+**This is now one command.** It needs somewhere to put the backups, and that
+does not have to cost anything: a Google account already provides 15 GB free,
+which is far more than these backups need — the database dump is measured in
+kilobytes and the screenshots are already compressed. rclone speaks Google
+Drive natively.
 
 ```bash
 bash server/scripts/setup_offsite.sh
@@ -288,6 +291,24 @@ Policy is not available. Until a certificate is bought, each employee has to:
 
 That is a poor first impression and it will generate support calls. It is the
 strongest argument for buying a certificate before a wide rollout.
+
+### Free first: report the false positive to Microsoft
+
+Before spending anything, submit the build to Microsoft as a false positive.
+It costs nothing, takes about ten minutes, and Defender's cloud definitions
+usually update within a few days — after which the quarantine stops happening
+for everybody, on every machine, without a certificate.
+
+  https://www.microsoft.com/en-us/wdsi/filesubmission
+
+Submit as a **software developer**, attach `Amaze ETS.exe` from the CI
+artifact, and say what it is: an internal employee monitoring client, built
+with PyInstaller, distributed only inside the company. PyInstaller binaries
+are flagged constantly for exactly this reason and the submission process
+exists for it.
+
+This has to be redone whenever the executable changes materially, which is
+why it relieves the problem rather than solving it. A certificate solves it.
 
 ### Code signing — what it costs and what it fixes
 

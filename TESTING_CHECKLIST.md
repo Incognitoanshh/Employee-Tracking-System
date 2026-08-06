@@ -225,13 +225,20 @@ Facts about the system as delivered, not bugs to find.
    installing a new build.
 4. **Backups are on the same disk as the data.** Protects against mistakes,
    not against losing the VPS. The off-site job is written but not configured.
-5. **Health check alerts go to a log file**, not to anyone's phone or inbox.
+5. **Health check alerts need one setting to reach a phone.** Set
+   `ETS_NTFY_TOPIC` in `server/.env` and subscribe in the free ntfy app;
+   without it they only reach `~/ets-health.log`, which nobody reads until
+   they have already noticed the outage.
 6. **Autostart can be removed by the employee** on Windows — it lives in their
-   own registry hive. A Windows Service would be needed to prevent that.
+   own registry hive, and preventing it needs a Windows Service that cannot be
+   installed on a machine the company does not administer. The client now
+   writes `AUTOSTART DISABLED` to the audit log when it is off, so at least it
+   is visible instead of looking like somebody who stopped working.
 7. **The server is in Finland.** ~300 ms from India, and packet loss on that
    route has been observed causing aborted uploads.
 8. **Overnight shifts get the daily budget twice** — once before midnight and
-   once after — because the budget is per IST calendar day.
+   once after — because the budget is per IST calendar day. Configuration now
+   says so when such a shift is saved.
 9. **Idle time is only counted from this build onward.** Days before it was
    installed report nothing, which the report shows as a dash rather than zero.
 

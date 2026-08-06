@@ -98,15 +98,22 @@ precisely how the 130-versus-10 incident presented. Neither happened.
 Neither client ran a complete shift, so the exact end-of-day figure is still
 unconfirmed.
 
-## Still unverified: the midnight rollover
+## The midnight rollover — logic covered, hardware not
 
-One code path remains untested on real hardware. At IST midnight the client
-plans the new day, and neither machine was running when that happened.
+At IST midnight the client plans the new day. That is the path that once
+produced a whole session with zero captures and no error anywhere, and until
+now nothing exercised it: CI ran one process with a frozen clock.
 
-That is the same path that once produced a whole session with zero captures
-and no error anywhere — the failure mode that is invisible until somebody
-goes looking for screenshots that were never taken. CI cannot reach it: it
-runs one process, on one machine, with a faked clock.
+`tests/test_midnight_rollover.py` now drives the clock forward minute by
+minute through the real rollover check, letting captures actually consume the
+budget — two full days back to back, each capturing exactly its configured
+number, the new day receiving a fresh allowance rather than a leftover,
+nothing captured between shifts, and the overnight case where the rollover
+lands mid-shift. 14 checks.
+
+**What that does not cover** is the operating system suspending a timer while
+the machine sleeps, which only two real machines left running overnight can
+show.
 
 To close it, leave both machines signed in across midnight — a 22:00–06:00
 shift is the direct way — and the next day run:
