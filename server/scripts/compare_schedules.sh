@@ -69,10 +69,17 @@ sudo -u postgres psql -q -d "$DB_NAME" <<SQL
 CREATE TEMP VIEW latest AS
     SELECT DISTINCT ON (al.employee_id)
            al.employee_id,
-           substring(al.activity from '— ([0-9]+) capture')  AS planned,
-           substring(al.activity from 'between (.*) IST')    AS plan_window,
-           al.created_at
+           substring(al.activity from '— ([0-9]+) capture')::int  AS planned,
+           substring(al.activity from 'between (.*) IST')         AS plan_window,
+           al.created_at,
+           -- Each client is judged against ITS OWN configured number. Two
+           -- machines deliberately set to different counts is a normal way
+           -- to run this — what proves the timezone is the WINDOW being
+           -- identical across machines, not the counts.
+           COALESCE(ec.screenshots_per_day, eg.screenshots_per_day) AS configured
       FROM activity_logs al
+      LEFT JOIN employee_configs ec ON ec.employee_id = al.employee_id
+      LEFT JOIN employee_configs eg ON eg.employee_id IS NULL
      WHERE al.activity LIKE '%capture(s) planned%'
        AND DATE((al.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata')
            = DATE(NOW() AT TIME ZONE 'Asia/Kolkata')
@@ -80,15 +87,13 @@ CREATE TEMP VIEW latest AS
      ORDER BY al.employee_id, al.created_at DESC;
 
 SELECT
-    l.employee_id                                          AS "Employee",
-    COALESCE(c.screenshots_per_day, g.screenshots_per_day) AS "Configured",
-    l.planned                                              AS "Planned",
-    l.plan_window                                          AS "Window (IST)",
+    l.employee_id  AS "Employee",
+    l.configured   AS "Configured",
+    l.planned      AS "Planned",
+    l.plan_window  AS "Window (IST)",
     to_char(l.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS')
-                                                           AS "Planned at"
+                   AS "Planned at"
 FROM latest l
-LEFT JOIN employee_configs c ON c.employee_id = l.employee_id
-LEFT JOIN employee_configs g ON g.employee_id IS NULL
 ORDER BY l.employee_id;
 
 \pset border 0
@@ -96,19 +101,23 @@ ORDER BY l.employee_id;
 \pset format unaligned
 SELECT CASE
     WHEN COUNT(*) = 0 THEN
-        'No planning lines today. Turn Verbose logging ON for these employees
-  in Configuration, save, then have them sign out and back in.'
+        'No planning lines today. Turn Verbose logging ON for these employees,
+  save, then change a scheduling value so the client re-plans — verbose on
+  its own does not trigger one.'
+    WHEN bool_or(planned IS DISTINCT FROM configured) THEN
+        '❌ A client planned a different number than it is configured for.
+   That is a daily-budget fault, whatever the timezones are.'
     WHEN COUNT(*) = 1 THEN
-        'Only one client reported. Nothing to compare — the second one is
-  either not signed in, or has Verbose logging OFF.'
-    WHEN COUNT(DISTINCT planned) = 1 AND COUNT(DISTINCT plan_window) = 1 THEN
-        '✅ Every client planned the SAME count over the SAME window.'
-    WHEN COUNT(DISTINCT planned) > 1 THEN
-        '❌ Clients planned DIFFERENT counts. If their shift and daily number
-   are identical, this is a timezone fault — do not ship.'
+        'Only one client reported — nothing to compare across machines. It did
+  plan exactly its configured number, which is correct as far as it goes.'
+    WHEN COUNT(DISTINCT plan_window) = 1 THEN
+        '✅ Both planned over the SAME IST window, each planning exactly its
+   own configured number. Different counts are fine — what has to match
+   across machines is the WINDOW.'
     ELSE
-        '⚠️  Same count, different windows. Expected if they signed in at
-   different times; a timezone fault if they signed in together.'
+        '⚠️  DIFFERENT windows. Fine if they signed in at different times or
+   have different shifts. If the shifts match and they signed in together,
+   this is a timezone fault.'
 END FROM latest;
 SQL
 
