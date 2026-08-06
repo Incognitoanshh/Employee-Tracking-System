@@ -26,13 +26,19 @@ const {
  * per-day aggregates, configs, holidays, employees. Four queries, regardless
  * of how many days or employees are asked for.
  *
- * WHAT IS DELIBERATELY NOT COUNTED
- * Idle time. The client records USER IDLE and USER ACTIVE as separate
- * events, so a total can only be had by pairing them up — and a crash, a
- * network drop or a logout leaves a pair permanently open. The number would
- * be wrong by an unknown amount, and a wrong idle figure in a payroll report
- * is worse than no idle figure at all. It needs the client to accumulate a
- * daily total before it can be reported honestly.
+ * WHERE IDLE TIME COMES FROM
+ * The idle_daily table, which the client fills by accumulating time as it
+ * passes. NOT from the USER IDLE / USER ACTIVE events in activity_logs:
+ * totalling those means pairing each IDLE with the ACTIVE after it, and a
+ * crash, a dropped connection or a logout leaves a pair open forever. The
+ * figure would be wrong by an unknown amount, and a wrong idle number in a
+ * payroll report is worse than none.
+ *
+ * A day with no idle_daily row means nothing was reported for it — an older
+ * client, or one that never ran that day — which is not the same as zero
+ * idle time. idle_days_reported is returned alongside the total so the
+ * caller can say when the figure covers only part of the range instead of
+ * presenting a partial total as complete.
  */
 
 /** Whole days between two ISO dates, inclusive. */

@@ -1,128 +1,189 @@
-# Employee Tracking System (ETS)
+# Amaze ETS — Employee Tracking System
 
-## Architecture
-- **Server**: Node.js + Express + PostgreSQL (VPS pe run karta hai)
-- **Client**: Python + PySide6 (employee ke machine pe install hota hai)
+Desktop time and activity tracking for a small company. A Python client runs
+on each employee's machine and reports to a Node server.
 
----
-
-## 🛠 Bug Fixes (this version)
-
-| # | File | Bug | Fix |
-|---|------|-----|-----|
-| 1 | `client/services/logger_service.py` | DB code file `open()` context ke andar tha — indent bug | DB code file close ke baad |
-| 2 | `client/services/api_service.py` | Auth headers missing the | `auth_token` parameter add kiya |
-| 3 | `client/application/managers/session_manager.py` | `_generate_device_id = None` typo — device_id kabhi set nahi hota tha | `device_id = None` |
-| 4 | `server/controllers/attendance.controller.js` | `total_hours` string ko PostgreSQL `INTERVAL` mein cast nahi kiya | `$2::interval` cast |
-| 5 | `client/application/managers/screenshot_manager.py` | Encrypted `.enc` file upload ho rahi thi — server PNG expect karta hai | PNG bytes in-memory upload, `.enc` sirf local |
-| 6 | `server/migrations/add_verbose_logging.sql` | `verbose_logging` column `employee_configs` mein missing tha | Migration + schema mein add |
-| 7 | `client/application/managers/config_sync_manager.py` | `force_logout` path mein `return config` missing tha | Return statement add kiya |
-| 8 | `server/routes/screenshot.routes.js` | `verifyToken` double apply (server.js + routes file dono mein) | Routes file se remove kiya |
-| 9 | `ets.sql` | Schema incomplete — `verbose_logging` missing, no migration support | Complete schema with ALTER TABLE migrations |
+- **Server** — Node.js + Express + PostgreSQL, on a VPS
+- **Client** — Python + PySide6, installed on Windows and macOS
+- **Time zone** — everything is IST. The client derives it from UTC rather
+  than trusting the machine clock, because a client in another timezone once
+  produced 130 screenshots where 10 were configured.
 
 ---
 
-## 🚀 Server Setup (VPS)
+## What it does
 
-### 1. PostgreSQL setup
-```bash
-# DB create karo
-psql -U postgres -c "CREATE DATABASE ets_db;"
+**Screenshots** — a configurable number per IST calendar day, spread randomly
+across the employee's shift and never exceeding the number set. Captured and
+AES-256-GCM encrypted on the device; the server only ever holds ciphertext.
+Nothing is captured outside the shift, on a weekly off, or on a holiday.
 
-# Schema import karo (fresh install)
-psql -U postgres -d ets_db -f ets.sql
+**Attendance** — login and logout times, hours worked, and whether each
+arrival was on time or late against that employee's shift.
 
-# Ya existing DB pe sirf migrations run karo
-psql -U postgres -d ets_db -f server/migrations/add_verbose_logging.sql
-psql -U postgres -d ets_db -f server/migrations/add_admin_config.sql
+**Activity** — idle detection with a configurable threshold, and a daily idle
+total accumulated as time passes.
+
+**Reports** — per employee over any range up to a year: working days, present,
+absent (with the dates), late days, hours, average hours, idle and screenshot
+counts. Exports to CSV.
+
+**Administration** — three roles. A super admin manages admins and is not
+tracked; admins manage employees; employees see only themselves. Per-employee
+configuration falls back to a global default. Passwords can be changed by
+their owner and reset by an admin.
+
+---
+
+## Repository layout
+
+```
+server/
+  server.js              entry point
+  config/db.js           PostgreSQL pool, pinned to UTC
+  middleware/            JWT verification, role guards
+  routes/  controllers/  the API
+  utils/
+    ist_sql.js           IST calendar-day SQL, in one place
+    attendance_status.js on time / late / day off, in one place
+    password_policy.js   password rules, in one place
+  migrations/            idempotent, safe to re-run
+  scripts/               backup, restore test, HTTPS, off-site, verification
+  tests/                 run against a real database over HTTP
+
+client/
+  main.py                entry point
+  core/
+    time_ist.py          the single time authority
+    work_calendar.py     weekly offs and holidays
+  application/           scheduling, sync, session, idle
+  presentation/          PySide6 windows
+  security/              encryption
+
+tests/                   client-side suites, including 60 timezone scenarios
+ets.sql                  complete schema — fresh installs and upgrades
 ```
 
-### 2. Server configure karo
+Three helpers exist because the same rule living in two places is what caused
+this project's worst bugs: a timezone rule that disagreed with itself produced
+130 captures where 10 were configured, and later a whole session with none.
+
+---
+
+## Server setup
+
 ```bash
+# 1. Database
+sudo -u postgres createdb ets_db
+psql -U postgres -d ets_db -f ets.sql
+```
+
+`ets.sql` is both the fresh-install schema and the upgrade path — it renames
+and adds columns where needed, so running it on an existing database is safe.
+
+```bash
+# 2. Configuration
 cd server
 cp .env.example .env
-# .env mein apni values bharo:
-#   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
-#   JWT_SECRET (strong random string)
-#   PORT (default 5000)
-#   ALLOWED_ORIGIN
 ```
 
-### 3. Dependencies install karo
+Fill in `DB_*`, a strong random `JWT_SECRET`, `ENCRYPTION_KEY` and `PORT`
+(the deployment uses **8000**). Set `TRUST_PROXY=1` only once nginx is in
+front — without nginx it would let a client spoof its own IP.
+
 ```bash
-cd server
+# 3. Run
 npm install
-```
-
-### 4. Server start karo
-```bash
-# Development
-npm run dev
-
-# Production (PM2 recommend karta hoon)
 npm install -g pm2
-pm2 start server.js --name ets-server
-pm2 save
-pm2 startup
+pm2 start server.js --name ets-server && pm2 save && pm2 startup
 ```
 
-### 5. Admin user banana
 ```bash
-# bcrypt hash generate karo pehle
-node -e "const b=require('bcryptjs'); b.hash('YourPassword123',10).then(h=>console.log(h))"
-
-# Phir psql mein insert karo
-psql -U postgres -d ets_db -c "
-INSERT INTO employees (employee_id, username, password, role)
-VALUES ('ADMIN001', 'admin', '<hash_from_above>', 'admin');
-"
+# 4. First account
+cd server && node scripts/change_credentials.js EMP001
 ```
+
+The same script recovers a forgotten super-admin password later.
 
 ---
 
-## 💻 Client Setup (Employee Machine)
+## Client setup
 
-### Requirements
+Employees install a build; only development needs this:
+
 ```bash
 pip install -r requirements.txt
-```
-
-### Configure karo
-```bash
-# client/ folder mein .env file banana
-APP_NAME=ETS
-API_BASE_URL=http://<your-vps-ip>:<port>/api
-SCREENSHOT_MIN_INTERVAL=180
-SCREENSHOT_MAX_INTERVAL=600
-IDLE_THRESHOLD=60
-```
-
-### Run karo
-```bash
+cp client/.env.example client/.env   # set API_BASE_URL
 python -m client.main
 ```
 
+Builds come from GitHub Actions, never from a local machine:
+
+```bash
+gh workflow run "Build Cross-Platform Desktop Apps" --ref main
+gh run download $(gh run list --limit 1 --json databaseId -q '.[0].databaseId') --dir ~/Downloads/ets-build
+```
+
+**macOS** needs Screen Recording granted per machine (System Settings →
+Privacy & Security), and again after installing a new build — the permission
+is tied to the app bundle.
+
+**Windows** quarantines the app because it is unsigned. See DEPLOYMENT.md.
+
 ---
 
-## 📁 Project Structure
+## Tests
+
+```bash
+python3 tests/run_all.py                      # client
+node server/tests/test_password.js            # and the other four
 ```
-├── server/
-│   ├── server.js              # Entry point
-│   ├── config/db.js           # PostgreSQL pool
-│   ├── middleware/
-│   │   ├── auth.middleware.js # JWT verify
-│   │   └── admin.middleware.js
-│   ├── routes/                # Express routes
-│   ├── controllers/           # Business logic
-│   ├── migrations/            # DB migrations
-│   └── uploads/screenshots/   # Screenshot storage
-├── client/
-│   ├── main.py                # Entry point
-│   ├── application/           # Business logic
-│   ├── presentation/          # UI (PySide6)
-│   ├── services/              # API + settings
-│   ├── infrastructure/        # DB + encryption
-│   └── core/config/           # Config + constants
-├── ets.sql                    # Complete DB schema
-└── requirements.txt
+
+The server suites start the real Express app against a scratch PostgreSQL
+database and talk to it over HTTP, so route order, middleware, rate limiters
+and role guards are all exercised as production has them.
+
+Covered: 60 timezone scenarios across four zones, the daily screenshot cap,
+shift-window boundaries including overnight shifts, weekly offs and holidays,
+password policy and token rotation, the role hierarchy, late classification,
+and report totals including absences and mid-range joiners.
+
+---
+
+## Operations
+
+```bash
+bash server/scripts/backup.sh          # nightly dump + uploads, 14-day retention
+bash server/scripts/restore_test.sh    # an untested backup is not a backup
+bash server/scripts/verify_day.sh      # configured vs captured, per employee
+bash server/scripts/enable_https.sh    # needs a domain
+bash server/scripts/setup_offsite.sh   # needs a storage account
+bash server/scripts/install_cron.sh    # schedules the above
 ```
+
+---
+
+## Known limitations
+
+1. **No HTTPS.** Passwords and session tokens cross the network in clear text.
+   Needs a domain name; `enable_https.sh` does the rest.
+2. **The Windows app is unsigned.** Defender quarantines it on every machine
+   until a code-signing certificate is bought.
+3. **Backups sit on the same disk as the data.** `setup_offsite.sh` fixes this
+   once a storage account exists.
+4. **Health alerts go to a log file**, not to anyone's phone.
+5. **Autostart can be removed by the employee** on Windows.
+6. **Overnight shifts get the daily budget twice**, once either side of
+   midnight, because the budget is per IST calendar day.
+7. **Idle time is only counted from the build that introduced it onward.**
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying, HTTPS, backups, monitoring, rollout, rollback |
+| [TESTING_CHECKLIST.md](TESTING_CHECKLIST.md) | What to test by hand before handover |
+| [BACKUP.md](BACKUP.md) | Backup and restore procedures |
+| [FINAL_RELEASE_REPORT.md](FINAL_RELEASE_REPORT.md) | Readiness assessment, blockers, risks |
