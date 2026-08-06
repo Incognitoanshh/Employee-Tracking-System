@@ -1423,6 +1423,22 @@ class _ConfigTab(QWidget):
         # Always sent, including when empty — that is how an admin clears a
         # weekly off. Omitting it would leave the previous value in place and
         # make unticking every box look like it did nothing.
+        # An overnight shift gets the daily allowance on BOTH sides of
+        # midnight, because the budget is per IST calendar day. That is the
+        # design, not a fault — but an admin setting 22:00-06:00 with 10 per
+        # day reasonably expects 10 for that shift, not 20, and nothing on
+        # this page said otherwise until now.
+        if shift_start and shift_end and shift_end <= shift_start:
+            count = self._cnt_spin.value()
+            self._status_label.setStyleSheet(
+                f"color:{C['warning']}; font-size:12px; background:transparent;"
+            )
+            self._status_label.setText(
+                f"ℹ  {shift_start}–{shift_end} crosses midnight, so it spans two "
+                f"calendar days — this employee can receive up to {count} captures "
+                f"before midnight and {count} after, {count * 2} across the shift."
+            )
+
         offs = sorted(iso for iso, box in self._weekly_offs.items() if box.isChecked())
         if len(offs) == 7:
             self._status_label.setText(

@@ -57,6 +57,36 @@ class SchedulerService(QObject):
         except Exception as e:
             LoggerService.log_verbose(f"SchedulerService: cleanup_old_orphans failed on startup — {e}")
         LoggerService.log_verbose("SchedulerService: started (shift-based mode)")
+        self._report_autostart_state()
+
+    def _report_autostart_state(self):
+        """Tell the server if the app will not start itself next time.
+
+        On Windows autostart lives in the employee's OWN registry hive, so
+        they can remove it without any privilege at all — and the tracker
+        then simply stops appearing after the next reboot. Nothing anywhere
+        says so; it reads as somebody who stopped working.
+
+        Preventing that needs a Windows Service, which cannot be installed on
+        a personal machine the company does not administer. What CAN be done
+        is notice, and say so where an admin will see it. log(), not
+        log_verbose(): this has to reach the audit log without anyone having
+        first switched verbose logging on.
+
+        Reported only when it is OFF. A line every launch saying everything
+        is fine is the kind of noise that buries the launches where it is not.
+        """
+        try:
+            from client.application.managers.startup_manager import StartupManager
+            if not StartupManager.is_autostart_enabled():
+                LoggerService.log(
+                    "AUTOSTART DISABLED : this machine will not launch the app "
+                    "on its own after a restart"
+                )
+        except Exception as error:
+            LoggerService.log_verbose(
+                f"SchedulerService: could not read autostart state — {error}"
+            )
 
     def stop(self):
         self._started = False
