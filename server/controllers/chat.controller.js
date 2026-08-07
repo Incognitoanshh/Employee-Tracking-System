@@ -23,7 +23,7 @@
  */
 
 const pool = require("../config/db");
-const { visibleChannelSql, loadVisibleChannel } = require("../utils/chat_access");
+const { visibleChannelSql, isTeamWide, loadVisibleChannel } = require("../utils/chat_access");
 const { resolveMentions } = require("../utils/chat_mentions");
 const path = require("path");
 const fs = require("fs");
@@ -804,8 +804,15 @@ exports.getChannelMembers = async (req, res) => {
         const channel = await loadVisibleChannel(pool, me, channelId);
         if (!channel) return fail(res, 404, "Channel not found");
 
-        // A channel's audience is the team for General, and the explicit list
-        // otherwise — the same split the visibility rule uses.
+        // A channel's audience is the whole team when it is team-wide, and
+        // the explicit list otherwise — the same split the visibility rule
+        // uses, taken from the same place so the two cannot drift.
+        //
+        // BUG this fixes: this tested `is_default` on its own, which is only
+        // half the rule. A public announcement channel is readable by the
+        // entire team and is not the default one, so its member list came
+        // back empty — a channel everybody can see, apparently belonging to
+        // nobody.
         const result = await pool.query(
             `WITH audience AS (
                  SELECT tm.employee_id
@@ -836,7 +843,7 @@ exports.getChannelMembers = async (req, res) => {
                JOIN employees e ON e.employee_id = au.employee_id
                LEFT JOIN active_sessions s ON s.employee_id = e.employee_id
               ORDER BY name`,
-            [channel.team_id, channel.is_default, channelId]
+            [channel.team_id, isTeamWide(channel), channelId]
         );
 
         const members = result.rows.map((row) => {

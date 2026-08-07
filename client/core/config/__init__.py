@@ -61,7 +61,7 @@ APP_NAME    = os.getenv("APP_NAME", "Amaze ETS")
 # BUG FIX: pehle version 4 jagah alag-alag hardcoded tha (login "v1.0",
 # employee panel "2.1.0", admin console "v2.1.0", settings "1.0") — employee
 # support pe jo version batata wo screen pe depend karta tha.
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 SCREENSHOT_MIN_INTERVAL = int(os.getenv("SCREENSHOT_MIN_INTERVAL", 180))
 SCREENSHOT_MAX_INTERVAL = int(os.getenv("SCREENSHOT_MAX_INTERVAL", 600))
 IDLE_THRESHOLD          = int(os.getenv("IDLE_THRESHOLD", 60))

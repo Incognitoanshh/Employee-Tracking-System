@@ -190,6 +190,16 @@ def main():
           panel._stack.currentWidget() is panel.pages["team"])
     check("the navigation follows it",
           panel._nav["team"].isChecked())
+
+    # The cards owned by timers must be repainted at once, not left blank
+    # until the next tick — fifteen seconds of an empty Internet Status card
+    # reads as the switch having broken something.
+    painted = []
+    panel._check_network = lambda: painted.append(1)
+    panel.go("dashboard")
+    panel._toggle_theme()
+    check("timer-driven cards are repainted immediately after a switch",
+          painted != [], "the panel would sit blank until the next tick")
     panel._toggle_theme()
 
     panel._teardown_pages()

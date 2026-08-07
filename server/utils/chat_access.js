@@ -74,6 +74,19 @@ function teamWideSql(channelAlias = "c") {
 }
 
 /**
+ * Is this channel one the whole team is in, without being added?
+ *
+ * The JavaScript twin of teamWideSql, for the places that already hold the
+ * channel row and would otherwise re-derive the rule by hand — which is how
+ * the member list came to be empty for announcement channels: it tested
+ * `is_default` alone, so a channel the entire team can read listed nobody.
+ */
+function isTeamWide(channel) {
+    return Boolean(channel.is_default
+        || (channel.type === "ANNOUNCEMENT" && !channel.is_private));
+}
+
+/**
  * Can this employee see this one channel?
  *
  * Returns the channel row (with its team's name and archived state) or null.
@@ -93,4 +106,4 @@ async function loadVisibleChannel(pool, employeeId, channelId) {
     return result.rows[0] || null;
 }
 
-module.exports = { visibleChannelSql, teamWideSql, loadVisibleChannel };
+module.exports = { visibleChannelSql, teamWideSql, isTeamWide, loadVisibleChannel };

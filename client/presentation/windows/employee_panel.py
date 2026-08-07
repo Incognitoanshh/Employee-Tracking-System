@@ -1352,6 +1352,17 @@ class EmployeePanel(QWidget):
         self._build()
         self.go(page_key)
 
+        # Repaint the cards the TIMERS own, rather than leaving them blank
+        # until the next tick.
+        #
+        # _check_network runs every fifteen seconds and was only ever called
+        # once, at startup. After a rebuild the fresh cards showed "—" until
+        # that timer came round — up to fifteen seconds of an empty Internet
+        # Status card, which reads as the switch having broken something.
+        # Nothing was wrong; the panel simply had nothing to draw yet.
+        if hasattr(self, "_check_network"):
+            self._check_network()
+
     def _teardown_pages(self):
         """Stop what the old pages were doing before they are thrown away.
 
@@ -1373,6 +1384,15 @@ class EmployeePanel(QWidget):
                         worker.wait(300)
                 except Exception:
                     pass
+
+        # The panel's own probe, which belongs to no page.
+        probe = getattr(self, "_net_worker", None)
+        if probe is not None:
+            try:
+                if probe.isRunning():
+                    probe.wait(500)
+            except Exception:
+                pass
 
     # ── navigation ──────────────────────────────────────────────────────
     def go(self, key: str):
@@ -1527,6 +1547,20 @@ class EmployeePanel(QWidget):
             card.set_value("00:00:00")
 
     def _check_network(self):
+        # One probe at a time.
+        #
+        # BUG this fixes: the running worker was held in a single attribute,
+        # so starting another dropped the only reference to the previous one.
+        # Python then collected a QThread that was still running, which in Qt
+        # is not an error but an abort — the whole application goes.
+        #
+        # It never showed up while this was called on a fifteen-second timer
+        # and the probe timed out after six. Calling it after a theme switch
+        # made two overlap, and the process died instantly.
+        existing = getattr(self, "_net_worker", None)
+        if existing is not None and existing.isRunning():
+            return
+
         def probe():
             start = datetime.now()
             requests.get(f"{API_BASE_URL}/health", timeout=6)
