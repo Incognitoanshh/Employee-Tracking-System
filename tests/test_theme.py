@@ -135,6 +135,23 @@ def main():
 
     panel._toggle_theme()
     sheets = stylesheets(panel)
+
+    # BEFORE the colours: is anything actually on screen?
+    #
+    # The first version of this test only read stylesheets, and passed while
+    # the panel was completely blank. Qt refuses to install a second layout on
+    # a widget that still has one, and deleteLater() does not remove the old
+    # one in time — so every widget was rebuilt in the right colour, parented,
+    # and never placed. The warning went to the console; the test saw perfect
+    # colours on an empty window.
+    layout = panel.layout()
+    check("the panel still has a layout with something in it",
+          layout is not None and layout.count() > 0,
+          f"{layout.count() if layout else 'no layout'} items — a blank window")
+    check("and every page is still in the stack",
+          panel._stack.count() == len(panel.pages),
+          f"{panel._stack.count()} of {len(panel.pages)}")
+
     check("after the switch every page is light",
           strays(sheets, LIGHT_ONLY) != [], "no light colours found")
     # The one that matters: a single widget left behind is the whole bug.
@@ -145,6 +162,11 @@ def main():
     sheets = stylesheets(panel)
     check("switching back leaves nothing light behind",
           strays(sheets, LIGHT_ONLY) == [], str(strays(sheets, LIGHT_ONLY)))
+    check("and the window is still laid out after a second switch",
+          panel.layout() is not None and panel.layout().count() > 0
+          and panel._stack.count() == len(panel.pages),
+          f"{panel.layout().count() if panel.layout() else 0} items, "
+          f"{panel._stack.count()} pages")
 
     check("the button offers the theme you are not on",
           panel._theme_btn.text() == "☾", panel._theme_btn.text())
@@ -200,6 +222,12 @@ def main():
     check("and NOT ONE widget is still dark", left == [], str(left))
     check("the page you were on is still the one showing",
           console.stack.currentIndex() == 5, str(console.stack.currentIndex()))
+    check("and the console is actually laid out, not just correctly coloured",
+          console.centralWidget() is not None
+          and console.centralWidget().layout() is not None
+          and console.centralWidget().layout().count() > 0
+          and console.stack.count() == len(AdminConfigPanel.TAB_ATTRS),
+          f"{console.stack.count()} tabs in the stack")
 
     check("every tab was rebuilt, none lost",
           all(getattr(console, attr, None) is not None

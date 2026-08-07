@@ -1133,8 +1133,25 @@ class EmployeePanel(QWidget):
                 if widget is not None:
                     widget.setParent(None)
                     widget.deleteLater()
-            existing.deleteLater()
-            QApplication.processEvents()
+
+            # The old layout has to be DETACHED, not merely scheduled for
+            # deletion.
+            #
+            # BUG this fixes: deleteLater() queues the delete for later, so at
+            # this moment the layout is still installed — and Qt then refuses
+            # the new one outright:
+            #
+            #   QLayout: Attempting to add QLayout to EmployeePanel,
+            #            which already has a layout
+            #
+            # The refusal is a console warning, not an exception. The panel
+            # kept its old, now-empty layout and every rebuilt widget was
+            # parented but never placed, so switching the theme produced a
+            # completely blank window.
+            #
+            # Handing the layout to a throwaway widget transfers ownership
+            # immediately, which is the only way to be rid of it here.
+            QWidget().setLayout(existing)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
