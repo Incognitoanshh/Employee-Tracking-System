@@ -20,7 +20,9 @@ from client.services.logger_service import LoggerService
 class SchedulerService(QObject):
 
     screenshot_triggered  = Signal()   # screenshot lene ka waqt aa gaya
-    force_logout          = Signal()   # config sync se force logout
+    # Carries the reason so the panel can say WHY it is signing out. An
+    # unexplained logout is indistinguishable from a crash.
+    force_logout          = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -399,12 +401,13 @@ class SchedulerService(QObject):
     def _do_reschedule(self):
         self.reschedule()
 
-    def _handle_force_logout(self):
+    def _handle_force_logout(self, reason: str = ""):
+        self._logout_reason = reason
         QMetaObject.invokeMethod(self, "_emit_force_logout", Qt.ConnectionType.QueuedConnection)
 
     @Slot()
     def _emit_force_logout(self):
-        self.force_logout.emit()
+        self.force_logout.emit(getattr(self, "_logout_reason", "") or "")
 
 
     def reschedule(self):

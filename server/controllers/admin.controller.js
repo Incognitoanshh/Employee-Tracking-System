@@ -9,6 +9,7 @@ const {
     validatePassword,
     generateTemporaryPassword,
 } = require("../utils/password_policy");
+const { isNonWorkingDay, shiftIsoDate } = require("../utils/attendance_status");
 
 const VALID_ROLES = ["employee", ROLE_ADMIN, ROLE_SUPER_ADMIN];
 
@@ -132,9 +133,10 @@ exports.getEmployees = async (req, res) => {
                          COALESCE(ll.last_log,    '1970-01-01'::timestamp)
                      )
                 END AS last_seen,
-                COALESCE(ec.verbose_logging, false) AS verbose_logging
+                COALESCE(ec.verbose_logging, false) AS verbose_logging,
+                e.suspended
             FROM (
-                SELECT employee_id, username, role, full_name, designation
+                SELECT employee_id, username, role, full_name, designation, suspended
                 FROM employees
                 ${searchWhere}
                 ORDER BY employee_id ASC
@@ -461,6 +463,388 @@ exports.deleteHoliday = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────────────────────
+//  Data retention — company-wide, and the only setting that deletes things
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Floors exist because a retention period is a delete instruction. Someone
+// typing 1 where they meant 100 would take the audit trail with it, and the
+// rows are gone — there is no undo beyond last night's backup.
+const RETENTION_LIMITS = {
+    log_retention_days:        { min: 7,  max: 3650, label: "Activity logs" },
+    screenshot_retention_days: { min: 7,  max: 3650, label: "Screenshots" },
+    attendance_retention_days: { min: 90, max: 3650, label: "Attendance" },
+    // A higher floor on purpose. This one covers the record of what
+    // administrators did, and "who reset that password" is asked months
+    // later or not at all — a period short enough to be convenient defeats
+    // the point of keeping it.
+    audit_log_retention_days:  { min: 180, max: 3650, label: "Admin actions" },
+};
+
+exports.getRetention = async (req, res) => {
+    try {
+        const rows = await pool.query(
+            `SELECT key, value, updated_at, updated_by FROM app_settings
+              WHERE key = ANY($1)`,
+            [Object.keys(RETENTION_LIMITS)]
+        );
+        const settings = {};
+        for (const key of Object.keys(RETENTION_LIMITS)) {
+            const row = rows.rows.find((r) => r.key === key);
+            settings[key] = row ? Number(row.value) : null;
+        }
+
+        // How much the CURRENT settings would remove if the purge ran now.
+        // A retention page that does not say what it is about to delete is
+        // asking to be set wrong.
+        const preview = await pool.query(
+            `SELECT
+               (SELECT COUNT(*) FROM activity_logs
+                 WHERE created_at < NOW() - ($1 || ' days')::interval)  AS logs,
+               (SELECT COUNT(*) FROM screenshots
+                 WHERE created_at < NOW() - ($2 || ' days')::interval)  AS screenshots,
+               (SELECT COUNT(*) FROM attendance
+                 WHERE login_time < NOW() - ($3 || ' days')::interval)  AS attendance`,
+            [settings.log_retention_days ?? 90,
+             settings.screenshot_retention_days ?? 180,
+             settings.attendance_retention_days ?? 730]
+        );
+
+        return res.json({
+            success: true,
+            settings,
+            limits: RETENTION_LIMITS,
+            would_delete: {
+                activity_logs: Number(preview.rows[0].logs),
+                screenshots:   Number(preview.rows[0].screenshots),
+                attendance:    Number(preview.rows[0].attendance),
+            },
+            updated_at: rows.rows[0]?.updated_at || null,
+        });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+exports.saveRetention = async (req, res) => {
+    const body = req.body || {};
+
+    const updates = [];
+    for (const [key, rule] of Object.entries(RETENTION_LIMITS)) {
+        if (body[key] === undefined) continue;
+        const days = parseInt(body[key], 10);
+        if (!Number.isFinite(days) || days < rule.min || days > rule.max) {
+            return res.status(400).json({
+                success: false,
+                message: `${rule.label} must be kept between ${rule.min} and ${rule.max} days`,
+            });
+        }
+        updates.push([key, String(days)]);
+    }
+    if (updates.length === 0) {
+        return res.status(400).json({ success: false, message: "Nothing to save" });
+    }
+
+    try {
+        for (const [key, value] of updates) {
+            await pool.query(
+                `INSERT INTO app_settings (key, value, updated_at, updated_by)
+                 VALUES ($1, $2, NOW(), $3)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = $2, updated_at = NOW(), updated_by = $3`,
+                [key, value, req.employee?.employee_id || null]
+            );
+        }
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [req.employee?.employee_id || null,
+             `RETENTION CHANGED : ${updates.map(([k, v]) => `${k}=${v}`).join(", ")}`]
+        ).catch(() => {});
+
+        return res.json({ success: true, message: "Retention updated" });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+/**
+ * Delete specific screenshots.
+ *
+ * Until now the only way to remove a capture was to delete the whole
+ * employee. A screenshot that caught something private — a bank page, a
+ * personal message, somebody else's screen — could not be removed at all,
+ * which is a poor answer to give the person it belongs to.
+ *
+ * Deliberately NOT offered for activity logs. An audit trail an admin can
+ * edit is not an audit trail; the whole value of it is that it cannot be
+ * quietly tidied. Old logs still go on their own through retention.
+ *
+ * The deletion itself is written to the audit log. Removing evidence is
+ * exactly the action that has to leave a trace of who removed it.
+ *
+ * Role rules follow assertCanManage: an admin can delete an employee's
+ * captures but not another admin's, and only a super admin can touch a
+ * super admin's.
+ */
+exports.deleteScreenshots = async (req, res) => {
+    const { ids } = req.body || {};
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ success: false, message: "ids must be a non-empty array" });
+    }
+    if (ids.length > 500) {
+        return res.status(400).json({ success: false, message: "At most 500 at a time" });
+    }
+    const numeric = ids.map((n) => parseInt(n, 10)).filter(Number.isFinite);
+    if (numeric.length !== ids.length) {
+        return res.status(400).json({ success: false, message: "ids must all be numbers" });
+    }
+
+    try {
+        // Read them first: the filenames are needed to remove the files, and
+        // the owners are needed to check the caller may touch them.
+        const rows = await pool.query(
+            `SELECT s.id, s.employee_id, s.file_name, e.role
+               FROM screenshots s
+               LEFT JOIN employees e ON e.employee_id = s.employee_id
+              WHERE s.id = ANY($1)`,
+            [numeric]
+        );
+        if (rows.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "No matching screenshots" });
+        }
+
+        // Every owner must be one the caller is allowed to manage — a bulk
+        // delete must not become a way around a per-employee rule.
+        for (const owner of new Set(rows.rows.map((r) => r.employee_id))) {
+            const role = rows.rows.find((r) => r.employee_id === owner)?.role;
+            const denial = canManage(req.employee, owner, role);
+            if (denial) {
+                return res.status(403).json({ success: false, message: denial });
+            }
+        }
+
+        const result = await pool.query(
+            `DELETE FROM screenshots WHERE id = ANY($1)`, [numeric]
+        );
+
+        // Files after the rows, and never fatal: a file left behind is an
+        // orphan the nightly purge sweeps up, whereas failing here would
+        // leave the caller thinking nothing was deleted when the rows are
+        // already gone.
+        let filesRemoved = 0;
+        try {
+            const fs = require("fs");
+            const pathModule = require("path");
+            const uploadDir = process.env.UPLOAD_DIR
+                ? pathModule.resolve(process.env.UPLOAD_DIR)
+                : pathModule.resolve(__dirname, "../uploads/screenshots");
+            for (const row of rows.rows) {
+                if (!row.file_name) continue;
+                const safe = pathModule.basename(String(row.file_name));
+                const full = pathModule.resolve(uploadDir, safe);
+                if (!full.startsWith(uploadDir + pathModule.sep)) continue;
+                try { fs.unlinkSync(full); filesRemoved += 1; } catch (_) {}
+            }
+        } catch (fileError) {
+            console.error("[delete] screenshot file cleanup failed:", fileError.message);
+        }
+
+        const owners = [...new Set(rows.rows.map((r) => r.employee_id))].join(", ");
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [req.employee?.employee_id || null,
+             `SCREENSHOTS DELETED : ${result.rowCount} capture(s) of ${owners}`]
+        ).catch(() => {});
+
+        return res.json({
+            success: true,
+            deleted: result.rowCount,
+            files_removed: filesRemoved,
+            message: `${result.rowCount} screenshot(s) deleted`,
+        });
+
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+/**
+ * The next fortnight for one employee: which days they work, which they do
+ * not, and why.
+ *
+ * Weekly off is the only setting on the Configuration page whose effect
+ * cannot be seen when you set it. Tick Sunday and everything looks the same
+ * until Sunday, and if it silently failed to save there is nothing to
+ * notice. That is the whole reason it was reported as "I can't verify it
+ * works".
+ *
+ * This answers it directly: the same rules the client's scheduler applies,
+ * run over the coming days, so the setting can be checked the moment it is
+ * made.
+ */
+exports.getUpcomingDays = async (req, res) => {
+    const { employee_id } = req.params;
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
+
+    try {
+        const one = employee_id && employee_id !== "global" ? employee_id : null;
+
+        let config = { rows: [] };
+        if (one) {
+            config = await pool.query(
+                `SELECT weekly_offs, shift_start, shift_end
+                   FROM employee_configs WHERE employee_id = $1 LIMIT 1`,
+                [one]
+            );
+        }
+        if (config.rows.length === 0) {
+            config = await pool.query(
+                `SELECT weekly_offs, shift_start, shift_end
+                   FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
+            );
+        }
+        const weeklyOffs = config.rows[0]?.weekly_offs || "";
+
+        const holidayRows = await pool.query(
+            `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS d, name
+               FROM holidays
+              WHERE holiday_date BETWEEN ${istToday()} AND ${istToday()} + $1::int`,
+            [days]
+        );
+        const holidays = new Map(holidayRows.rows.map((r) => [r.d, r.name]));
+
+        // Start from the IST date, not the server's — the whole system is IST
+        // and a UTC-based "today" would shift the list by a day for five and
+        // a half hours every night.
+        const startRow = await pool.query(`SELECT ${istToday()}::text AS d`);
+        let cursor = startRow.rows[0].d;
+
+        const out = [];
+        for (let i = 0; i < days; i += 1) {
+            const holidayName = holidays.get(cursor);
+            const off = isNonWorkingDay(cursor, weeklyOffs, new Set(holidays.keys()));
+            out.push({
+                date: cursor,
+                weekday: new Date(`${cursor}T00:00:00Z`)
+                    .toLocaleDateString("en-GB", { weekday: "short", timeZone: "UTC" }),
+                working: !off,
+                reason: holidayName ? `Holiday — ${holidayName}`
+                      : off ? "Weekly off"
+                      : null,
+            });
+            cursor = shiftIsoDate(cursor, 1);
+        }
+
+        return res.json({
+            success: true,
+            employee_id: one,
+            weekly_offs: weeklyOffs,
+            shift: config.rows[0]?.shift_start && config.rows[0]?.shift_end
+                ? `${String(config.rows[0].shift_start).slice(0, 5)}–${String(config.rows[0].shift_end).slice(0, 5)}`
+                : null,
+            days: out,
+        });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+/**
+ * Suspend or restore an account.
+ *
+ * Force logout ends a session; it does not stop the person signing back in a
+ * second later. Suspension is the state that persists — through sign-out,
+ * restart and token expiry — until an administrator lifts it.
+ *
+ * Who may do it to whom is assertCanManage, the same rule as every other
+ * write here: an admin may suspend employees, a super admin may suspend
+ * admins as well, and a super admin cannot be suspended by anyone.
+ *
+ * Suspending also clears the session. Leaving the token alive would mean a
+ * suspended employee keeps working until it expires, which is the exact gap
+ * force logout already had.
+ */
+exports.setSuspended = async (req, res) => {
+    const { employee_id } = req.params;
+    const suspended = req.body?.suspended === true || req.body?.suspended === "true";
+
+    if (!employee_id) {
+        return res.status(400).json({ success: false, message: "employee_id required" });
+    }
+
+    // Suspending yourself locks you out of the panel that could undo it. For
+    // the last super admin that is unrecoverable without database access.
+    if (employee_id === req.employee?.employee_id) {
+        return res.status(400).json({
+            success: false,
+            message: "You cannot suspend your own account.",
+        });
+    }
+    if (!(await assertCanManage(req, res, employee_id))) return;
+
+    try {
+        const target = await pool.query(
+            `SELECT employee_id, username, role, suspended
+               FROM employees WHERE employee_id = $1`,
+            [employee_id]
+        );
+        if (target.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+        const employee = target.rows[0];
+
+        if (employee.suspended === suspended) {
+            return res.json({
+                success: true,
+                suspended,
+                message: `${employee.username} is already ${suspended ? "suspended" : "active"}`,
+            });
+        }
+
+        await pool.query(
+            `UPDATE employees
+                SET suspended = $1,
+                    suspended_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+                    suspended_by = CASE WHEN $1 THEN $2 ELSE NULL END
+              WHERE employee_id = $3`,
+            [suspended, req.employee?.employee_id || null, employee_id]
+        );
+
+        if (suspended) {
+            // End the session now. Without this a suspended employee keeps
+            // working until their token expires — up to a day — which is the
+            // gap that made force logout insufficient in the first place.
+            await pool.query(
+                `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+                [employee_id]
+            );
+        }
+
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [employee_id,
+             `${suspended ? "ACCOUNT SUSPENDED" : "ACCOUNT UNSUSPENDED"} : by ${req.employee?.employee_id || "an admin"}`]
+        ).catch(() => {});
+
+        return res.json({
+            success: true,
+            suspended,
+            message: suspended
+                ? `${employee.username} is suspended and has been signed out`
+                : `${employee.username} can sign in again`,
+        });
+
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.getConfig = async (req, res) => {
     const { employee_id } = req.params;
     const isGlobal = employee_id === "global";
@@ -777,6 +1161,20 @@ exports.forceLogout = async (req, res) => {
              DO UPDATE SET force_logout = true, updated_at = NOW()`,
             [employee_id]
         );
+
+        // Clear the session outright as well as setting the flag.
+        //
+        // The flag only works if the client is still running to read it. Now
+        // that a live session blocks a second login, an employee whose
+        // machine died would otherwise be locked out until the two-minute
+        // window passed — and if that machine came back, locked out again.
+        // Clearing the token frees the account immediately, which is what an
+        // admin pressing Force logout actually wants.
+        await pool.query(
+            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+            [employee_id]
+        );
+
         return res.json({ success: true, message: `Force logout set for ${employee_id}` });
     } catch (err) {
         console.error("[500]", req.method, req.originalUrl, err.message);
@@ -1170,6 +1568,21 @@ exports.deleteEmployee = async (req, res) => {
             [employee_id]
         );
 
+        // Collect the filenames BEFORE the rows go, then delete the files
+        // after the transaction commits.
+        //
+        // BUG this fixes: deleting an employee removed every trace of them
+        // from the database and left their encrypted screenshots sitting on
+        // disk forever. Nothing referenced them any more, so they could
+        // never be viewed, purged or even found — just an ever-growing
+        // folder. At a thousand employees that is tens of gigabytes of files
+        // belonging to people who are no longer in the system, which is a
+        // data-retention problem as much as a disk one.
+        const doomedFiles = await client.query(
+            `SELECT file_name FROM screenshots WHERE employee_id = $1`,
+            [employee_id]
+        );
+
         await client.query(
             `DELETE FROM screenshots
              WHERE employee_id = $1`,
@@ -1190,9 +1603,42 @@ exports.deleteEmployee = async (req, res) => {
 
         await client.query("COMMIT");
 
+        // After the commit, never before: a file removed inside the
+        // transaction would be gone even if the transaction rolled back.
+        // The rows are already deleted, so a file left behind here is
+        // orphaned rather than lost — the safe direction to fail.
+        let filesRemoved = 0;
+        try {
+            const fs = require("fs");
+            const path = require("path");
+            const uploadDir = process.env.UPLOAD_DIR
+                ? path.resolve(process.env.UPLOAD_DIR)
+                : path.resolve(__dirname, "../uploads/screenshots");
+
+            for (const row of doomedFiles.rows) {
+                if (!row.file_name) continue;
+                // Same guard the download path uses: never trust a stored
+                // value for filesystem access. basename strips directories,
+                // and the resolved path must still sit inside uploadDir.
+                const safe = path.basename(String(row.file_name));
+                const full = path.resolve(uploadDir, safe);
+                if (!full.startsWith(uploadDir + path.sep)) continue;
+                try {
+                    fs.unlinkSync(full);
+                    filesRemoved += 1;
+                } catch (_) {
+                    // Already gone, or never written. Not worth failing a
+                    // delete that has already succeeded in the database.
+                }
+            }
+        } catch (fileError) {
+            console.error("[delete] screenshot cleanup failed:", fileError.message);
+        }
+
         return res.json({
             success: true,
             message: `Employee ${employee_id} deleted`
+                   + (filesRemoved ? ` (${filesRemoved} screenshot file(s) removed)` : "")
         });
 
     } catch (err) {

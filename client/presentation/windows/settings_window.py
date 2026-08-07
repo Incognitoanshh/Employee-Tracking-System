@@ -47,6 +47,7 @@ from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
 
+from client.presentation.theme import C
 from client.core.time_ist import IST  # single source of truth
 
 
@@ -141,9 +142,9 @@ def _encryption_status() -> tuple[str, str]:
     """
     try:
         from client.security.crypto_engine import CryptoEngine  # noqa: F401
-        return "AES-256-GCM · active", "#22c55e"
+        return "AES-256-GCM · active", C.GREEN
     except Exception as error:
-        return f"unavailable — {error}", "#ef4444"
+        return f"unavailable — {error}", C.RED
 
 
 def _monitoring_config() -> dict:
@@ -258,7 +259,7 @@ class SettingsWindow(QDialog):
             label = self._rows[key]
             self._base_style.setdefault(key, label.styleSheet())
             label.setStyleSheet(
-                "color:#22c55e; font-size:13px; font-weight:700;"
+                f"color:{C.GREEN}; font-size:13px; font-weight:700;"
                 "background:#10281c; border-radius:4px; padding:1px 6px;"
             )
             QTimer.singleShot(
@@ -272,7 +273,7 @@ class SettingsWindow(QDialog):
     def _row(self, grid: QGridLayout, label: str, key: str, value: str = "—") -> None:
         r = grid.rowCount()
         name = QLabel(label)
-        name.setStyleSheet("color:#94a3b8; font-size:13px;")
+        name.setStyleSheet(f"color:{C.TEXT_MUTED}; font-size:13px;")
         name.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         val = QLabel(value)
@@ -292,7 +293,7 @@ class SettingsWindow(QDialog):
 
         title = QLabel("Settings & Status")
         title.setStyleSheet(
-            "font-size:20px; font-weight:700; color:#f1f5f9; padding-bottom:2px;"
+            f"font-size:20px; font-weight:700; color:{C.TEXT}; padding-bottom:2px;"
         )
         subtitle = QLabel("Your account, sync and storage details.")
         subtitle.setStyleSheet("color:#64748b; font-size:12px; padding-bottom:6px;")
@@ -352,7 +353,7 @@ class SettingsWindow(QDialog):
         self._btn_open.setFixedHeight(32)
         self._btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_open.setStyleSheet(
-            "QPushButton{background:#1e293b;border:1px solid #334155;border-radius:8px;"
+            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};border-radius:8px;"
             "color:#e2e8f0;font-size:12px;font-weight:600;padding:0 14px;}"
             "QPushButton:hover{background:#334155;}"
         )
@@ -408,7 +409,7 @@ class SettingsWindow(QDialog):
         self._btn_refresh.setFixedHeight(34)
         self._btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_refresh.setStyleSheet(
-            "QPushButton{background:#1e293b;border:1px solid #334155;border-radius:9px;"
+            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};border-radius:9px;"
             "color:#e2e8f0;font-size:13px;font-weight:600;}"
             "QPushButton:hover{background:#334155;}"
         )
@@ -460,8 +461,8 @@ class SettingsWindow(QDialog):
         stats = _local_counts()
         pend_ss = stats["pending_screenshots"]
         pend_lg = stats["pending_logs"]
-        put("pending_ss", str(pend_ss), "#f59e0b" if pend_ss else "#22c55e")
-        put("pending_logs", str(pend_lg), "#f59e0b" if pend_lg else "#22c55e")
+        put("pending_ss", str(pend_ss), C.AMBER if pend_ss else C.GREEN)
+        put("pending_logs", str(pend_lg), C.AMBER if pend_lg else C.GREEN)
 
         last = stats["last_screenshot"]
         if last:
@@ -490,24 +491,24 @@ class SettingsWindow(QDialog):
         put("m_idle", f"{mon['idle']} sec" if mon["idle"] != "—" else "—")
         verbose_on = str(mon["verbose"]).strip().lower() == "true"
         put("m_verbose", "On" if verbose_on else "Off",
-            "#f59e0b" if verbose_on else "#94a3b8")
+            C.AMBER if verbose_on else C.TEXT_MUTED)
 
         synced = mon["synced"]
         if synced:
             try:
                 delta = (datetime.now() - datetime.fromisoformat(synced)).total_seconds()
                 if delta < 90:
-                    put("m_synced", "just now", "#22c55e")
+                    put("m_synced", "just now", C.GREEN)
                 elif delta < 3600:
-                    put("m_synced", f"{int(delta // 60)} min ago", "#22c55e")
+                    put("m_synced", f"{int(delta // 60)} min ago", C.GREEN)
                 else:
                     put("m_synced",
                         datetime.fromisoformat(synced).strftime("%d %b, %I:%M %p"),
-                        "#f59e0b")
+                        C.AMBER)
             except Exception:
                 put("m_synced", synced)
         else:
-            put("m_synced", "waiting for first sync…", "#f59e0b")
+            put("m_synced", "waiting for first sync…", C.AMBER)
 
         put("ver", APP_VERSION)
         put("plat", f"{platform.system()} {platform.release()}")

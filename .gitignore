@@ -59,3 +59,10 @@ server/uploads/screenshots/*
 
 # Local backups, if ETS_BACKUP_DIR is ever pointed inside the repo
 ets-backups/
+
+# Chat attachments. Encrypted by the client, so the server holds bytes it
+# cannot read — but they are still employees' files and have no business in
+# the repository. The directory itself is kept so a fresh deployment has
+# somewhere to write before the first upload.
+server/uploads/chat/*
+!server/uploads/chat/.gitkeep

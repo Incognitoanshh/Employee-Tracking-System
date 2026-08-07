@@ -266,3 +266,103 @@ exports.getAttendanceReport = async (req, res) => {
         return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
+
+
+/**
+ * What administrators did over a period — the audit report.
+ *
+ * The Audit Logs page shows a stream, newest first, thousands of rows deep.
+ * That answers "what just happened". It does not answer "what was done to
+ * this company's data last week", which is the question asked in a review,
+ * after an incident, or by whoever the system is handed to.
+ *
+ * So this returns only the administrative actions — password resets,
+ * screenshot deletions, role changes, retention changes — grouped by who
+ * did them. Everything else in activity_logs is volume: idle flips,
+ * sign-ins, scheduler chatter. Including it would bury the four rows that
+ * matter under forty thousand that do not.
+ *
+ * These are also the rows kept on the long retention period, so a report
+ * over a past month still has something to report.
+ */
+exports.getAuditReport = async (req, res) => {
+    const { from, to } = req.query;
+
+    if (!ISO_DATE.test(String(from || "")) || !ISO_DATE.test(String(to || ""))) {
+        return res.status(400).json({
+            success: false,
+            message: "from and to are required, in YYYY-MM-DD format",
+        });
+    }
+    if (from > to) {
+        return res.status(400).json({ success: false, message: "from must not be after to" });
+    }
+    const span = daysBetween(from, to);
+    if (span > MAX_RANGE_DAYS) {
+        return res.status(400).json({
+            success: false,
+            message: `Range is ${span} days — the maximum is ${MAX_RANGE_DAYS}`,
+        });
+    }
+
+    try {
+        const { auditRowsSql } = require("../utils/audit_events");
+
+        const rows = await pool.query(
+            `SELECT al.employee_id,
+                    COALESCE(e.username, al.employee_id, 'unknown') AS username,
+                    e.role,
+                    al.activity,
+                    to_char((al.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Kolkata',
+                            'YYYY-MM-DD HH24:MI') AS at_ist,
+                    ${istDate("al.created_at")}::text AS ist_day
+               FROM activity_logs al
+               LEFT JOIN employees e ON e.employee_id = al.employee_id
+              WHERE ${auditRowsSql("al.activity")}
+                AND ${istDate("al.created_at")} BETWEEN $1::date AND $2::date
+              ORDER BY al.created_at DESC
+              LIMIT 5000`,
+            [from, to]
+        );
+
+        // Grouped by the action, because "three password resets" is the shape
+        // of the question — the individual rows are there underneath for
+        // anyone who needs the detail.
+        const byAction = {};
+        for (const row of rows.rows) {
+            const action = String(row.activity).split(" : ")[0].trim();
+            byAction[action] = (byAction[action] || 0) + 1;
+        }
+
+        const byPerson = {};
+        for (const row of rows.rows) {
+            const who = row.username;
+            byPerson[who] = byPerson[who] || { username: who, role: row.role, count: 0 };
+            byPerson[who].count += 1;
+        }
+
+        return res.json({
+            success: true,
+            from,
+            to,
+            days: span,
+            total: rows.rows.length,
+            truncated: rows.rows.length >= 5000,
+            by_action: Object.entries(byAction)
+                .map(([action, count]) => ({ action, count }))
+                .sort((a, b) => b.count - a.count),
+            by_person: Object.values(byPerson).sort((a, b) => b.count - a.count),
+            entries: rows.rows.map((r) => ({
+                at: r.at_ist,
+                day: r.ist_day,
+                by: r.username,
+                role: r.role,
+                action: r.activity,
+            })),
+        });
+
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};

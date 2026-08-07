@@ -43,11 +43,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS employee_configs_single_global
     WHERE employee_id IS NULL;
 
 -- Agar koi global row hi nahi hai to ek bana do.
+--
+-- The per-day screenshot column is deliberately NOT named here, and its
+-- default is used instead.
+--
+-- BUG this fixes: it used to name `screenshot_count`, which was correct when
+-- this migration was written and became wrong when 2026_08_04 renamed that
+-- column to `screenshots_per_day`. Old databases still had the old name when
+-- this ran (it runs first), so upgrades were fine — but a FRESH install gets
+-- the current schema from ets.sql, where the old name does not exist, and
+-- this statement failed with:
+--
+--     ERROR: column "screenshot_count" of relation "employee_configs"
+--            does not exist
+--
+-- which stopped the whole migration and left the database half-built. Nobody
+-- had hit it because nobody had set one up from scratch since the rename —
+-- and the people who will are whoever takes this over.
+--
+-- Naming neither column works both ways: on an old database the old column
+-- takes its default, and on a fresh one this is a no-op anyway, because
+-- ets.sql has already inserted the global row.
 INSERT INTO employee_configs
     (employee_id, screenshot_min_minutes, screenshot_max_minutes,
-     screenshot_count, upload_interval_minutes, idle_threshold_seconds,
+     upload_interval_minutes, idle_threshold_seconds,
      force_logout, verbose_logging)
-SELECT NULL, 3, 10, 3, 60, 60, false, false
+SELECT NULL, 3, 10, 60, 60, false, false
 WHERE NOT EXISTS (
     SELECT 1 FROM employee_configs WHERE employee_id IS NULL
 );

@@ -89,9 +89,87 @@ exports.login = async (req, res) => {
             return res.status(401).json({ success: false, message: "Invalid credentials" });
         }
 
+        // Checked AFTER the password, deliberately. Telling an unauthenticated
+        // caller "that account is suspended" confirms the account exists and
+        // hints at its state to anyone guessing usernames. Someone who has
+        // just proved they own it is a different matter — they need to know
+        // why they cannot get in, or they will keep trying and lock
+        // themselves out.
+        if (employee.suspended === true) {
+            return res.status(403).json({
+                success: false,
+                suspended: true,
+                message: "You are suspended. Contact your administrator.",
+            });
+        }
+
         // FIX: Login pe attendance close NAHI karo — employee online status ke liye
         // open attendance record rehna chahiye. attendance/login endpoint
         // apna open session khud close karke naya banata hai.
+
+        // ── ONE ACCOUNT, ONE MACHINE ──────────────────────────────────
+        //
+        // Signing in used to take the account over and evict whoever held
+        // it. Two people sharing a login could each work all day, quietly
+        // throwing the other out, and attendance would read as one person.
+        //
+        // Refusing whenever a session row exists would lock people out of
+        // their own accounts: a crash, a closed lid or a power cut never
+        // logs out, so the row would sit there forever. The test is
+        // therefore whether the session is ALIVE — last_seen is stamped by
+        // every authenticated request, and clients poll every five seconds,
+        // so anything quiet for two minutes is gone.
+        //
+        // An admin can always free a stuck account with Force logout, which
+        // clears the token outright.
+        const held = await pool.query(
+            `SELECT token, last_seen FROM active_sessions
+              WHERE employee_id = $1 AND token IS NOT NULL`,
+            [employee.employee_id]
+        );
+
+        if (held.rows.length > 0) {
+            // The held token may simply have expired — a machine that was
+            // closed a day ago should not hold the account forever. Verify
+            // it; an expired or unreadable token means the session is over
+            // whatever the row says.
+            let stillValid = false;
+            try {
+                jwt.verify(held.rows[0].token, process.env.JWT_SECRET);
+                stillValid = true;
+            } catch (_) {
+                stillValid = false;
+            }
+
+            if (stillValid) {
+                // Say when that machine was last heard from. "Already logged
+                // in" on its own leaves no way to tell somebody actually
+                // working from a laptop that was shut without logging out —
+                // and those need opposite responses.
+                const seen = held.rows[0].last_seen
+                    ? Math.round((Date.now() - new Date(held.rows[0].last_seen)) / 60000)
+                    : null;
+                let when = "";
+                if (seen !== null) {
+                    when = seen < 2 ? " It is active right now."
+                         : seen < 60 ? ` It was last active ${seen} minutes ago.`
+                         : ` It was last active ${Math.round(seen / 60)} hour(s) ago —`
+                           + " that machine may simply have been switched off.";
+                }
+                return res.status(409).json({
+                    success: false,
+                    message: "This account is already logged in on another machine."
+                           + when
+                           + " Log out there first, or ask an admin to force logout.",
+                });
+            }
+
+            // Expired: release it so the next step can take over.
+            await pool.query(
+                `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
+                [employee.employee_id]
+            );
+        }
 
         // FIX: 24h token expiry
         const token = jwt.sign(
@@ -108,9 +186,10 @@ exports.login = async (req, res) => {
 
         // New active session
         await pool.query(
-            `INSERT INTO active_sessions (employee_id, token, login_time)
-             VALUES ($1, $2, NOW())
-             ON CONFLICT (employee_id) DO UPDATE SET token = $2, login_time = NOW()`,
+            `INSERT INTO active_sessions (employee_id, token, login_time, last_seen)
+             VALUES ($1, $2, NOW(), NOW())
+             ON CONFLICT (employee_id) DO UPDATE
+                 SET token = $2, login_time = NOW(), last_seen = NOW()`,
             [employee.employee_id, token]
         );
 

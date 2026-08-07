@@ -31,7 +31,10 @@ from PySide6.QtWidgets import (
 )
 
 from client.core.config import API_BASE_URL, STORAGE_DIR, APP_VERSION
-from client.presentation.theme import C, R, R_SM, app_style, button, table_style, scrollbar
+from client.presentation.theme import (
+    C, R, R_SM, app_style, button, table_style, scrollbar,
+)
+from client.presentation import theme as _theme
 from client.presentation.widgets.panel_widgets import (
     ActivityRow, Card, NavButton, PageHeader, StatCard,
 )
@@ -46,6 +49,8 @@ from client.services.logger_service import LoggerService
 from client.services.settings_service import SettingsService
 from client.presentation.tray.system_tray import SystemTray
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
+from client.presentation.windows.team_page import TeamPage
+from client.application.managers.chat_manager import ChatManager
 
 from client.core.time_ist import IST  # single source of truth
 
@@ -1101,12 +1106,36 @@ class EmployeePanel(QWidget):
         self._latency_ms: int | None = None
 
         self._load_session_start()
+        # Built BEFORE _build(), and never inside it: switching the theme
+        # rebuilds the pages, and a ChatManager created in there would be
+        # replaced each time — leaving the old one polling with the panel's
+        # signals still attached to it.
+        self.chat = ChatManager(self)
         self._build()
         self._start_services()
         self._start_timers()
 
     # ── layout ──────────────────────────────────────────────────────────
     def _build(self):
+        # Re-runnable: switching the theme calls this again so every widget is
+        # constructed with the new palette. Anything left over from the
+        # previous pass has to go first, or the old dark widgets stay stacked
+        # underneath the new ones.
+        existing = self.layout()
+        if existing is not None:
+            while existing.count():
+                item = existing.takeAt(0)
+                # Held once. setParent(None) detaches the widget from the
+                # layout item, so a second item.widget() returns None — the
+                # kind of thing that only shows up the first time the teardown
+                # actually runs.
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            existing.deleteLater()
+            QApplication.processEvents()
+
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1122,12 +1151,14 @@ class EmployeePanel(QWidget):
         self._stack = QStackedWidget()
         self.pages = {
             "dashboard": DashboardPage(self),
+            "team": TeamPage(self, self.chat),
             "attendance": AttendancePage(self),
             "logs": LogsPage(self),
             "screenshots": ScreenshotsPage(self),
             "settings": SettingsPage(self),
             "help": HelpPage(self),
         }
+        self.pages["team"].unread_changed.connect(self._on_chat_unread)
         for page in self.pages.values():
             self._stack.addWidget(page)
         col.addWidget(self._stack, 1)
@@ -1182,6 +1213,7 @@ class EmployeePanel(QWidget):
         self._nav: dict[str, NavButton] = {}
         for key, icon, label in (
             ("dashboard", "🏠", "Dashboard"),
+            ("team", "💬", "Team"),
             ("attendance", "📅", "Attendance"),
             ("logs", "📋", "Activity Logs"),
             ("screenshots", "📷", "Screenshots"),
@@ -1261,14 +1293,69 @@ class EmployeePanel(QWidget):
             f"padding:0 20px;font-size:13px;font-weight:600;color:{C.TEXT};"
         )
 
+        self._theme_btn = QPushButton()
+        self._theme_btn.setFixedSize(56, 56)
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._paint_theme_button()
+        self._theme_btn.clicked.connect(self._toggle_theme)
+
         row.addWidget(avatar)
         row.addLayout(who)
         row.addStretch()
+        row.addWidget(self._theme_btn)
         row.addWidget(self._status_chip)
         row.addWidget(self._clock)
         # _tick_clock()/_paint_status() yahan NAHI — dono `self.pages` padhte
         # hain jo is waqt bana nahi hota. _build() ke aakhir me paint hota hai.
         return wrap
+
+    # ── theme ───────────────────────────────────────────────────────────
+    def _paint_theme_button(self):
+        light = _theme.is_light()
+        self._theme_btn.setText("☀" if light else "☾")
+        self._theme_btn.setToolTip(
+            "Switch to the dark theme" if light else "Switch to the light theme")
+        self._theme_btn.setStyleSheet(
+            f"QPushButton {{ background:{C.CARD};border:1px solid {C.BORDER};"
+            f"border-radius:{R_SM}px;font-size:20px;color:{C.TEXT}; }}"
+            f"QPushButton:hover {{ border-color:{C.PRIMARY}; }}")
+
+    def _toggle_theme(self):
+        """Switch palette, then build the whole panel again.
+
+        Rebuilding rather than restyling is deliberate — see theme.py. Every
+        widget in here bakes its colours in when it is constructed, so the only
+        way to be sure none was missed is to construct them all afresh.
+        """
+        current = self._stack.currentWidget()
+        page_key = next((k for k, v in self.pages.items() if v is current), "dashboard")
+        _theme.toggle_theme()
+        self.setStyleSheet(app_style())
+        self._teardown_pages()
+        self._build()
+        self.go(page_key)
+
+    def _teardown_pages(self):
+        """Stop what the old pages were doing before they are thrown away.
+
+        Their timers would otherwise keep firing into deleted widgets, and a
+        QThread destroyed while still running takes the application down — the
+        same hazard the admin console's shutdown path already guards against.
+        """
+        for page in getattr(self, "pages", {}).values():
+            for attr in ("_member_timer", "_teams_timer", "_refresh_timer"):
+                timer = getattr(page, attr, None)
+                if timer is not None:
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
+            for worker in list(getattr(page, "_workers", []) or []):
+                try:
+                    if worker.isRunning():
+                        worker.wait(300)
+                except Exception:
+                    pass
 
     # ── navigation ──────────────────────────────────────────────────────
     def go(self, key: str):
@@ -1280,6 +1367,54 @@ class EmployeePanel(QWidget):
             btn.setChecked(name == key)
         if hasattr(page, "refresh"):
             page.refresh()
+
+    # ── chat ────────────────────────────────────────────────────────────
+    def _on_chat_unread(self, total: int):
+        nav = getattr(self, "_nav", {}).get("team")
+        if nav is not None:
+            nav.set_badge(total)
+
+    def _on_chat_messages(self, arrived: list):
+        """A tray notification for anything that arrived while looking away.
+
+        Only when the Team page is not the one on screen — notifying somebody
+        about a message they are already reading is how people learn to ignore
+        notifications.
+        """
+        if not arrived or self._stack.currentWidget() is self.pages.get("team"):
+            return
+        others = [m for m in arrived if m.get("sender_id") != SessionManager.employee_id]
+        if not others:
+            return
+        latest = others[-1]
+        body = str(latest.get("body") or "")
+        self._notify(
+            f"{latest.get('sender_name', 'Someone')}"
+            + (f" and {len(others) - 1} more" if len(others) > 1 else ""),
+            body if len(body) <= 90 else body[:87] + "…",
+        )
+        self.pages["team"].refresh()
+
+    def _on_chat_notifications(self, alerts: list):
+        """Announcements. Louder than an unread count, which is the point."""
+        for alert in alerts or []:
+            if alert.get("type") != "ANNOUNCEMENT":
+                continue
+            self._notify(
+                f"📢 {alert.get('team_name', '')} — {alert.get('channel_name', '')}".strip(" —"),
+                "A new announcement was posted.",
+            )
+            break
+
+    def _notify(self, title: str, body: str):
+        tray = getattr(self, "tray", None)
+        if tray is None:
+            return
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon
+            tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 6000)
+        except Exception:
+            pass
 
     # ── services ────────────────────────────────────────────────────────
     def _load_session_start(self):
@@ -1311,6 +1446,13 @@ class EmployeePanel(QWidget):
         self.tray = SystemTray(self)
         self.tray.show()
         self.tray.show_message()
+
+        # Chat polls whether or not the Team page is open — otherwise the
+        # badge on the sidebar would only ever update while somebody was
+        # already looking at the thing it is meant to draw them to.
+        self.chat.messages.connect(self._on_chat_messages)
+        self.chat.notifications.connect(self._on_chat_notifications)
+        self.chat.start()
 
     def _start_timers(self):
         self._timers: list[QTimer] = []
@@ -1529,6 +1671,13 @@ class EmployeePanel(QWidget):
                 timer.stop()
             except Exception:
                 pass
+        chat = getattr(self, "chat", None)
+        if chat is not None:
+            try:
+                chat.stop()
+            except Exception:
+                pass
+
         for attr in ("scheduler", "idle_tracker"):
             obj = getattr(self, attr, None)
             if obj is not None:
@@ -1547,7 +1696,18 @@ class EmployeePanel(QWidget):
                 pass
             self.tray = None
 
-    def logout(self):
+    def logout(self, reason: str = ""):
+        """Sign out. `reason` is set when the SERVER ended the session.
+
+        force_logout carries it — suspension, or an admin's force logout.
+        Without showing it the app just returns to the login screen for no
+        stated cause, which reads as a crash and gets reported as one.
+        """
+        if reason:
+            try:
+                QMessageBox.warning(self, "Signed out", reason)
+            except Exception:
+                pass
         # LOGOUT clear_session() se PEHLE log hota hai — warna employee_id
         # None ho jaata hai aur LoggerService chup-chaap drop kar deta hai.
         try:

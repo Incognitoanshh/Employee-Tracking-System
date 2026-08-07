@@ -90,6 +90,29 @@ class ConfigSyncManager:
             )
 
             if response.status_code != 200:
+                # A suspended account must not simply keep failing.
+                #
+                # BUG this fixes: the server started refusing every request
+                # with 403 the moment an account was suspended, and the client
+                # did nothing with that. The panel stayed open, the employee
+                # saw no explanation, and the upload retry kept trying five
+                # screenshots a minute forever — all rejected, all logged.
+                # From the employee's side the app simply stopped working for
+                # no stated reason.
+                if response.status_code == 403:
+                    try:
+                        body = response.json()
+                    except Exception:
+                        body = {}
+                    if body.get("suspended"):
+                        LoggerService.log("ACCOUNT SUSPENDED : signed out by the server")
+                        if self._on_force_logout:
+                            self._on_force_logout(
+                                body.get("message",
+                                         "You are suspended. Contact your administrator.")
+                            )
+                        return None
+
                 LoggerService.log_verbose(
                     f"ConfigSyncManager: HTTP {response.status_code} — {response.text[:200]}"
                 )

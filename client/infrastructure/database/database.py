@@ -114,6 +114,48 @@ class Database:
             )
             """)
 
+            # Chat messages waiting to reach the server.
+            #
+            # Same idea as pending_logs: the employee types, it is stored here
+            # first, and the network is somebody else's problem. What is
+            # different is client_msg_id — it is generated once, when the
+            # message is composed, and sent again on every retry. The server
+            # uses it to recognise a resend, which is what makes retrying safe
+            # after the case that actually happens on a bad link: the message
+            # arrived and only the reply was lost.
+            #
+            # A row stays here after delivery, holding the seq the server gave
+            # it, so the panel can show a sent tick without another round trip.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_outbox (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_msg_id TEXT UNIQUE,
+                channel_id    INTEGER,
+                body          TEXT,
+                created_at    TEXT,
+                attempts      INTEGER DEFAULT 0,
+                last_error    TEXT,
+                delivered_seq INTEGER
+            )
+            """)
+            cursor.execute("""
+            CREATE INDEX IF NOT EXISTS chat_outbox_pending_idx
+                ON chat_outbox (id) WHERE delivered_seq IS NULL
+            """)
+
+            # Phase 2 additions. Existing installations already have the table,
+            # so these are added rather than declared above — an employee who
+            # updates mid-week must not lose whatever is still queued.
+            cursor.execute("PRAGMA table_info(chat_outbox)")
+            outbox_cols = {row[1] for row in cursor.fetchall()}
+            for column, ddl in (
+                ("reply_to",       "reply_to INTEGER"),
+                ("mentions",       "mentions TEXT"),          # JSON array of employee_id
+                ("attachment_ids", "attachment_ids TEXT"),    # JSON array of ids
+            ):
+                if column not in outbox_cols:
+                    cursor.execute(f"ALTER TABLE chat_outbox ADD COLUMN {ddl}")
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

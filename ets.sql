@@ -128,6 +128,42 @@ ALTER TABLE employees
 ALTER TABLE employees
     ADD COLUMN IF NOT EXISTS password_changed_at  TIMESTAMP WITHOUT TIME ZONE;
 
+-- Suspending an account (2026_08_06_suspend.sql)
+--
+-- Force logout ends a session; it does not stop the person signing back in.
+-- Suspension persists until an administrator lifts it.
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS suspended    BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMP WITHOUT TIME ZONE;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS suspended_by VARCHAR(50);
+CREATE INDEX IF NOT EXISTS employees_suspended_idx ON employees (suspended) WHERE suspended;
+
+-- Company-wide settings, starting with data retention (2026_08_06_app_settings.sql)
+--
+-- Nothing was purged before this: the periods lived in a script that was
+-- never scheduled. Kept out of employee_configs because retention is a
+-- company policy, not something one employee can have differently.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        VARCHAR(64) PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+    updated_by VARCHAR(50)
+);
+INSERT INTO app_settings (key, value) VALUES
+    ('log_retention_days', '90'),
+    ('screenshot_retention_days', '180'),
+    ('attendance_retention_days', '730'),
+    ('audit_log_retention_days', '730')
+ON CONFLICT (key) DO NOTHING;
+
+-- One account, one machine (2026_08_06_single_session.sql)
+--
+-- last_seen is what tells a client that is actually running from one whose
+-- machine was closed without logging out. Without it, refusing a second
+-- login would strand people whose app crashed.
+ALTER TABLE active_sessions
+    ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP WITH TIME ZONE;
+UPDATE active_sessions SET last_seen = login_time WHERE last_seen IS NULL;
+
 -- Idle time per day (2026_08_05_idle_daily.sql)
 --
 -- Accumulated by the client as time passes, NOT derived from the IDLE/ACTIVE

@@ -8,6 +8,7 @@ from PySide6.QtCore    import Qt, QThread, Signal, QDate, QTimer
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 from PySide6.QtGui     import QFont, QColor, QAction, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QSystemTrayIcon,
     QMenu,
     QScrollArea,
@@ -43,34 +44,36 @@ from client.infrastructure.database.database import Database
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
+from client.presentation.theme import ADMIN as _THEME_ADMIN
+from client.presentation import theme as _theme
 from client.core.config import API_BASE_URL, APP_VERSION
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Design tokens — single source of truth for the whole admin panel
 # ──────────────────────────────────────────────────────────────────────────────
-C = {
-    "bg_app":         "#0a0e16",
-    "bg_sidebar":     "#0b0f1a",
-    "bg_surface":     "#111827",
-    "bg_surface_alt": "#0f172a",
-    "bg_elevated":    "#18222f",
-    "border":         "#1e293b",
-    "border_light":   "#27344a",
-    "text_primary":   "#f1f5f9",
-    "text_secondary": "#94a3b8",
-    "text_muted":     "#64748b",
-    "accent":         "#2563eb",
-    "accent_hover":   "#3b82f6",
-    "accent_pressed": "#1d4ed8",
-    "accent_soft":    "rgba(37, 99, 235, 0.16)",
-    "success":        "#22c55e",
-    "warning":        "#f59e0b",
-    "danger":         "#ef4444",
-    "danger_strong":  "#dc2626",
-    "danger_soft":    "rgba(239, 68, 68, 0.14)",
-    "warning_soft":   "rgba(245, 158, 11, 0.14)",
-}
+# The admin console's palette. It lives in theme.py so that one switch moves
+# this console and the employee panel together; the name is kept here because
+# ninety-odd call sites in this file and admin_teams_tab read `C[...]`.
+#
+# Bound to the SAME dict object theme.set_theme() mutates — rebinding it to a
+# new dict would leave this module pointing at the old colours after a switch.
+C = _THEME_ADMIN
+
+# Card accents. Rebuilt from the palette on every read so they follow the
+# theme — the light palette needs darker greens and ambers than the dark one,
+# or a "success" tile is unreadable on white.
+def _accents() -> dict:
+    return {
+        "blue":   C["accent"],
+        "green":  C["success"],
+        "amber":  C["warning"],
+        "violet": "#8b5cf6",
+        "cyan":   "#06b6d4",
+        "slate":  C["text_muted"],
+        "red":    C["danger"],
+    }
+
 
 ACCENTS = {
     "blue":   "#2563eb",
@@ -93,6 +96,8 @@ PAGES = [
      "subtitle": "Track login, logout times and shift hours."},
     {"key": "screenshots", "icon": "📸", "title": "Screenshots",
      "subtitle": "Browse captured screenshots by employee and date."},
+    {"key": "teams",       "icon": "💬", "title": "Teams & Chat",
+     "subtitle": "Teams, channels and membership. Conversations are readable only by a super admin, and every read is recorded."},
     {"key": "reports",     "icon": "📈", "title": "Reports",
      "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
@@ -425,6 +430,19 @@ def _tune_table(table: "QTableWidget"):
     Pehle har tab apni table alag alag configure karti thi, is liye row
     height, grid aur focus-rectangle teeno pages pe alag dikhte the.
     """
+    # Read-only, always.
+    #
+    # Every table in this panel displays data; none of them edits it in place.
+    # Qt makes cells editable by default, so a double-click opens a text box
+    # over the cell — the admin types, nothing is saved, and it looks as
+    # though a rename silently failed. Each tab had been turning this off for
+    # itself, which meant the Teams tab shipped without it and showed exactly
+    # that. Setting it here makes it impossible to forget again.
+    #
+    # Checkbox cells still work: NoEditTriggers stops the editor opening, not
+    # the check state changing, so the Screenshots tab's selection is
+    # unaffected.
+    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
     table.setAlternatingRowColors(True)
     table.setShowGrid(False)
     table.verticalHeader().setVisible(False)
@@ -765,7 +783,37 @@ class _FetchWorker(QThread):
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=10,
             )
-            self.result.emit(r.json())
+
+            # BUG this fixes: the status code was never looked at. A 401, a
+            # 500 or anything else came back as JSON, got emitted on
+            # `result`, and every page treated it as data. Since the error
+            # body has none of the expected fields, `.get(key, 0)` filled the
+            # dashboard with zeros — "0 employees, 0 screenshots, 0 activity
+            # logs" is indistinguishable from a wiped database, and that is
+            # exactly how it was read when it happened.
+            #
+            # A failed request now goes to `error`, where callers already
+            # leave the previous numbers on screen.
+            if not r.ok:
+                message = f"HTTP {r.status_code}"
+                try:
+                    body = r.json()
+                    if isinstance(body, dict) and body.get("message"):
+                        message = f"{message}: {body['message']}"
+                except Exception:
+                    pass
+                self.error.emit(message)
+                return
+
+            payload = r.json()
+
+            # A 200 carrying success:false is the same situation with a
+            # friendlier status code.
+            if isinstance(payload, dict) and payload.get("success") is False:
+                self.error.emit(payload.get("message", "request failed"))
+                return
+
+            self.result.emit(payload)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -871,6 +919,8 @@ class _ConfigTab(QWidget):
         self._build_ui()
         self._load_employees()
         self._refresh_holidays()
+        self._refresh_retention()
+        self._refresh_upcoming()
 
     def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
         """Ek setting ki row — koi divider nahi, sirf spacing aur alignment."""
@@ -970,6 +1020,176 @@ class _ConfigTab(QWidget):
         for row in rows:
             lay.addWidget(row)
         return card
+
+    # ── Data retention ───────────────────────────────────────────────────
+    #
+    # The only setting on this page whose effect is deleting things, which
+    # is why it says how much it would delete before you touch it. Super
+    # admin only — the server enforces that too.
+    def _build_retention_section(self) -> QFrame:
+        self._ret_logs   = QSpinBox(); self._ret_logs.setRange(7, 3650)
+        self._ret_shots  = QSpinBox(); self._ret_shots.setRange(7, 3650)
+        self._ret_att    = QSpinBox(); self._ret_att.setRange(90, 3650)
+        self._ret_audit  = QSpinBox(); self._ret_audit.setRange(180, 3650)
+        for spin in (self._ret_logs, self._ret_shots, self._ret_att, self._ret_audit):
+            spin.setFixedHeight(36)
+            spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._ret_status = QLabel("Loading…")
+        self._ret_status.setWordWrap(True)
+        self._ret_status.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+        )
+
+        save = _btn("💾  Save retention", variant="primary", height=36)
+        save.clicked.connect(self._save_retention)
+        row = QWidget()
+        row.setObjectName("retRow")
+        row.setStyleSheet("QWidget#retRow { background: transparent; }")
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.addStretch()
+        row_lay.addWidget(save)
+        self._ret_save_btn = save
+
+        card = self._build_section(
+            "🗄", "Data retention  ·  applies to everyone",
+            "Anything older than these is deleted nightly. Nothing was being "
+            "deleted before this existed, so the numbers below decide whether "
+            "the disk keeps growing.",
+            [
+                self._setting_row("Keep activity logs",
+                                  "Audit trail. Shorter means less to search "
+                                  "through, and less to keep safe.",
+                                  self._ret_logs, "days"),
+                self._setting_row("Keep screenshots",
+                                  "Both the database rows and the encrypted "
+                                  "files on disk. This is what fills the disk.",
+                                  self._ret_shots, "days"),
+                self._setting_row("Keep attendance",
+                                  "Payroll reads this — keep it well past any "
+                                  "period you might be asked about.",
+                                  self._ret_att, "days"),
+                self._setting_row("Keep admin actions",
+                                  "Password resets, screenshot deletions, role "
+                                  "and retention changes — kept apart from the "
+                                  "logs above, because \"who did that\" is asked "
+                                  "months later or not at all.",
+                                  self._ret_audit, "days"),
+                row,
+                self._ret_status,
+            ],
+        )
+        return card
+
+    def _refresh_upcoming(self):
+        """Show the next fortnight for the selected employee.
+
+        Asked of the SERVER rather than worked out here, so what is shown is
+        what the scheduler will actually do — a preview computed from the
+        form would agree with the form even when the save never landed, which
+        is the failure it exists to catch.
+        """
+        emp_id = self._emp_combo.currentData() or "global"
+        w = _FetchWorker(f"{API_BASE_URL}/admin/upcoming/{emp_id}", {"days": 14})
+
+        def show(data: dict):
+            days = data.get("days") or []
+            if not days:
+                self._weekly_preview.setText("")
+                return
+            parts = []
+            for day in days:
+                label = f"{day['weekday']} {day['date'][8:]}"
+                parts.append(label if day.get("working") else f"[{label}]")
+            offs = [d for d in days if not d.get("working")]
+            summary = (f"{len(days) - len(offs)} working day(s), "
+                       f"{len(offs)} off") if offs else f"all {len(days)} are working days"
+            reasons = sorted({d["reason"] for d in offs if d.get("reason")})
+            self._weekly_preview.setText(
+                f"Next {len(days)} days — {summary}."
+                + (f"  Off: {', '.join(reasons)}." if reasons else "")
+                + "\n" + "  ".join(parts)
+                + "\n[square brackets] = no screenshots that day."
+            )
+
+        w.result.connect(show)
+        w.error.connect(lambda e: self._weekly_preview.setText(
+            f"Could not check the coming days: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _refresh_retention(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/retention")
+
+        def fill(data: dict):
+            settings = data.get("settings") or {}
+            for key, spin in (("log_retention_days", self._ret_logs),
+                              ("screenshot_retention_days", self._ret_shots),
+                              ("attendance_retention_days", self._ret_att),
+                              ("audit_log_retention_days", self._ret_audit)):
+                if settings.get(key):
+                    spin.blockSignals(True)
+                    spin.setValue(int(settings[key]))
+                    spin.blockSignals(False)
+
+            would = data.get("would_delete") or {}
+            total = sum(int(v or 0) for v in would.values())
+            if total:
+                self._ret_status.setText(
+                    f"Tonight's purge would remove {would.get('activity_logs', 0)} log(s), "
+                    f"{would.get('screenshots', 0)} screenshot(s) and "
+                    f"{would.get('attendance', 0)} attendance record(s) — "
+                    f"they are already past these periods."
+                )
+            else:
+                self._ret_status.setText(
+                    "Nothing is currently past these periods."
+                )
+
+        def failed(error: str):
+            # Super admin only. An admin seeing this has not hit a fault.
+            self._ret_status.setText(
+                "Only a super admin can view or change data retention."
+                if "403" in str(error) else f"Could not load retention: {error}"
+            )
+            for spin in (self._ret_logs, self._ret_shots, self._ret_att, self._ret_audit):
+                spin.setEnabled(False)
+            self._ret_save_btn.setEnabled(False)
+
+        w.result.connect(fill)
+        w.error.connect(failed)
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _save_retention(self):
+        body = {
+            "log_retention_days":        self._ret_logs.value(),
+            "screenshot_retention_days": self._ret_shots.value(),
+            "attendance_retention_days": self._ret_att.value(),
+            "audit_log_retention_days":   self._ret_audit.value(),
+        }
+        self._ret_save_btn.setEnabled(False)
+        self._ret_status.setText("Saving…")
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/retention", body)
+
+        def done(result: dict):
+            self._ret_save_btn.setEnabled(True)
+            if result.get("success"):
+                # Re-read so the "would remove" line reflects the new numbers
+                # rather than the ones it was showing a moment ago.
+                self._refresh_retention()
+            else:
+                self._ret_status.setText(result.get("message", "Could not save."))
+
+        w.result.connect(done)
+        w.error.connect(lambda e: (
+            self._ret_save_btn.setEnabled(True),
+            self._ret_status.setText(f"Could not reach the server: {e}"),
+        ))
+        _track_worker(self._workers, w)
+        w.start()
 
     # ── Holidays ─────────────────────────────────────────────────────────
     #
@@ -1206,6 +1426,21 @@ class _ConfigTab(QWidget):
             weekly_lay.addWidget(day)
         self._weekly_offs_row = weekly_row
 
+        # What the setting actually does, on real dates.
+        #
+        # Weekly off is the one control here whose effect cannot be seen when
+        # you set it: tick Sunday and nothing changes until Sunday. If it
+        # failed to save there was no way to tell — which is exactly how it
+        # was reported ("set karta hoon to verify hi nahi kar paaya").
+        self._weekly_preview = QLabel("")
+        self._weekly_preview.setWordWrap(True)
+        self._weekly_preview.setObjectName("weeklyPreview")
+        self._weekly_preview.setStyleSheet(
+            f"#weeklyPreview {{ color:{C['text_muted']}; font-size:11px;"
+            f" background:{C['bg_elevated']}; border:1px solid {C['border']};"
+            f" border-radius:8px; padding:9px 12px; }}"
+        )
+
         # ── Sections ──────────────────────────────────────────────────────
         body.addWidget(self._build_section(
             "📸", "Screenshot Capture",
@@ -1249,12 +1484,15 @@ class _ConfigTab(QWidget):
                                   "on the Attendance page. 0 flags any lateness "
                                   "at all.",
                                   self._grace_spin, "minutes"),
+                self._weekly_preview,
                 self._setting_row("Weekly off",
                                   "No screenshots on these days. An overnight shift "
                                   "belongs to the day it starts — a Saturday 22:00 shift "
                                   "running into Sunday is still captured.",
                                   self._weekly_offs_row),
             ]))
+
+        body.addWidget(self._build_retention_section())
 
         body.addWidget(self._build_holidays_section())
 
@@ -1341,6 +1579,7 @@ class _ConfigTab(QWidget):
             box.blockSignals(False)
 
         self._update_scope_banner(bool(cfg.get("inherited")))
+        self._refresh_upcoming()
 
     def _update_scope_banner(self, inherited: bool = False):
         """Saaf batata hai ki abhi jo values dikh rahi hain wo kiske liye hain.
@@ -1428,15 +1667,15 @@ class _ConfigTab(QWidget):
         # design, not a fault — but an admin setting 22:00-06:00 with 10 per
         # day reasonably expects 10 for that shift, not 20, and nothing on
         # this page said otherwise until now.
+        # Held rather than shown now: the save finishes a moment later and
+        # its "saved" line would replace this before anyone read it.
+        self._pending_note = ""
         if shift_start and shift_end and shift_end <= shift_start:
             count = self._cnt_spin.value()
-            self._status_label.setStyleSheet(
-                f"color:{C['warning']}; font-size:12px; background:transparent;"
-            )
-            self._status_label.setText(
-                f"ℹ  {shift_start}–{shift_end} crosses midnight, so it spans two "
-                f"calendar days — this employee can receive up to {count} captures "
-                f"before midnight and {count} after, {count * 2} across the shift."
+            self._pending_note = (
+                f"  ·  ℹ {shift_start}–{shift_end} crosses midnight, so it spans "
+                f"two calendar days — up to {count} captures before midnight and "
+                f"{count} after, {count * 2} across the shift."
             )
 
         offs = sorted(iso for iso, box in self._weekly_offs.items() if box.isChecked())
@@ -1469,10 +1708,63 @@ class _ConfigTab(QWidget):
         self._save_btn.setText("💾  Save Config")
         if data.get("success"):
             self._status_label.setStyleSheet(f"color: {C['success']}; font-size:12px; background:transparent;")
-            self._status_label.setText("✅ Config saved successfully!")
+            saved = self._describe_saved()
+            self._status_label.setText(
+                f"✅ Saved{saved}{getattr(self, '_pending_note', '')}")
+            # Read it back from the server rather than trusting the form.
+            # "Saved" on its own does not prove the value survived the round
+            # trip, and a weekly off that silently failed to stick is exactly
+            # the kind of thing nobody notices until a Sunday.
+            #
+            # _on_employee_changed is the config fetch — it re-reads whichever
+            # employee is selected and repopulates every field from the
+            # server's answer.
+            self._reload_after_save()
         else:
+            # BUG this fixes: this read `error`, but every endpoint returns
+            # `message`. Every rejection therefore showed "Save failed" with
+            # no reason — a refused weekly off, an out-of-range value, a
+            # permission problem, all identical and all unexplained. The
+            # admin's only conclusion is that the page is broken.
             self._status_label.setStyleSheet(f"color: {C['danger']}; font-size:12px; background:transparent;")
-            self._status_label.setText(f"❌ {data.get('error', 'Save failed')}")
+            self._status_label.setText(
+                f"❌ {data.get('message') or data.get('error') or 'Save failed'}")
+
+    def _reload_after_save(self):
+        """Re-read the config from the server, keeping the status line.
+
+        _on_employee_changed() also refreshes the scope banner and would
+        overwrite the "Saved …" message with a load error on a slow link, so
+        the fetch is done directly and only the form is repopulated.
+        """
+        emp_id = self._emp_combo.currentData() or "global"
+        w = _FetchWorker(f"{API_BASE_URL}/admin/config/{emp_id}")
+        w.result.connect(self._populate_form)
+        # Silent on failure: the save already succeeded, and replacing a
+        # confirmation with a fetch error would read as the save having
+        # failed when it did not.
+        w.error.connect(lambda _e: None)
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _describe_saved(self) -> str:
+        """Name what was saved, so the confirmation is checkable.
+
+        "Config saved successfully" tells an admin nothing they can verify.
+        Naming the weekly off in particular matters: it is the one setting
+        where "did that take?" has no visible answer until a weekend.
+        """
+        names = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu",
+                 5: "Fri", 6: "Sat", 7: "Sun"}
+        offs = [names[i] for i, box in sorted(self._weekly_offs.items())
+                if box.isChecked()]
+        who = self._emp_combo.currentText() or "Global Default"
+        part = f" for {who}"
+        if offs:
+            part += f"  ·  weekly off: {', '.join(offs)}"
+        else:
+            part += "  ·  no weekly off"
+        return part
 
     def _force_logout(self):
         emp_id = self._emp_combo.currentData()
@@ -1539,22 +1831,44 @@ class _ScreenshotsTab(QWidget):
         clear_btn = _btn("✕  Clear", variant="secondary", height=34, width=80)
         clear_btn.clicked.connect(self._on_clear_clicked)
         filter_row.addWidget(clear_btn)
+        # A tick box per row and one that takes the page. Dragging a
+        # selection is fine for two rows and hopeless for twenty — and a
+        # delete you can only aim by dragging is one you will eventually aim
+        # at the wrong row.
+        self._select_all = QCheckBox("Select all")
+        self._select_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._select_all.stateChanged.connect(self._toggle_select_all)
+        filter_row.addWidget(self._select_all)
+
+        self._delete_btn = _btn("🗑  Delete selected", variant="danger", height=36)
+        self._delete_btn.clicked.connect(self._delete_selected)
+        self._delete_btn.setEnabled(False)
+        filter_row.addWidget(self._delete_btn)
+
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = _tune_table(QTableWidget(0, 4))
-        self._table.setHorizontalHeaderLabels(["ID", "Employee", "File", "Captured"])
+        self._table = _tune_table(QTableWidget(0, 5))
+        self._table.setHorizontalHeaderLabels(["", "ID", "Employee", "File", "Captured"])
+        # Dragging still works for a quick pair, but the tick boxes are what
+        # make a careful selection possible.
+        self._table.setSelectionMode(
+            QTableWidget.SelectionMode.ExtendedSelection)
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 70)
-        self._table.setColumnWidth(1, 110)
-        self._table.setColumnWidth(3, 210)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(0, 38)
+        self._table.setColumnWidth(1, 70)
+        self._table.setColumnWidth(2, 110)
+        self._table.setColumnWidth(4, 210)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.cellDoubleClicked.connect(self._open_preview)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._table.itemChanged.connect(lambda _i: self._on_selection_changed())
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
@@ -1601,21 +1915,116 @@ class _ScreenshotsTab(QWidget):
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             fname = row.get("file_name", "")
-            self._table.setItem(i, 0, _cell(str(row.get("id", "")), mono=True, muted=True))
-            self._table.setItem(i, 1, _cell(row.get("employee_id", ""), mono=True))
+
+            tick = QTableWidgetItem()
+            tick.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            tick.setCheckState(Qt.CheckState.Unchecked)
+            self._table.setItem(i, 0, tick)
+
+            self._table.setItem(i, 1, _cell(str(row.get("id", "")), mono=True, muted=True))
+            self._table.setItem(i, 2, _cell(row.get("employee_id", ""), mono=True))
             # Poora .enc naam tooltip me — column me chhota handle.
             item = _cell(_short_filename(fname), mono=True, tooltip=fname)
             item.setData(Qt.ItemDataRole.UserRole, fname)
-            self._table.setItem(i, 2, item)
+            self._table.setItem(i, 3, item)
             # BUG FIX: pehle yahan `ts = ...` assignment `if dt.tzinfo is
             # None:` block ke ANDAR thi — tz-aware timestamp par timestamp
             # kabhi format hi nahi hota tha. Ab shared helper.
-            self._table.setItem(i, 3, _cell(_fmt_ts(row.get("created_at")), muted=True))
+            self._table.setItem(i, 4, _cell(_fmt_ts(row.get("created_at")), muted=True))
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 20 < total)
+        # A new page means a new set of rows — carrying a "select all" across
+        # it would silently arm a delete for rows nobody looked at.
+        self._select_all.blockSignals(True)
+        self._select_all.setChecked(False)
+        self._select_all.blockSignals(False)
+        self._on_selection_changed()
 
-    
+    def _selected_ids(self) -> list[int]:
+        """Rows that are ticked, or failing that, rows that are highlighted.
+
+        Both work. The tick boxes survive scrolling and clicking elsewhere,
+        which is what makes a twenty-row selection possible; a dragged
+        highlight is quicker for two.
+        """
+        ids = []
+        for row in range(self._table.rowCount()):
+            tick = self._table.item(row, 0)
+            id_item = self._table.item(row, 1)
+            if not id_item or not id_item.text().isdigit():
+                continue
+            if tick and tick.checkState() == Qt.CheckState.Checked:
+                ids.append(int(id_item.text()))
+        if ids:
+            return ids
+        for index in self._table.selectionModel().selectedRows():
+            id_item = self._table.item(index.row(), 1)
+            if id_item and id_item.text().isdigit():
+                ids.append(int(id_item.text()))
+        return ids
+
+    def _toggle_select_all(self, state):
+        want = (Qt.CheckState.Checked if self._select_all.isChecked()
+                else Qt.CheckState.Unchecked)
+        self._table.blockSignals(True)
+        for row in range(self._table.rowCount()):
+            tick = self._table.item(row, 0)
+            if tick:
+                tick.setCheckState(want)
+        self._table.blockSignals(False)
+        self._on_selection_changed()
+
+    def _on_selection_changed(self):
+        count = len(self._selected_ids())
+        self._delete_btn.setEnabled(count > 0)
+        self._delete_btn.setText(
+            "🗑  Delete selected" if count == 0 else f"🗑  Delete {count}")
+
+    def _delete_selected(self):
+        ids = self._selected_ids()
+        if not ids:
+            return
+
+        # Named plainly, with no default button, because this cannot be
+        # undone — the file is removed from disk along with the row.
+        box = QMessageBox(self)
+        box.setWindowTitle("Delete screenshots")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"Delete {len(ids)} screenshot(s)?")
+        box.setInformativeText(
+            "The encrypted files are removed from the server as well as the "
+            "records. This cannot be undone.\n\n"
+            "The deletion is written to the audit log."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel
+                               | QMessageBox.StandardButton.Yes)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        self._delete_btn.setEnabled(False)
+        self._delete_btn.setText("Deleting…")
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/screenshots/delete", {"ids": ids})
+
+        def done(result: dict):
+            if result.get("success"):
+                self._load()
+            else:
+                QMessageBox.warning(self, "Could not delete",
+                                    result.get("message", "The server refused."))
+                self._on_selection_changed()
+
+        w.result.connect(done)
+        w.error.connect(lambda e: (
+            QMessageBox.warning(self, "Could not delete",
+                                f"Could not reach the server: {e}"),
+            self._on_selection_changed(),
+        ))
+        _track_worker(self._workers, w)
+        w.start()
+
     def _on_search_clicked(self):
         self._user_searched = True
         self._load(page=1)
@@ -1629,11 +2038,13 @@ class _ScreenshotsTab(QWidget):
     def _prev_page(self): self._load(self._page - 1)
     def _next_page(self): self._load(self._page + 1)
     def _open_preview(self, row, column):
-        # Get screenshot ID
-        id_item = self._table.item(row, 0)
-        emp_item = self._table.item(row, 1)
-        file_item = self._table.item(row, 2)
-        ts_item = self._table.item(row, 3)
+        # Columns shifted by one when the tick box was added at 0. Reading
+        # the wrong ones here would have opened a preview for a screenshot id
+        # of "" and looked like the preview was broken.
+        id_item = self._table.item(row, 1)
+        emp_item = self._table.item(row, 2)
+        file_item = self._table.item(row, 3)
+        ts_item = self._table.item(row, 4)
 
         if not id_item:
             return
@@ -1946,7 +2357,7 @@ class _DashboardTab(QWidget):
         w = _FetchWorker(url)
 
         w.result.connect(self._on_summary)
-        w.error.connect(lambda e: print("[SUMMARY ERROR]", e))
+        w.error.connect(self._on_summary_failed)
         _track_worker(self._workers, w)
         w.start()
 
@@ -1958,8 +2369,37 @@ class _DashboardTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
 
+    def _on_summary_failed(self, error: str):
+        """Say the figures could not be fetched, rather than showing zeros.
+
+        This is the failure that mattered. A dropped request used to leave
+        the cards reading 0 employees, 0 screenshots, 0 activity logs — which
+        is exactly what a wiped database looks like. It was read as one, and
+        the data was fine the whole time.
+
+        The counts are replaced with a dash and the subtitle says why. What
+        must never happen again is a number on screen that was never measured.
+        """
+        for card in (self._card_total_employees, self._card_online,
+                     self._card_offline, self._card_total_screens,
+                     self._card_total_logs):
+            try:
+                card.set_value("—")
+                card.set_subtitle("Could not reach the server")
+            except Exception:
+                pass
+        print("[SUMMARY ERROR]", error)
+
     def _on_summary(self, data: dict):
         s = data.get("data", data)
+
+        # A payload without the expected keys is a failure wearing a 200.
+        # Filling in zeros for missing fields is what made a network blip
+        # look like an empty database.
+        expected = ("total_employees", "total_screenshots", "total_activity_logs")
+        if not isinstance(s, dict) or not any(k in s for k in expected):
+            self._on_summary_failed("unexpected response shape")
+            return
 
         total   = s.get('total_employees', 0) or 0
         online  = s.get('online_employees', 0) or 0
@@ -2267,6 +2707,15 @@ class _ReportsTab(QWidget):
         self._emp.setMinimumWidth(200)
         self._emp.addItem("All employees", "all")
 
+        # Two reports, one page. Attendance answers "how did people do";
+        # audit answers "what did administrators do". Same range controls,
+        # so the weekly habit is the same for both.
+        self._kind = QComboBox()
+        self._kind.setFixedHeight(36)
+        self._kind.addItem("Attendance", "attendance")
+        self._kind.addItem("Admin actions (audit)", "audit")
+        self._kind.currentIndexChanged.connect(lambda _i: self._on_kind_changed())
+
         run = _btn("📊  Generate", variant="primary", height=36)
         run.clicked.connect(self.refresh)
         self._export_btn = _btn("⬇  Export CSV", variant="secondary", height=36)
@@ -2277,6 +2726,8 @@ class _ReportsTab(QWidget):
         bar.addWidget(self._from)
         bar.addWidget(_muted_label("To"))
         bar.addWidget(self._to)
+        bar.addWidget(_muted_label("Report"))
+        bar.addWidget(self._kind)
         bar.addWidget(_muted_label("Employee"))
         bar.addWidget(self._emp)
         bar.addWidget(run)
@@ -2319,7 +2770,21 @@ class _ReportsTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
 
+    def _on_kind_changed(self):
+        # The employee filter belongs to the attendance report; the audit
+        # report is about administrators, not about one employee.
+        audit = self._kind.currentData() == "audit"
+        self._emp.setEnabled(not audit)
+        self._table.setRowCount(0)
+        self._export_btn.setEnabled(False)
+        self._status.setText(
+            "Administrative actions over the range — password resets, "
+            "screenshot deletions, role and retention changes. Press Generate."
+            if audit else "Choose a range and press Generate.")
+
     def refresh(self):
+        if self._kind.currentData() == "audit":
+            return self._refresh_audit()
         params = {
             "from": self._from.date().toString("yyyy-MM-dd"),
             "to":   self._to.date().toString("yyyy-MM-dd"),
@@ -2337,7 +2802,86 @@ class _ReportsTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
 
+    AUDIT_COLUMNS = [("When (IST)", 140), ("By", 130), ("Role", 100), ("Action", 400)]
+
+    def _refresh_audit(self):
+        params = {
+            "from": self._from.date().toString("yyyy-MM-dd"),
+            "to":   self._to.date().toString("yyyy-MM-dd"),
+        }
+        if params["from"] > params["to"]:
+            self._status.setText("The From date is after the To date.")
+            return
+
+        self._status.setText("Generating…")
+        self._export_btn.setEnabled(False)
+        w = _FetchWorker(f"{API_BASE_URL}/admin/reports/audit", params)
+        w.result.connect(self._populate_audit)
+        w.error.connect(lambda e: self._status.setText(
+            "Only a super admin can read the audit report."
+            if "403" in str(e) else f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _populate_audit(self, data: dict):
+        if not data.get("success"):
+            self._status.setText(data.get("message", "The report could not be generated."))
+            self._table.setRowCount(0)
+            return
+
+        entries = data.get("entries", [])
+        self._rows = entries
+        self._audit_summary = data
+
+        self._table.setColumnCount(len(self.AUDIT_COLUMNS))
+        self._table.setHorizontalHeaderLabels([c[0] for c in self.AUDIT_COLUMNS])
+        for i, (_, width) in enumerate(self.AUDIT_COLUMNS):
+            self._table.horizontalHeader().setSectionResizeMode(
+                i, QHeaderView.ResizeMode.Stretch if i == 3
+                else QHeaderView.ResizeMode.Fixed)
+            if i != 3:
+                self._table.setColumnWidth(i, width)
+
+        self._table.setRowCount(len(entries))
+        for i, row in enumerate(entries):
+            self._table.setItem(i, 0, _cell(row.get("at", ""), mono=True, muted=True))
+            self._table.setItem(i, 1, _cell(row.get("by", ""), mono=True))
+            self._table.setItem(i, 2, _cell(row.get("role", "") or "—", muted=True))
+            action = _cell(row.get("action", ""))
+            # Anything that removes data is worth spotting at a glance.
+            if any(row.get("action", "").startswith(p)
+                   for p in ("SCREENSHOTS DELETED", "EMPLOYEE DELETED", "PASSWORD RESET")):
+                action.setForeground(QColor(C["warning"]))
+            self._table.setItem(i, 3, action)
+
+        self._export_btn.setEnabled(bool(entries))
+        if not entries:
+            self._status.setText(
+                f"No administrative actions between {data.get('from')} and "
+                f"{data.get('to')}. That is the expected answer for most weeks.")
+            return
+
+        actions = ", ".join(f"{a['action']} ×{a['count']}"
+                            for a in (data.get("by_action") or [])[:5])
+        people = ", ".join(f"{p['username']} ×{p['count']}"
+                           for p in (data.get("by_person") or [])[:5])
+        self._status.setText(
+            f"{data.get('total')} action(s) over {data.get('days')} day(s), "
+            f"{data.get('from')} to {data.get('to')}.\n"
+            f"By action: {actions}\nBy person: {people}"
+            + ("\nOnly the first 5000 are shown." if data.get("truncated") else ""))
+
     def _populate(self, data: dict):
+        # Coming back from the audit report — restore the attendance columns.
+        if self._table.columnCount() != len(self.COLUMNS):
+            self._table.setColumnCount(len(self.COLUMNS))
+            self._table.setHorizontalHeaderLabels([c[0] for c in self.COLUMNS])
+            for i, (_, width) in enumerate(self.COLUMNS):
+                self._table.horizontalHeader().setSectionResizeMode(
+                    i, QHeaderView.ResizeMode.Stretch if i == 0
+                    else QHeaderView.ResizeMode.Fixed)
+                if i:
+                    self._table.setColumnWidth(i, width)
         if not data.get("success"):
             self._status.setText(data.get("message", "The report could not be generated."))
             self._table.setRowCount(0)
@@ -2412,6 +2956,8 @@ class _ReportsTab(QWidget):
     def _export(self):
         if not self._rows:
             return
+        if self._kind.currentData() == "audit":
+            return self._export_audit()
         default = (f"ets-report-{self._from.date().toString('yyyyMMdd')}"
                    f"-{self._to.date().toString('yyyyMMdd')}.csv")
         path, _ = QFileDialog.getSaveFileName(self, "Export report", default, "CSV (*.csv)")
@@ -2434,6 +2980,21 @@ class _ReportsTab(QWidget):
 
         if _export_to_csv(path, headers, rows):
             self._status.setText(f"Exported {len(rows)} row(s) to {path}")
+        else:
+            self._status.setText("Could not write that file.")
+
+    def _export_audit(self):
+        default = (f"ets-audit-{self._from.date().toString('yyyyMMdd')}"
+                   f"-{self._to.date().toString('yyyyMMdd')}.csv")
+        path, _ = QFileDialog.getSaveFileName(self, "Export audit report", default,
+                                              "CSV (*.csv)")
+        if not path:
+            return
+        headers = ["When (IST)", "By", "Role", "Action"]
+        rows = [[r.get("at", ""), r.get("by", ""), r.get("role", "") or "",
+                 r.get("action", "")] for r in self._rows]
+        if _export_to_csv(path, headers, rows):
+            self._status.setText(f"Exported {len(rows)} action(s) to {path}")
         else:
             self._status.setText("Could not write that file.")
 
@@ -3181,12 +3742,12 @@ class _EmployeesTab(QWidget):
             manage_btn = _btn("Manage  ▾", variant="secondary", height=30, width=108)
             menu = QMenu(manage_btn)
             menu.setStyleSheet(
-                "QMenu{background:#111827;border:1px solid #1e2a42;border-radius:8px;"
-                "padding:6px;color:#e8edf7;}"
+                f"QMenu{{background:{C['bg_surface']};border:1px solid {C['border']};"
+                f"border-radius:8px;padding:6px;color:{C['text_primary']};}}"
                 "QMenu::item{padding:8px 18px;border-radius:6px;font-size:13px;}"
-                "QMenu::item:selected{background:#1d4ed8;color:white;}"
-                "QMenu::item:disabled{color:#5a6b85;}"
-                "QMenu::separator{height:1px;background:#1e2a42;margin:5px 4px;}"
+                f"QMenu::item:selected{{background:{C['accent']};color:#ffffff;}}"
+                f"QMenu::item:disabled{{color:{C['text_muted']};}}"
+                f"QMenu::separator{{height:1px;background:{C['border']};margin:5px 4px;}}"
             )
 
             def add_action(label, slot, enabled=True, tip=""):
@@ -3222,6 +3783,31 @@ class _EmployeesTab(QWidget):
                 lambda _=False, e=emp: self._force_logout(e),
                 enabled=can_force,
                 tip="" if can_force else "The super admin cannot be force logged out.",
+            )
+
+            # Suspend / restore.
+            #
+            # Shown to every admin so the capability is discoverable, and
+            # enabled only where the hierarchy allows it — an admin sees the
+            # entry on another admin's row but cannot use it, with the reason
+            # in the tooltip rather than the item silently missing.
+            #
+            # `can_config` is the same rule the server enforces: admins may
+            # act on employees and on themselves, super admins on anyone.
+            suspended = bool(emp.get("suspended"))
+            can_suspend = can_config and not is_self
+            suspend_tip = ""
+            if is_self:
+                suspend_tip = "You cannot suspend your own account."
+            elif not can_config:
+                suspend_tip = ("Only a super admin can manage this account."
+                               if tgt_super else
+                               "Admins cannot suspend other admins — ask a super admin.")
+            add_action(
+                "▶  Unsuspend account" if suspended else "⏸  Suspend account",
+                lambda _=False, e=emp, now=suspended: self._set_suspended(e, not now),
+                enabled=can_suspend,
+                tip=suspend_tip,
             )
 
             # Reset password — same rule as any other write on the account
@@ -3306,6 +3892,48 @@ class _EmployeesTab(QWidget):
         _track_worker(self._workers, w)
         w.start()
         
+    def _set_suspended(self, emp: dict, suspend: bool):
+        emp_id = emp.get("employee_id")
+        username = emp.get("username", emp_id)
+        if not emp_id:
+            return
+
+        if suspend:
+            question = (
+                f"Suspend {username}?\n\n"
+                "They will be signed out immediately and cannot sign in again "
+                "until an administrator restores the account. Force logout on "
+                "its own does not do this — they could simply sign back in."
+            )
+        else:
+            question = f"Restore {username}?\n\nThey will be able to sign in again."
+
+        reply = QMessageBox.question(
+            self, "Suspend account" if suspend else "Restore account", question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        w = _PostWorker(f"{API_BASE_URL}/admin/employees/{emp_id}/suspend",
+                        {"suspended": suspend})
+
+        def done(result: dict):
+            if result.get("success"):
+                # Reload so the row — and the menu entry's label — reflect the
+                # new state. A button that still says "Suspend" after
+                # suspending is how people end up doing it twice.
+                self._load_employees()
+            else:
+                QMessageBox.warning(self, "Could not change the account",
+                                    result.get("message", "The server refused."))
+
+        w.result.connect(done)
+        w.error.connect(lambda e: QMessageBox.warning(
+            self, "Could not change the account", f"Could not reach the server: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
     def _reset_password(self, emp: dict):
         emp_id   = emp.get("employee_id")
         username = emp.get("username", emp_id)
@@ -3333,20 +3961,77 @@ class _EmployeesTab(QWidget):
                 return
 
             temporary = data.get("temporary_password", "")
-            # Shown exactly once — the server stores only the bcrypt hash,
-            # so there is no way to look this up again afterwards.
-            box = QMessageBox(self)
-            box.setWindowTitle("Password reset")
-            box.setIcon(QMessageBox.Icon.Information)
-            box.setText(f"Temporary password for {username}")
-            box.setInformativeText(
-                f"{temporary}\n\n"
-                "Give this to them directly. It is shown only now and cannot "
-                "be recovered later. They will be asked to choose their own "
-                "password as soon as they sign in with it."
+
+            # Shown exactly once — the server stores only the bcrypt hash, so
+            # there is no way to look this up again afterwards. That makes
+            # getting it OUT of this dialog the whole job.
+            #
+            # BUG this fixes: the password sat in setInformativeText with
+            # TextSelectableByMouse set on the box. That flag applies to the
+            # main text, and informative text is not selectable on Windows —
+            # so the one string that cannot be recovered could not be copied
+            # or even highlighted. It had to be retyped by eye.
+            #
+            # Now it is in a read-only field that selects everything on
+            # focus, with a button that puts it straight on the clipboard.
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Password reset")
+            dialog.setMinimumWidth(460)
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(24, 22, 24, 20)
+            layout.setSpacing(14)
+
+            heading = QLabel(f"Temporary password for <b>{username}</b>")
+            heading.setStyleSheet(
+                f"color:{C['text_primary']}; font-size:14px; background:transparent;"
             )
-            box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            box.exec()
+            layout.addWidget(heading)
+
+            field = QLineEdit(temporary)
+            field.setReadOnly(True)
+            field.setFixedHeight(40)
+            field.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            field.setObjectName("tempPwd")
+            field.setStyleSheet(
+                f"#tempPwd {{ background:{C['bg_elevated']}; color:{C['text_primary']};"
+                f" border:1px solid {C['accent']}; border-radius:8px;"
+                f" font-family:'SF Mono','Menlo','Consolas',monospace;"
+                f" font-size:16px; letter-spacing:1px; }}"
+            )
+            field.selectAll()
+            layout.addWidget(field)
+
+            note = QLabel(
+                "Give this to them directly. It is shown only now and cannot be "
+                "recovered later — if it is lost, reset the password again. They "
+                "will be asked to choose their own as soon as they sign in with it."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet(
+                f"color:{C['text_muted']}; font-size:12px; background:transparent;"
+            )
+            layout.addWidget(note)
+
+            buttons = QHBoxLayout()
+            buttons.addStretch()
+            copy_btn = _btn("📋  Copy", variant="primary", height=36)
+            done_btn = _btn("Done", variant="secondary", height=36)
+
+            def copy_it():
+                QApplication.clipboard().setText(temporary)
+                copy_btn.setText("✓  Copied")
+                # Back to normal so a second copy is obviously possible.
+                QTimer.singleShot(1800, lambda: copy_btn.setText("📋  Copy"))
+
+            copy_btn.clicked.connect(copy_it)
+            done_btn.clicked.connect(dialog.accept)
+            buttons.addWidget(copy_btn)
+            buttons.addWidget(done_btn)
+            layout.addLayout(buttons)
+
+            dialog.setStyleSheet(f"QDialog {{ background:{C['bg_surface']}; }}")
+            field.setFocus()
+            dialog.exec()
 
         w = _PostWorker(f"{API_BASE_URL}/admin/employees/{emp_id}/password", {})
         w.result.connect(show)
@@ -3700,6 +4385,7 @@ class _TopHeader(QFrame):
     refresh_clicked = Signal()
     export_clicked  = Signal()
     sync_clicked    = Signal()
+    theme_clicked   = Signal()
 
     def __init__(self):
         super().__init__()
@@ -3739,6 +4425,21 @@ class _TopHeader(QFrame):
             btn.clicked.connect(slot)
             lay.addWidget(btn)
             return btn
+
+        # The theme switch sits first, before the actions, because it is the
+        # only one that changes how everything looks rather than what it says.
+        self.btn_theme = QPushButton("☀" if _theme.is_light() else "☾")
+        self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_theme.setFixedSize(44, 44)
+        self.btn_theme.setToolTip(
+            "Switch to the dark theme" if _theme.is_light()
+            else "Switch to the light theme")
+        self.btn_theme.setStyleSheet(
+            f"QPushButton{{background:{C['bg_surface']};border:1px solid {C['border']};"
+            f"border-radius:10px;color:{C['text_primary']};font-size:18px;}}"
+            f"QPushButton:hover{{border-color:{C['accent']};}}")
+        self.btn_theme.clicked.connect(self.theme_clicked.emit)
+        lay.addWidget(self.btn_theme)
 
         self.btn_refresh = action("↻", "Refresh", self.refresh_clicked.emit)
         self.btn_export  = action("📥", "Export", self.export_clicked.emit)
@@ -3810,6 +4511,20 @@ class _TopHeader(QFrame):
 
 class AdminConfigPanel(QMainWindow):
 
+    # Every tab that owns background workers or timers.
+    #
+    # This used to be written out by hand in _drain_workers and again in
+    # _stop_background_services, and both copies were incomplete: neither
+    # listed _reports_tab, and adding the Teams tab would have made a third
+    # omission. A tab missing from these lists keeps its threads running past
+    # logout, and a QThread destroyed while still running takes the whole
+    # application down — which is the crash the comments in those two methods
+    # are already about. One list, so the next tab cannot be forgotten.
+    TAB_ATTRS = (
+        "_dashboard_tab", "_config_tab", "_employees_tab", "_attendance_tab",
+        "_screenshots_tab", "_teams_tab", "_reports_tab", "_logs_tab",
+    )
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Amaze ETS — Control Center")
@@ -3818,6 +4533,21 @@ class AdminConfigPanel(QMainWindow):
         self._logging_out = False  # Guard flag to prevent recursion
         self._force_close = False  # True = asli exit (tray se), minimise nahi
         self.setStyleSheet(_global_stylesheet())
+        self._build_central()
+        self._after_central()
+
+    def _build_central(self):
+        """Everything inside the window. Re-run when the theme changes.
+
+        ACCENTS is refreshed first: the cards read it while they are being
+        constructed, and the light palette needs a darker green and amber than
+        the dark one — #22c55e on white is barely visible.
+
+        Rebuilding rather than restyling is deliberate — see theme.py. Ninety
+        call sites in this file bake their colours in at construction, so the
+        only way to be certain none was missed is to construct them again.
+        """
+        ACCENTS.update(_accents())
 
         central = QWidget()
         central.setObjectName("rootContainer")
@@ -3835,11 +4565,9 @@ class AdminConfigPanel(QMainWindow):
         c_lay.setSpacing(0)
 
         self.header = _TopHeader()
-        # Header ke quick actions — pehle inke liye har baar tab badalna
-        # padta tha; ab kisi bhi page se seedha chal jaate hain.
-        self.header.refresh_clicked.connect(self._refresh_current_page)
-        self.header.export_clicked.connect(self._export_current_page)
-        self.header.sync_clicked.connect(self._sync_now)
+        # Its signals are attached in _wire_central, not here — a theme switch
+        # rebuilds this header and would otherwise connect each one twice, so
+        # every Refresh would fire two requests.
         c_lay.addWidget(self.header)
 
         self.stack = QStackedWidget()
@@ -3858,6 +4586,10 @@ class AdminConfigPanel(QMainWindow):
         self._employees_tab   = _EmployeesTab()
         self._attendance_tab  = _AttendanceTab()
         self._screenshots_tab = _ScreenshotsTab()
+        # Imported here rather than at module scope: admin_teams_tab borrows
+        # this file's helpers, so importing it at the top would be circular.
+        from client.presentation.windows.admin_teams_tab import _TeamsTab
+        self._teams_tab       = _TeamsTab()
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
 
@@ -3872,6 +4604,7 @@ class AdminConfigPanel(QMainWindow):
             self._employees_tab,
             self._attendance_tab,
             self._screenshots_tab,
+            self._teams_tab,
             self._reports_tab,
             self._logs_tab,
         ):
@@ -3901,20 +4634,61 @@ class AdminConfigPanel(QMainWindow):
         c_lay.addWidget(status)
 
         root.addWidget(content, 1)
-        self.setCentralWidget(central)
 
+        # The previous central widget has to be destroyed EXPLICITLY.
+        #
+        # setCentralWidget removes it from the layout but leaves it parented
+        # to the window, so after a theme switch the entire old console was
+        # still alive underneath the new one — every tab, every chart, every
+        # timer, in the colours nobody could see any more. Invisible, and
+        # doubling with each switch.
+        #
+        # Found by the theme test walking the widget tree and finding dark
+        # widgets in a light window; from the screen alone it looked perfect.
+        previous = self.centralWidget()
+        self.setCentralWidget(central)
+        if previous is not None and previous is not central:
+            previous.setParent(None)
+            previous.deleteLater()
+
+    def _wire_central(self, page_index: int = 0):
+        """Signals that belong to the widgets _build_central just made.
+
+        Separate from the services below because a theme switch rebuilds the
+        widgets and must re-attach these — but must NOT start a second
+        scheduler or a second idle tracker.
+        """
         # Dashboard ke Quick Actions ko sidebar navigation se joda
-        for label, (btn, page_index) in getattr(
+        for label, (btn, page_index_) in getattr(
             self._dashboard_tab, "_quick_buttons", {}
         ).items():
             btn.clicked.connect(
-                lambda _=False, idx=page_index: self.sidebar.select(idx)
+                lambda _=False, idx=page_index_: self.sidebar.select(idx)
             )
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
         self.sidebar.logout_btn.clicked.connect(self.logout)
         self.sidebar.password_btn.clicked.connect(self._change_own_password)
-        self._on_page_changed(0)
+        self.header.refresh_clicked.connect(self._refresh_current_page)
+        self.header.export_clicked.connect(self._export_current_page)
+        self.header.sync_clicked.connect(self._sync_now)
+        self.header.theme_clicked.connect(self._toggle_theme)
+        self.sidebar.select(page_index)
+        self._on_page_changed(page_index)
+
+    def _toggle_theme(self):
+        """Switch palette, rebuild everything inside the window."""
+        page_index = self.stack.currentIndex() if hasattr(self, "stack") else 0
+        _theme.toggle_theme()
+        self.setStyleSheet(_global_stylesheet())
+        # The old tabs' timers and threads go before their widgets do — a
+        # QThread destroyed while still running takes the application down.
+        self._stop_background_services()
+        self._build_central()
+        self._wire_central(page_index)
+
+    def _after_central(self):
+        self._wire_central(0)
         self.scheduler = SchedulerService()
         self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
         if hasattr(self.scheduler, "force_logout"):
@@ -4088,8 +4862,7 @@ class AdminConfigPanel(QMainWindow):
         pe logout dabate hi ye crash trigger ho sakta tha.
         """
         pending = []
-        for attr in ("_dashboard_tab", "_config_tab", "_employees_tab",
-                     "_attendance_tab", "_screenshots_tab", "_logs_tab"):
+        for attr in self.TAB_ATTRS:
             tab = getattr(self, attr, None)
             if tab is not None:
                 pending.extend(getattr(tab, "_workers", []) or [])
@@ -4122,7 +4895,7 @@ class AdminConfigPanel(QMainWindow):
         if hasattr(self, 'idle_tracker'):
             self.idle_tracker.stop()
 
-        for tab_attr in ['_config_tab', '_screenshots_tab', '_logs_tab', '_attendance_tab', '_employees_tab', '_dashboard_tab']:
+        for tab_attr in self.TAB_ATTRS:
             tab = getattr(self, tab_attr, None)
             if tab is None:
                 continue
@@ -4169,7 +4942,18 @@ class AdminConfigPanel(QMainWindow):
                 "Any other device you were signed in on has been signed out.",
             )
 
-    def logout(self):
+    def logout(self, reason: str = ""):
+        """Sign out. `reason` is set when the SERVER ended the session.
+
+        force_logout carries it — suspension, or an admin's force logout.
+        Without showing it the app just returns to the login screen for no
+        stated cause, which reads as a crash and gets reported as one.
+        """
+        if reason:
+            try:
+                QMessageBox.warning(self, "Signed out", reason)
+            except Exception:
+                pass
         from client.application.managers.session_manager import SessionManager
         from client.application.managers.shift_manager import ShiftManager
         from client.application.managers.session_log_manager import SessionLogManager

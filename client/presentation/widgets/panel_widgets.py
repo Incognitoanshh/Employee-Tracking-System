@@ -230,7 +230,7 @@ class QuickAction(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(52)
         bg, border, fg, hover = (
-            ("#3f1218", "#7f1d1d", "#fca5a5", "#7f1d1d") if danger
+            (C.RED_BG, C.DANGER_BORDER, C.RED, C.DANGER_BORDER) if danger
             else (C.CARD, C.BORDER, C.TEXT, C.CARD_HOVER)
         )
         self.setStyleSheet(f"""
@@ -313,6 +313,7 @@ class NavButton(QPushButton):
 
     def __init__(self, icon: str, label: str, parent=None):
         super().__init__(f"   {icon}    {label}", parent)
+        self._base_text = f"   {icon}    {label}"
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(46)
@@ -327,6 +328,17 @@ class NavButton(QPushButton):
                 background:{C.PRIMARY_DIM}; color:#ffffff;
             }}
         """)
+
+    def set_badge(self, count: int) -> None:
+        """Show an unread count beside the label, or clear it at zero.
+
+        The count goes in the button's own text rather than a floating label:
+        a separate widget positioned over a button is the kind of thing that
+        drifts when the sidebar is resized, and this never can.
+        """
+        count = max(0, int(count or 0))
+        self.setText(self._base_text if count == 0
+                     else f"{self._base_text}   ({count if count < 100 else '99+'})")
 
 
 class ActivityRow(QFrame):

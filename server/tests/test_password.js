@@ -52,6 +52,19 @@ async function api(method, route, { token, body } = {}) {
     return { status: response.status, body: payload };
 }
 
+/**
+ * Sign in, freeing the account first.
+ *
+ * One account can only be signed in on one machine at a time now, so a test
+ * that signs the same employee in repeatedly has to release the session
+ * between attempts — otherwise every login after the first is correctly
+ * refused with 409 and the check under test never runs.
+ */
+async function freshLogin(username, password, heldToken) {
+    if (heldToken) await api("POST", "/auth/logout", { token: heldToken });
+    return api("POST", "/auth/login", { body: { username, password } });
+}
+
 async function main() {
     const root = path.resolve(__dirname, "..", "..");
 
@@ -114,18 +127,27 @@ async function main() {
             res.status === 200, `status ${res.status} ${res.body.message || ""}`);
 
         // ── the employee signs in on two devices ────────────────────────
+        // NOTE: one account can no longer be signed in on two machines at
+        // once — see test_single_session.js. So "the other device" here is a
+        // session that was live earlier and has since been replaced, which
+        // is the same thing from the token's point of view: an old token
+        // that must stop working.
         res = await api("POST", "/auth/login",
             { body: { username: "emp1", password: "FirstPass99" } });
         const deviceA = res.body.token;
-        // A JWT's `iat` has one-second resolution, so two logins inside the
-        // same second produce a byte-identical token and the "other device"
-        // below would really be the same one. Wait past the tick.
+        check("employee signs in", res.status === 200, `status ${res.status}`);
+
+        await api("POST", "/auth/logout", { token: deviceA });
+        // A JWT's `iat` has one-second resolution: without the wait the
+        // replacement token is byte-identical and nothing below is
+        // observable.
         await new Promise((r) => setTimeout(r, 1100));
         res = await api("POST", "/auth/login",
             { body: { username: "emp1", password: "FirstPass99" } });
         const deviceB = res.body.token;
-        check("employee signs in on two devices",
-            Boolean(deviceA) && Boolean(deviceB) && deviceA !== deviceB);
+        check("signs in again on another machine after logging out",
+            res.status === 200 && deviceB && deviceB !== deviceA,
+            `status ${res.status}`);
 
         // ── changing your own password ──────────────────────────────────
         res = await api("POST", "/auth/password", { token: deviceB, body: {
@@ -162,15 +184,16 @@ async function main() {
             res.status === 401, `status ${res.status}`);
 
         res = await api("GET", "/dashboard/me", { token: deviceA });
-        check("the other device is signed out", res.status === 401, `status ${res.status}`);
+        check("the earlier session's token is dead too",
+            res.status === 401, `status ${res.status}`);
 
         res = await api("POST", "/auth/login",
             { body: { username: "emp1", password: "FirstPass99" } });
         check("the old password no longer works", res.status === 401, `status ${res.status}`);
 
-        res = await api("POST", "/auth/login",
-            { body: { username: "emp1", password: "SecondPass99" } });
+        res = await freshLogin("emp1", "SecondPass99", deviceBNew);
         check("the new password works", res.status === 200, `status ${res.status}`);
+        let empToken = res.body.token;
 
         // ── an admin resets a forgotten password ────────────────────────
         res = await api("POST", "/admin/employees", { token: saToken, body: {
@@ -190,8 +213,7 @@ async function main() {
         check("the reset signs the employee out everywhere",
             res.status === 401, `status ${res.status}`);
 
-        res = await api("POST", "/auth/login",
-            { body: { username: "emp1", password: temporary } });
+        res = await freshLogin("emp1", temporary, empToken);
         check("the temporary password signs in", res.status === 200, `status ${res.status}`);
         check("login demands a password change",
             res.body.must_change_password === true, String(res.body.must_change_password));
@@ -202,10 +224,10 @@ async function main() {
         check("the employee replaces the temporary password",
             res.status === 200, `status ${res.status}`);
 
-        res = await api("POST", "/auth/login",
-            { body: { username: "emp1", password: "ThirdPass99" } });
+        res = await freshLogin("emp1", "ThirdPass99", tempToken);
         check("the flag clears once they choose their own",
             res.body.must_change_password === false, String(res.body.must_change_password));
+        empToken = res.body.token;
 
         // ── the hierarchy holds ─────────────────────────────────────────
         res = await api("POST", "/admin/employees", { token: saToken, body: {
@@ -224,8 +246,7 @@ async function main() {
         check("a super admin can reset an admin's password",
             res.status === 200, `status ${res.status}`);
 
-        const empRes = await api("POST", "/auth/login",
-            { body: { username: "emp1", password: "ThirdPass99" } });
+        const empRes = await freshLogin("emp1", "ThirdPass99", empToken);
         res = await api("POST", "/admin/employees/A002/password",
             { token: empRes.body.token });
         check("an employee cannot reset anybody's password",
@@ -240,10 +261,10 @@ async function main() {
         // typing "amazeinternet" — right password, "Invalid credentials", no
         // way to tell the difference from the outside.
         for (const attempt of ["EMP1", "Emp1", "eMp1", "  emp1  "]) {
-            res = await api("POST", "/auth/login",
-                { body: { username: attempt, password: "ThirdPass99" } });
+            res = await freshLogin(attempt, "ThirdPass99", empToken);
             check(`username ${JSON.stringify(attempt)} signs in`,
                 res.status === 200, `status ${res.status}`);
+            empToken = res.body.token;
         }
 
         // The dangerous half: if a case-variant account could be created,

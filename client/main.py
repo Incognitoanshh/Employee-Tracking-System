@@ -67,6 +67,12 @@ def main():
 
     Database.initialize()
 
+    # The chosen theme is read back before any window is built. Every widget
+    # bakes its colours in when it is constructed, so this has to happen
+    # first — after the settings table exists, and before the login window.
+    from client.presentation.theme import load_saved_theme
+    load_saved_theme()
+
     StartupManager.enable_autostart()
 
     app = QApplication(sys.argv)

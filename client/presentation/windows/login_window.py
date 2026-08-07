@@ -16,6 +16,7 @@ from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.services.logger_service import LoggerService
 from client.presentation.windows.base_window import BaseWindow
+from client.presentation.theme import C
 from client.presentation.windows.change_password_dialog import ChangePasswordDialog
 from client.presentation.windows.employee_panel import EmployeePanel
 from client.presentation.windows.admin_config_panel import AdminConfigPanel
@@ -136,11 +137,11 @@ class LoginWindow(BaseWindow):
         brand_label = QLabel("ETS")
         brand_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_label.setStyleSheet(
-            """
+            f"""
             font-size: 13px;
             font-weight: 700;
             letter-spacing: 4px;
-            color: #2563eb;
+            color: {C.PRIMARY};
             background: transparent;
             """
         )
@@ -151,12 +152,12 @@ class LoginWindow(BaseWindow):
         title_font.setBold(True)
         title.setFont(title_font)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("color: #f1f5f9; background: transparent;")
+        title.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
 
         subtitle = QLabel("Amaze Internet Services Pvt. Ltd.")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(
-            "color: #475569; font-size: 12px; background: transparent;"
+            f"color: {C.TEXT_MUTED}; font-size: 12px; background: transparent;"
         )
 
         card_layout.addWidget(brand_label)
@@ -167,26 +168,26 @@ class LoginWindow(BaseWindow):
         card_layout.addSpacing(32)
 
         # ── Fields ───────────────────────────────────────────
-        field_style = """
-        QLineEdit {
-            background-color: #0f172a;
-            border: 1px solid #1e3a5f;
+        field_style = f"""
+        QLineEdit {{
+            background-color: {C.BG};
+            border: 1px solid {C.BORDER};
             border-radius: 10px;
             padding: 12px 14px;
-            color: #f1f5f9;
+            color: {C.TEXT};
             font-size: 14px;
-        }
-        QLineEdit:focus {
-            border: 1px solid #2563eb;
-        }
-        QLineEdit::placeholder {
-            color: #475569;
-        }
+        }}
+        QLineEdit:focus {{
+            border: 1px solid {C.PRIMARY};
+        }}
+        QLineEdit::placeholder {{
+            color: {C.TEXT_DIM};
+        }}
         """
 
         user_label = QLabel("Username")
         user_label.setStyleSheet(
-            "color: #94a3b8; font-size: 12px; font-weight: 600; background: transparent;"
+            f"color: {C.TEXT_MUTED}; font-size: 12px; font-weight: 600; background: transparent;"
         )
 
         self.username_input = QLineEdit()
@@ -196,7 +197,7 @@ class LoginWindow(BaseWindow):
 
         pass_label = QLabel("Password")
         pass_label.setStyleSheet(
-            "color: #94a3b8; font-size: 12px; font-weight: 600; background: transparent;"
+            f"color: {C.TEXT_MUTED}; font-size: 12px; font-weight: 600; background: transparent;"
         )
 
         self.password_input = QLineEdit()
@@ -217,18 +218,18 @@ class LoginWindow(BaseWindow):
         forgot_password.setCursor(Qt.PointingHandCursor)
         forgot_password.setFlat(True)
 
-        forgot_password.setStyleSheet("""
-        QPushButton {
+        forgot_password.setStyleSheet(f"""
+        QPushButton {{
             border: none;
             background: transparent;
-            color: #3b82f6;
-                font-size: 12px;
-                font-weight: 500;
-        }
-        QPushButton:hover {
-            color: #60a5fa;
-                text-decoration: underline;
-        }
+            color: {C.PRIMARY};
+            font-size: 12px;
+            font-weight: 500;
+        }}
+        QPushButton:hover {{
+            color: {C.PRIMARY_DIM};
+            text-decoration: underline;
+        }}
         """)
 
         forgot_layout = QHBoxLayout()
@@ -245,19 +246,20 @@ class LoginWindow(BaseWindow):
         self.login_button = QPushButton("Sign In")
         self.login_button.setFixedHeight(46)
         self.login_button.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #2563eb;
+            f"""
+            QPushButton {{
+                background-color: {C.PRIMARY};
                 border: none;
                 border-radius: 10px;
-                color: white;
+                color: {C.ON_ACCENT};
                 font-weight: 700;
                 font-size: 14px;
                 letter-spacing: 0.3px;
-            }
-            QPushButton:hover { background-color: #3b82f6; }
-            QPushButton:pressed { background-color: #1d4ed8; }
-            QPushButton:disabled { background-color: #1e3a5f; color: #475569; }
+            }}
+            QPushButton:hover {{ background-color: {C.PRIMARY_DIM}; }}
+            QPushButton:pressed {{ background-color: {C.PRIMARY_DIM}; }}
+            QPushButton:disabled {{ background-color: {C.ELEVATED};
+                                    color: {C.TEXT_DIM}; }}
             """
         )
         self.login_button.clicked.connect(self.handle_login)
@@ -284,18 +286,18 @@ class LoginWindow(BaseWindow):
         version_label = QLabel(f"v{APP_VERSION}  ·  {_os}  ·  IST")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setStyleSheet(
-            "color: #334155; font-size: 11px; background: transparent;"
+            f"color: {C.TEXT_DIM}; font-size: 11px; background: transparent;"
         )
         card_layout.addWidget(version_label)
 
         card.setLayout(card_layout)
         card.setStyleSheet(
-            """
-            QFrame#loginCard {
-                background-color: #111827;
-                border: 1px solid #1e2d3d;
+            f"""
+            QFrame#loginCard {{
+                background-color: {C.CARD};
+                border: 1px solid {C.BORDER};
                 border-radius: 18px;
-            }
+            }}
             """
         )
 
@@ -312,7 +314,7 @@ class LoginWindow(BaseWindow):
 
         if not username or not password:
             self.status_label.setStyleSheet(
-                "color: #f59e0b; font-size: 13px; background: transparent;"
+                f"color: {C.AMBER}; font-size: 13px; background: transparent;"
             )
             self.status_label.setText("⚠  Please enter username and password.")
             self.login_button.setEnabled(True)
@@ -382,7 +384,7 @@ class LoginWindow(BaseWindow):
                     # panel still holding the temporary password.
                     SessionManager.clear_session()
                     self.status_label.setStyleSheet(
-                        "color: #f59e0b; font-size: 13px; background: transparent;"
+                        f"color: {C.AMBER}; font-size: 13px; background: transparent;"
                     )
                     self.status_label.setText("⚠  You must set a new password to continue.")
                     self.login_button.setEnabled(True)
@@ -400,7 +402,7 @@ class LoginWindow(BaseWindow):
         else:
             LoggerService.log(f"LOGIN FAILED : {username}")
             self.status_label.setStyleSheet(
-                "color: #ef4444; font-size: 13px; background: transparent;"
+                f"color: {C.RED}; font-size: 13px; background: transparent;"
             )
             self.status_label.setText(f"✕  {result.get('message', 'Login failed')}")
             self.login_button.setEnabled(True)
@@ -409,7 +411,7 @@ class LoginWindow(BaseWindow):
 
     def show_reset_message(self):
         self.status_label.setStyleSheet(
-            "color: #3b82f6; font-size: 13px; background: transparent;"
+            f"color: {C.PRIMARY}; font-size: 13px; background: transparent;"
             )
         self.status_label.setText(
              "Please contact your administrator to reset your password."

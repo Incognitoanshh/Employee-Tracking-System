@@ -11,6 +11,7 @@ const dashboardRoutes  = require("./routes/dashboard.routes");
 const configRoutes     = require("./routes/config.routes");
 const adminRoutes      = require("./routes/admin.routes");
 const attendanceRoutes = require("./routes/attendance.routes");
+const chatRoutes       = require("./routes/chat.routes");
 
 // Startup env validation
 const REQUIRED_ENV = ["JWT_SECRET", "DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
@@ -114,6 +115,7 @@ app.use("/api/dashboard",   verifyToken, dashboardRoutes);
 app.use("/api/config",      verifyToken, configRoutes);
 app.use("/api/admin",       verifyToken, adminRoutes);
 app.use("/api/attendance",  verifyToken, attendanceRoutes);
+app.use("/api/chat",        verifyToken, chatRoutes);
 
 app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.url}` });

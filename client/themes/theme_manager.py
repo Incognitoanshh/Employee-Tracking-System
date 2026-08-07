@@ -1,57 +1,55 @@
-from client.services.settings_service import SettingsService
+"""
+The colours BaseWindow uses — now taken from the one palette everybody shares.
+
+This used to be a THIRD colour system, alongside the employee panel's `C` and
+the admin console's dict, with its own light/dark idea driven by a separate
+"theme" setting. So the login window, the logs window and the screenshot
+preview could disagree with the panels about what theme the application was
+in, and the switch in either panel would not move them at all.
+
+Everything here now delegates to client.presentation.theme. The class is kept
+because BaseWindow and its three windows call it by name; it is a thin
+adapter, not a palette.
+"""
+
+from client.presentation.theme import C, current_theme
 
 
 class ThemeManager:
 
     @staticmethod
-    def current():
-
-        return SettingsService.get_setting(
-            "theme",
-            "Dark"
-        )
+    def current() -> str:
+        # Capitalised for the sake of anything that compared against "Dark".
+        return current_theme().capitalize()
 
     @staticmethod
-    def dark():
-
-        return ThemeManager.current() == "Dark"
-
-    @staticmethod
-    def background():
-
-        if ThemeManager.dark():
-            return "#0b0f19"
-
-        return "#f8fafc"
+    def dark() -> bool:
+        return current_theme() == "dark"
 
     @staticmethod
-    def card():
-
-        if ThemeManager.dark():
-            return "#111827"
-
-        return "#ffffff"
+    def background() -> str:
+        return C.BG
 
     @staticmethod
-    def border():
-
-        if ThemeManager.dark():
-            return "#1f2937"
-
-        return "#d1d5db"
+    def card() -> str:
+        return C.CARD
 
     @staticmethod
-    def primary_text():
-
-        if ThemeManager.dark():
-            return "#ffffff"
-
-        return "#111827"
+    def border() -> str:
+        return C.BORDER
 
     @staticmethod
-    def secondary_text():
+    def primary_text() -> str:
+        return C.TEXT
 
-        if ThemeManager.dark():
-            return "#94a3b8"
+    @staticmethod
+    def secondary_text() -> str:
+        return C.TEXT_MUTED
 
-        return "#64748b"
+    @staticmethod
+    def accent() -> str:
+        return C.PRIMARY
+
+    @staticmethod
+    def elevated() -> str:
+        return C.ELEVATED

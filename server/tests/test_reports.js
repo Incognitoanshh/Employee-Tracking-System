@@ -239,9 +239,9 @@ async function main() {
         res = await api("GET", "/admin/reports/attendance?from=nope&to=2026-08-09", { token });
         check("a malformed date is refused", res.status === 400, `status ${res.status}`);
 
-        res = await api("POST", "/auth/login",
-            { body: { username: "emp1", password: "SuperSecret123" } });
-        res = await api("GET", `/admin/reports/attendance?${range}`, { token: res.body.token });
+        // e1Token is already this employee's live session — one account can
+        // only be signed in once, so reuse it rather than signing in again.
+        res = await api("GET", `/admin/reports/attendance?${range}`, { token: e1Token });
         check("an employee cannot read the report", res.status === 403, `status ${res.status}`);
 
         server.close();
