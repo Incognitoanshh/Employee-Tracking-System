@@ -3,6 +3,9 @@ name: Build Cross-Platform Desktop Apps
 on:
   push:
     branches: [ main ]
+    # A version tag builds and publishes. Without this the release job below
+    # could never run, because nothing would start the workflow.
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
   # Rebuild on demand, without inventing a commit to trigger one.
@@ -136,3 +139,60 @@ jobs:
         with:
           name: ETS-Mac-DMG
           path: dmg_out/Amaze-ETS.dmg
+
+  # ── the release ────────────────────────────────────────────────────────
+  #  Runs only for a v* tag.
+  #
+  #  Until now the installers existed solely as workflow artifacts, which
+  #  expire — so the download links on a release older than a few weeks were
+  #  dead, and the last release had to be assembled by hand: download both
+  #  artifacts, then upload them again to the release page. This does that
+  #  part, so a tag is all it takes.
+  release:
+    needs: [build-windows, build-mac]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download the installers
+        uses: actions/download-artifact@v4
+        with:
+          path: installers
+
+      - name: Name them after the version
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          # A file called "Amaze ETS.exe" on a release page tells nobody which
+          # build it is. Somebody reporting a bug should be able to say so
+          # from the filename alone.
+          cp "installers/ETS-Windows-EXE/Amaze ETS.exe" "release/Amaze-ETS-${VERSION}-Windows.exe"
+          cp "installers/ETS-Mac-DMG/Amaze-ETS.dmg"     "release/Amaze-ETS-${VERSION}-macOS.dmg"
+          ls -lh release
+
+      - name: Check the version in the tag matches the one in the code
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE="$(grep -oE 'APP_VERSION = "[^"]+"' client/core/config/__init__.py | cut -d'"' -f2)"
+          # Shipping a build that reports a different version from the one it
+          # was released under makes every support conversation start with a
+          # wrong answer.
+          if [ "$TAG" != "$CODE" ]; then
+            echo "Tag says $TAG, the client reports $CODE."
+            echo "Update APP_VERSION in client/core/config/__init__.py, or retag."
+            exit 1
+          fi
+          echo "Both say $TAG."
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
