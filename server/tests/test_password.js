@@ -22,6 +22,7 @@
  */
 const { execFileSync } = require("child_process");
 const path = require("path");
+const { migrate } = require("./_migrate");
 
 const DB = `ets_pwtest_${process.pid}`;
 const PORT = 8000 + (process.pid % 1000);
@@ -70,16 +71,8 @@ async function main() {
 
     console.log(`Password endpoints, against a scratch database (${DB})\n`);
 
-    psql("postgres", `CREATE DATABASE ${DB}`);
     try {
-        execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q",
-            "-f", path.join(root, "ets.sql")], { stdio: "pipe" });
-        for (const migration of ["2026_08_05_password_management",
-                                 "2026_08_05_username_case_insensitive"]) {
-            execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f",
-                path.join(root, "server", "migrations", `${migration}.sql`)],
-                { stdio: "pipe" });
-        }
+        migrate(DB);
 
         // Seed a super admin directly — the API needs one to exist before it
         // can create anybody else.

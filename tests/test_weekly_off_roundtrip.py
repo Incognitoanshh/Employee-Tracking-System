@@ -58,21 +58,43 @@ def infrastructure_missing():
     return None
 
 
+
+def apply_all_migrations(db: str) -> None:
+    """Build `db` the way production is built: schema, then every migration.
+
+    NOT a hand-written list. Each suite used to name the few migrations it
+    thought it needed, so adding one meant remembering every suite — and
+    forgetting one produced a database that was half-new and failed somewhere
+    unrelated. Adding device_id to active_sessions broke a dozen suites that
+    way, all reporting "login returns 500".
+
+    It is the same fragility that took production down: a migration that did
+    not apply, and nothing anywhere that knew it had not.
+    """
+    import subprocess as _sp
+    paths = [os.path.join(ROOT, "ets.sql")]
+    directory = os.path.join(ROOT, "server", "migrations")
+    # Sorted by name, which is what the date prefixes are for.
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(".sql") and name != "retention_purge.sql":
+            paths.append(os.path.join(directory, name))
+    for path in paths:
+        result = _sp.run(["psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-q", "-f", path],
+                         capture_output=True, text=True)
+        if result.returncode != 0:
+            # Loud, and naming the file — a migration that fails quietly is
+            # the whole reason this exists.
+            raise SystemExit(
+                f"migration failed: {os.path.basename(path)}\n{result.stderr.strip()}")
+
+
 def main() -> int:
     import requests
 
     psql("postgres", f"CREATE DATABASE {DB}")
     server = None
     try:
-        for name in ("ets.sql",):
-            subprocess.run(["psql", "-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f",
-                            os.path.join(ROOT, name)], capture_output=True, check=True)
-        for migration in ("2026_08_05_password_management",
-                          "2026_08_05_username_case_insensitive",
-                          "2026_08_06_single_session"):
-            subprocess.run(["psql", "-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f",
-                            os.path.join(ROOT, "server", "migrations", f"{migration}.sql")],
-                           capture_output=True, check=True)
+        apply_all_migrations(DB)
 
         seeded = subprocess.run(
             ["node", "-e", "const b=require('bcryptjs');"

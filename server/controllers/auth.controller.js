@@ -122,11 +122,24 @@ exports.login = async (req, res) => {
         //
         // An admin can always free a stuck account with Force logout, which
         // clears the token outright.
+        // WHICH machine matters, not just whether one is signed in.
+        //
+        // BUG this fixes: the check asked only "is a session alive?", so
+        // closing the app without signing out locked you out of your own
+        // laptop. The session was still live, the login looked exactly like a
+        // second machine, and it was refused — with a message telling you to
+        // log out somewhere you were already sitting.
+        //
+        // The client has always sent device_id. Comparing it separates the
+        // two cases the rule actually cares about: the same machine coming
+        // back is fine, a second machine is not.
         const held = await pool.query(
-            `SELECT token, last_seen FROM active_sessions
+            `SELECT token, last_seen, device_id FROM active_sessions
               WHERE employee_id = $1 AND token IS NOT NULL`,
             [employee.employee_id]
         );
+
+        const thisDevice = String(req.body?.device_id || "").trim() || null;
 
         if (held.rows.length > 0) {
             // The held token may simply have expired — a machine that was
@@ -141,7 +154,14 @@ exports.login = async (req, res) => {
                 stillValid = false;
             }
 
-            if (stillValid) {
+            // Same machine — take the session back rather than refusing it.
+            // A NULL stored device_id means the row predates this and cannot
+            // be matched, so it is treated as a different machine: the safe
+            // direction, cleared by one sign-out.
+            const sameMachine = Boolean(
+                thisDevice && held.rows[0].device_id && held.rows[0].device_id === thisDevice);
+
+            if (stillValid && !sameMachine) {
                 // Say when that machine was last heard from. "Already logged
                 // in" on its own leaves no way to tell somebody actually
                 // working from a laptop that was shut without logging out —
@@ -186,11 +206,11 @@ exports.login = async (req, res) => {
 
         // New active session
         await pool.query(
-            `INSERT INTO active_sessions (employee_id, token, login_time, last_seen)
-             VALUES ($1, $2, NOW(), NOW())
+            `INSERT INTO active_sessions (employee_id, token, login_time, last_seen, device_id)
+             VALUES ($1, $2, NOW(), NOW(), $3)
              ON CONFLICT (employee_id) DO UPDATE
-                 SET token = $2, login_time = NOW(), last_seen = NOW()`,
-            [employee.employee_id, token]
+                 SET token = $2, login_time = NOW(), last_seen = NOW(), device_id = $3`,
+            [employee.employee_id, token, thisDevice]
         );
 
         // Employee config + shift fetch

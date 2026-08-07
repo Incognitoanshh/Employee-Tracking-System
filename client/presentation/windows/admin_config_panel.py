@@ -4681,11 +4681,24 @@ class AdminConfigPanel(QMainWindow):
         page_index = self.stack.currentIndex() if hasattr(self, "stack") else 0
         _theme.toggle_theme()
         self.setStyleSheet(_global_stylesheet())
-        # The old tabs' timers and threads go before their widgets do — a
-        # QThread destroyed while still running takes the application down.
-        self._stop_background_services()
+        # Only the TABS are torn down — NOT the scheduler or the idle tracker.
+        #
+        # BUG this fixes: this called _stop_background_services(), which also
+        # stops both of those, and nothing started them again. Switching the
+        # theme therefore ended the admin's own tracking for the rest of the
+        # session: no screenshots, no idle state, and the Activity Status card
+        # stuck on "—" forever. The only trace was one line in the audit log —
+        # "SchedulerService: stopped" — with nothing saying why.
+        #
+        # In a product whose entire job is tracking, that is the worst way to
+        # fail: quietly, and while reporting itself healthy.
+        self._stop_tab_work()
         self._build_central()
         self._wire_central(page_index)
+
+        # The cards fed by signals rather than by a fetch have to be redrawn
+        # by hand — nothing will send them their value again on its own.
+        self._on_own_idle(getattr(self, "_own_idle_status", "WORKING"))
 
     def _after_central(self):
         self._wire_central(0)
@@ -4745,6 +4758,13 @@ class AdminConfigPanel(QMainWindow):
         )
 
     def _on_own_idle(self, status: str):
+        # Remembered so the card can be repainted after a rebuild.
+        #
+        # IdleTracker only emits on a CHANGE of state, so a freshly built card
+        # has nothing to draw and sits on "—" until the admin next goes idle
+        # or comes back — which can be a long time, and reads as tracking
+        # having stopped.
+        self._own_idle_status = status
         card = getattr(self._dashboard_tab, "m_activity", None)
         if card is None:
             return
@@ -4886,6 +4906,32 @@ class AdminConfigPanel(QMainWindow):
             except RuntimeError:
                 pass
         return still_running
+
+    def _stop_tab_work(self):
+        """Stop the TABS' timers and wait for their workers.
+
+        Deliberately separate from _stop_background_services: rebuilding the
+        window for a theme change must not touch the scheduler or the idle
+        tracker, which have nothing to do with what the window looks like and
+        which nothing restarts.
+        """
+        for tab_attr in self.TAB_ATTRS:
+            tab = getattr(self, tab_attr, None)
+            if tab is None:
+                continue
+            for timer_attr in ('_refresh_timer', '_charts_timer', '_search_timer'):
+                timer = getattr(tab, timer_attr, None)
+                if timer is not None:
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
+            for w in list(getattr(tab, '_workers', []) or []):
+                try:
+                    if w.isRunning():
+                        w.wait(300)
+                except Exception:
+                    pass
 
     def _stop_background_services(self):
         """Sirf timers/threads/workers rokta hai — session ko touch nahi

@@ -17,6 +17,7 @@
  */
 const { execFileSync } = require("child_process");
 const path = require("path");
+const { migrate } = require("./_migrate");
 
 const DB = `ets_caltest_${process.pid}`;
 const PORT = 8000 + ((process.pid + 137) % 1000);
@@ -51,16 +52,8 @@ async function main() {
     const root = path.resolve(__dirname, "..", "..");
     console.log(`Weekly offs and holidays, against a scratch database (${DB})\n`);
 
-    psql("postgres", `CREATE DATABASE ${DB}`);
     try {
-        for (const file of [
-            path.join(root, "ets.sql"),
-            path.join(root, "server", "migrations", "2026_08_05_password_management.sql"),
-            path.join(root, "server", "migrations", "2026_08_05_work_calendar.sql"),
-        ]) {
-            execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f", file],
-                { stdio: "pipe" });
-        }
+        migrate(DB);
 
         const bcrypt = require(path.join(root, "server", "node_modules", "bcryptjs"));
         const seeded = await bcrypt.hash("SuperSecret123", 10);

@@ -20,6 +20,7 @@
  */
 const { execFileSync } = require("child_process");
 const path = require("path");
+const { migrate } = require("./_migrate");
 const fs = require("fs");
 const os = require("os");
 
@@ -76,20 +77,8 @@ async function main() {
     const root = path.resolve(__dirname, "..", "..");
     console.log(`Chat, Phase 2 (${DB})\n`);
 
-    psql("postgres", `CREATE DATABASE ${DB}`);
     try {
-        for (const file of [
-            "ets.sql",
-            "server/migrations/2026_08_05_password_management.sql",
-            "server/migrations/2026_08_05_username_case_insensitive.sql",
-            "server/migrations/2026_08_06_single_session.sql",
-            "server/migrations/2026_08_06_suspend.sql",
-            "server/migrations/2026_08_07_teams_chat.sql",
-            "server/migrations/2026_08_07_chat_phase2.sql",
-        ]) {
-            execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f",
-                path.join(root, file)], { stdio: "pipe" });
-        }
+        migrate(DB);
 
         const bcrypt = require(path.join(root, "server", "node_modules", "bcryptjs"));
         const hash = await bcrypt.hash(PASSWORD, 10);

@@ -96,6 +96,27 @@ class _ApiWorker(QThread):
             self.error.emit(str(error))
 
 
+def _humanise(message: str) -> str:
+    """Turn a Python exception into something worth showing somebody.
+
+    requests raises with its internals attached — the employee was being
+    shown "HTTPConnectionPool(host='65.21.212.85', port=8000): Read timed
+    out. (read timeout=10)", which names the server, the port, and nothing
+    they can act on.
+    """
+    text = str(message or "")
+    low = text.lower()
+    if "timed out" in low or "timeout" in low:
+        return "The server is taking too long to answer. It will retry."
+    if "connection" in low or "max retries" in low or "unreachable" in low:
+        return "Cannot reach the server. Check the connection."
+    if text.startswith("HTTP 5"):
+        return "The server had a problem with that request."
+    if text.startswith("HTTP 401") or "unauthenticated" in low:
+        return "Your session has expired. Sign in again."
+    return text
+
+
 def _section(title: str) -> QLabel:
     label = QLabel(title)
     label.setStyleSheet(
@@ -594,9 +615,17 @@ class _TeamsTab(QWidget):
     # ── plumbing ────────────────────────────────────────────────────────
 
     def _fetch(self, path: str, on_done):
+        # Reads fail QUIETLY.
+        #
+        # They used to share _on_error with the writes, which opens a modal.
+        # refresh() makes two of them, the header's Refresh makes two more,
+        # and on a link that drops a fifth of its packets a timeout is normal
+        # — so the admin got a dialog box every few seconds saying
+        # "HTTPConnectionPool(host=... Read timed out". Nothing was wrong that
+        # the next poll would not fix, and the panel was unusable.
         worker = _FetchWorker(f"{API_BASE_URL}{path}")
         worker.result.connect(on_done)
-        worker.error.connect(self._on_error)
+        worker.error.connect(self._on_read_failed)
         _track_worker(self._workers, worker)
         worker.start()
 
@@ -608,10 +637,15 @@ class _TeamsTab(QWidget):
         worker.start()
 
     def _on_error(self, message: str):
-        # The server's own wording, not a generic failure. "Development is
-        # archived — it is read-only" tells somebody what to do next; "Save
-        # failed" does not.
-        QMessageBox.warning(self, "Could not do that", message)
+        # A WRITE failed — somebody pressed a button and it did not happen, so
+        # they have to be told. The server's own wording where there is one:
+        # "Development is archived — it is read-only" says what to do next,
+        # "Save failed" does not.
+        QMessageBox.warning(self, "Could not do that", _humanise(message))
+
+    def _on_read_failed(self, message: str):
+        """A refresh did not come back. Say so on the page, not in a box."""
+        self._subtitle.setText(_humanise(message))
 
     def _is_super_admin(self) -> bool:
         return SessionManager.role == "super_admin"

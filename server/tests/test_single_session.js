@@ -15,6 +15,7 @@
  */
 const { execFileSync } = require("child_process");
 const path = require("path");
+const { migrate } = require("./_migrate");
 
 const DB = `ets_session_${process.pid}`;
 const PORT = 8000 + ((process.pid + 401) % 1000);
@@ -45,24 +46,16 @@ async function api(method, route, { token, body } = {}) {
     return { status: response.status, body: payload };
 }
 
-const login = (username, password) =>
-    api("POST", "/auth/login", { body: { username, password } });
+const login = (username, password, device_id) =>
+    api("POST", "/auth/login",
+        { body: device_id ? { username, password, device_id } : { username, password } });
 
 async function main() {
     const root = path.resolve(__dirname, "..", "..");
     console.log(`One account, one machine (${DB})\n`);
 
-    psql("postgres", `CREATE DATABASE ${DB}`);
     try {
-        for (const file of [
-            path.join(root, "ets.sql"),
-            path.join(root, "server", "migrations", "2026_08_05_password_management.sql"),
-            path.join(root, "server", "migrations", "2026_08_05_username_case_insensitive.sql"),
-            path.join(root, "server", "migrations", "2026_08_06_single_session.sql"),
-        ]) {
-            execFileSync("psql", ["-d", DB, "-v", "ON_ERROR_STOP=1", "-q", "-f", file],
-                { stdio: "pipe" });
-        }
+        migrate(DB);
 
         const bcrypt = require(path.join(root, "server", "node_modules", "bcryptjs"));
         const hash = await bcrypt.hash("SuperSecret123", 10);
@@ -95,6 +88,58 @@ async function main() {
 
         res = await api("GET", "/dashboard/me", { token: first });
         check("the first machine keeps working", res.status === 200, `status ${res.status}`);
+
+
+        // ── the same machine coming back ────────────────────────────────
+        console.log("\nThe same machine, and a second one");
+        // The rule is "one machine at a time", not "one login until the token
+        // expires". Closing the app without signing out — a crash, a closed
+        // lid, quitting — leaves the session live, and the check used to see
+        // that as a second machine and lock somebody out of their own laptop.
+        await psql(DB, `UPDATE active_sessions SET token = NULL WHERE employee_id = 'E001'`);
+
+        const LAPTOP = "laptop-aaaa-1111";
+        const DESKTOP = "desktop-bbbb-2222";
+
+        res = await login("emp1", "SuperSecret123", LAPTOP);
+        check("signing in from a machine works", res.status === 200, `status ${res.status}`);
+        const onLaptop = res.body.token;
+        check("and the machine is recorded",
+            psql(DB, `SELECT device_id FROM active_sessions WHERE employee_id='E001'`) === LAPTOP);
+
+        res = await login("emp1", "SuperSecret123", DESKTOP);
+        check("a SECOND machine is still refused — this is the whole point",
+            res.status === 409, `status ${res.status}`);
+        check("and the first machine keeps working",
+            (await api("GET", "/dashboard/me", { token: onLaptop })).status === 200);
+
+        // A JWT's `iat` has one-second resolution, so two tokens minted for
+        // the same payload inside the same second are byte-identical — and
+        // the checks below would compare a token against itself.
+        await new Promise((r) => setTimeout(r, 1100));
+        res = await login("emp1", "SuperSecret123", LAPTOP);
+        check("but the SAME machine can sign in again without logging out first",
+            res.status === 200, `status ${res.status}`);
+        const backOnLaptop = res.body.token;
+        check("and it gets a fresh token", backOnLaptop !== onLaptop);
+        check("while the old one is dead — one live session, still",
+            (await api("GET", "/dashboard/me", { token: onLaptop })).status === 401);
+
+        res = await login("emp1", "SuperSecret123", DESKTOP);
+        check("the other machine is refused after that too",
+            res.status === 409, `status ${res.status}`);
+
+        // A session row written before this existed has no device to match.
+        // Treated as a different machine, which is the safe direction.
+        psql(DB, `UPDATE active_sessions SET device_id = NULL WHERE employee_id='E001'`);
+        res = await login("emp1", "SuperSecret123", LAPTOP);
+        check("a session from before this change is not matched to anything",
+            res.status === 409, `status ${res.status}`);
+        await api("POST", "/auth/logout", { token: backOnLaptop });
+        res = await login("emp1", "SuperSecret123", LAPTOP);
+        check("and one sign-out clears it for good",
+            res.status === 200, `status ${res.status}`);
+        await api("POST", "/auth/logout", { token: res.body.token });
 
         // ── logging out frees it ────────────────────────────────────────
         await api("POST", "/auth/logout", { token: first });

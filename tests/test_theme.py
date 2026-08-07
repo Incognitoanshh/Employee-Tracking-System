@@ -232,6 +232,29 @@ def main():
     check("and NOT ONE widget is still dark", left == [], str(left))
     check("the page you were on is still the one showing",
           console.stack.currentIndex() == 5, str(console.stack.currentIndex()))
+    # The worst possible outcome of a cosmetic change: tracking stops.
+    #
+    # _toggle_theme used to call _stop_background_services(), which also stops
+    # the scheduler and the idle tracker — and nothing starts them again. In a
+    # product whose entire job is tracking, switching the theme ended it for
+    # the rest of the session, leaving one line in the audit log and a
+    # dashboard still reporting itself healthy.
+    stopped = []
+    class _Watch:
+        def __init__(self, name): self.name = name
+        def stop(self): stopped.append(self.name)
+        def deleteLater(self): pass
+    console.scheduler = _Watch("scheduler")
+    console.idle_tracker = _Watch("idle_tracker")
+    console._toggle_theme()
+    check("switching the theme does NOT stop tracking",
+          stopped == [], f"stopped: {stopped}")
+    check("and the activity card is redrawn rather than left blank",
+          getattr(console, "_own_idle_status", None) is not None)
+    # Toggled back, so the checks below still know which theme they are in.
+    console._toggle_theme()
+    check("nor on the way back", stopped == [], f"stopped: {stopped}")
+
     check("and the console is actually laid out, not just correctly coloured",
           console.centralWidget() is not None
           and console.centralWidget().layout() is not None
