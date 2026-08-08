@@ -253,7 +253,10 @@ class SchedulerService(QObject):
                 continue  # already past
             timer = QTimer(self)
             timer.setSingleShot(True)
-            timer.timeout.connect(self._fire_screenshot)
+            # The moment this was MEANT for travels with the timer — see
+            # _fire_screenshot for why that matters after the lid opens.
+            timer.timeout.connect(
+                lambda when=ts: self._fire_screenshot(when))
             timer.start(delay_ms)
             self._pending_timers.append(timer)
             LoggerService.log_verbose(
@@ -261,8 +264,41 @@ class SchedulerService(QObject):
                 f"(in {delay_ms//1000}s)"
             )
 
-    def _fire_screenshot(self):
-        """Timer fire hone par signal emit karo."""
+    #: How late a scheduled capture may be and still be worth taking.
+    #  Generous, because ordinary scheduling jitter and a busy machine both
+    #  cost seconds. What it is really there to catch is hours.
+    LATE_GRACE_MINUTES = 5
+
+    def _fire_screenshot(self, scheduled_for: datetime | None = None):
+        """Timer fire hone par signal emit karo.
+
+        A CAPTURE THAT IS HOURS LATE IS DROPPED, and that is the point.
+
+        Qt's single-shot timers do not survive a sleeping machine gracefully:
+        every deadline that passed while the lid was shut comes due the
+        instant it opens. Measured — thirteen overdue timers fired within a
+        tenth of a second. The daily cap stopped it at ten, so nothing broke,
+        but the result was ten identical pictures of the same screen taken in
+        the same moment, and the whole day's allowance spent, leaving the rest
+        of the shift with no captures at all.
+
+        A capture meant for 11:00 that fires at 14:30 is not a picture of
+        11:00. It is a duplicate of 14:30's, bought with 11:00's budget. So it
+        is skipped, and the captures still ahead go on as planned.
+
+        Logged with log(), not log_verbose(): a gap in the day's screenshots
+        is something an administrator will ask about, and this is the answer.
+        """
+        if scheduled_for is not None:
+            late = (now_ist() - scheduled_for).total_seconds() / 60.0
+            if late > self.LATE_GRACE_MINUTES:
+                LoggerService.log(
+                    f"SCREENSHOT SKIPPED : scheduled for "
+                    f"{scheduled_for.strftime('%H:%M')}, "
+                    f"{int(late)} min late — the machine was probably asleep. "
+                    f"Taking it now would only duplicate the next one."
+                )
+                return
         self.screenshot_triggered.emit()
 
 

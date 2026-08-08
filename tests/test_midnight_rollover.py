@@ -182,6 +182,47 @@ def main() -> int:
           all(w.hour >= 22 or w.hour < 6 for _, w in captures),
           str([f"{w:%d %H:%M}" for _, w in captures if 6 <= w.hour < 22][:3]))
 
+
+    # ── the lid was shut for three hours ────────────────────────────────
+    #
+    # Qt's single-shot timers do not survive a sleeping machine: every
+    # deadline that passed while it slept comes due the instant it wakes.
+    # Measured — thirteen overdue timers fired inside a tenth of a second.
+    # The daily cap stopped it at ten, so nothing broke, but the result was
+    # ten identical pictures taken in the same moment and the whole day's
+    # allowance gone, leaving the rest of the shift blank.
+    print("\nAfter the machine has been asleep")
+    from PySide6.QtCore import QObject
+    from client.application.schedulers.scheduler_service import SchedulerService
+
+    sched = SchedulerService.__new__(SchedulerService)
+    QObject.__init__(sched)
+    fired = []
+    sched.screenshot_triggered = type(
+        "S", (), {"emit": lambda self: fired.append(1)})()
+
+    # The clock the SCHEDULER sees, not the real one. This test drives a
+    # frozen clock through ss.now_ist; reading the wall clock here would
+    # compare two different times and make nothing look late at all.
+    right_now = ss.now_ist()
+    for minutes in (180, 150, 120, 90, 60, 30):
+        sched._fire_screenshot(right_now - timedelta(minutes=minutes))
+    check("captures that are hours overdue are dropped, not taken at once",
+          len(fired) == 0,
+          f"{len(fired)} identical pictures in one instant, and the day's "
+          f"allowance spent")
+
+    fired.clear()
+    for seconds in (0, 30, 120):
+        sched._fire_screenshot(right_now - timedelta(seconds=seconds))
+    check("but ordinary jitter still counts as on time", len(fired) == 3,
+          f"{len(fired)} of 3 — a busy machine would lose captures")
+
+    fired.clear()
+    sched._fire_screenshot(None)
+    check("a capture with no scheduled time is still taken",
+          len(fired) == 1, "anything not armed by the scheduler would be lost")
+
     print()
     if failures:
         print(f"{len(failures)} failure(s)")
