@@ -18,6 +18,7 @@ Run:  python3 tests/test_startup_manager.py
 """
 
 import os
+import platform
 import sys
 import tempfile
 
@@ -113,7 +114,16 @@ def main():
         check("KeepAlive is off — the app must be closable",
               "<key>KeepAlive</key>" in body and "<false/>" in body,
               "KeepAlive true would relaunch it every time somebody quit it")
-        check("the panel can see that it is on", StartupManager.is_autostart_enabled())
+        # The plist itself, not is_autostart_enabled(). That helper asks
+        # platform.system() first and answers False on anything that is not
+        # macOS or Windows — so on a Linux runner it would fail this for a
+        # reason that has nothing to do with the code being tested. What
+        # _enable_macos() writes can be checked anywhere.
+        check("the agent is where the panel looks for it",
+              os.path.exists(StartupManager._macos_plist_path()))
+        if platform.system() == "Darwin":
+            check("and the panel reports it as on",
+                  StartupManager.is_autostart_enabled())
 
         print("\nmacOS, launching again with nothing changed")
         ran.clear()
@@ -140,7 +150,8 @@ def main():
         print("\nmacOS, turning it off")
         StartupManager._disable_macos()
         check("the agent is removed", not os.path.exists(path))
-        check("and the panel sees that", not StartupManager.is_autostart_enabled())
+        if platform.system() == "Darwin":
+            check("and the panel sees that", not StartupManager.is_autostart_enabled())
 
         # ── Windows ──────────────────────────────────────────────────────
         print("\nWindows")
@@ -190,7 +201,6 @@ def main():
         saved = StartupManager._enable_macos
         StartupManager._enable_macos = staticmethod(explode)
         try:
-            import platform
             if platform.system() == "Darwin":
                 StartupManager.enable_autostart()
                 check("a failure to register is logged, not raised", True)

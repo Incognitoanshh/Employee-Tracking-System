@@ -98,6 +98,16 @@ jobs:
       # No display on a runner. Qt draws into memory instead, which is enough
       # for everything these check — geometry, text, and which widgets exist.
       QT_QPA_PLATFORM: offscreen
+      # The client refuses to start without this, on purpose: without a fixed
+      # key, screenshots taken before a reinstall cannot be decrypted after
+      # one. A throwaway value here, obviously — the real key lives on the
+      # VPS and in nobody's repository.
+      #
+      # BASE64 of 32 zero bytes, not hex. The client base64-decodes this one
+      # while the server's ENCRYPTION_KEY is hex — two different encodings for
+      # two different keys, which is worth knowing before pasting one into the
+      # wrong file.
+      SCREENSHOT_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
     steps:
       - uses: actions/checkout@v4
