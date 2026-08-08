@@ -94,7 +94,28 @@ jobs:
     name: Client
     runs-on: ubuntu-latest
 
+    # The screenshot pipeline test starts the real server against a real
+    # database and drives the real client through it, so this job needs
+    # Postgres too — it is the only client suite that does.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: postgres
       # No display on a runner. Qt draws into memory instead, which is enough
       # for everything these check — geometry, text, and which widgets exist.
       QT_QPA_PLATFORM: offscreen
@@ -141,6 +162,11 @@ jobs:
           python -m pip install --upgrade pip
           grep -viE "^(pyobjc|appscript)" requirements.txt > req_ci.txt
           pip install -r req_ci.txt
+
+      - name: Install the server, and psql
+        run: |
+          sudo apt-get install -y -qq postgresql-client
+          cd server && (npm ci || npm install)
 
       - name: Run every client suite
         run: |
