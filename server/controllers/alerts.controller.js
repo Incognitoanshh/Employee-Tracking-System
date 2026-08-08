@@ -72,11 +72,20 @@ exports.getAlerts = async (req, res) => {
         // error gets in. Postgres already knows what the column means.
         const seen = await pool.query(
             `SELECT e.employee_id,
-                    MAX(GREATEST(s.last_seen, a.login_time, sh.created_at)) IS NULL
+                    -- AT TIME ZONE 'UTC' here CONVERTS, it does not
+                    -- relabel. active_sessions is the only table here whose
+                    -- timestamps carry a zone; the other two are naive UTC.
+                    -- Mixing them lets Postgres coerce using whatever the
+                    -- session timezone happens to be — correct today only
+                    -- because config/db.js pins it to UTC, and wrong by five
+                    -- and a half hours the moment anything else runs this.
+                    MAX(GREATEST(s.last_seen AT TIME ZONE 'UTC',
+                                 a.login_time, sh.created_at)) IS NULL
                         AS never_seen,
                     EXTRACT(EPOCH FROM (
                         (NOW() AT TIME ZONE 'UTC')
-                        - MAX(GREATEST(s.last_seen, a.login_time, sh.created_at))
+                        - MAX(GREATEST(s.last_seen AT TIME ZONE 'UTC',
+                                       a.login_time, sh.created_at))
                     )) / 60 AS quiet_minutes
                FROM employees e
                LEFT JOIN active_sessions s ON s.employee_id = e.employee_id

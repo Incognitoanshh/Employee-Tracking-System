@@ -37,6 +37,7 @@ def main():
     QApplication.instance() or QApplication([])
 
     from client.presentation.windows import admin_config_panel as panel
+    from PySide6.QtWidgets import QPushButton
 
     started = []
 
@@ -120,6 +121,109 @@ def main():
         check("the Alerts tab is in the list that gets shut down",
               "_alerts_tab" in panel.AdminConfigPanel.TAB_ATTRS,
               str(panel.AdminConfigPanel.TAB_ATTRS))
+
+        print("\nThe Employees list shows people by name")
+        # Chat, reports and the audit log all show a person by their full
+        # name. This list showed the login username alone, so one account read
+        # as "Priya Nair" in a conversation and "manager" here — and an admin
+        # who had just read a message from her could not find her in her own
+        # employee list.
+        emp = panel._EmployeesTab()
+        emp._display_employees([
+            {"employee_id": "AD100", "username": "manager", "full_name": "Priya Nair",
+             "role": "admin", "status": "online", "last_seen": None},
+            {"employee_id": "EM101", "username": "rajesh", "full_name": "",
+             "role": "employee", "status": "offline", "last_seen": None},
+        ])
+        shown = emp._table.item(0, 1).text()
+        check("the name somebody is shown by everywhere else is here too",
+              "Priya Nair" in shown, shown)
+        check("with the login username kept beside it, not thrown away",
+              "manager" in shown, shown)
+        check("an account with no name falls back to the username",
+              emp._table.item(1, 1).text() == "rajesh", emp._table.item(1, 1).text())
+        header = emp._table.horizontalHeaderItem(1).text()
+        check("and the column says Name", header == "Name", header)
+        check("the search box says a name can be typed into it",
+              "name" in emp._search_input.placeholderText().lower(),
+              emp._search_input.placeholderText())
+
+        print("\nCreating somebody, with the name you want shown")
+        # The create dialog never asked for a name, so the server fell back to
+        # the login username and every account made from the panel was shown
+        # by its login for the rest of its life — there was no way to correct
+        # one afterwards either.
+        sent = []
+
+        class _CapturePost:
+            def __init__(self, url, body):
+                self.url, self.body = url, body
+                self.result = _Signal()
+                self.error = _Signal()
+
+            def start(self):
+                sent.append((self.url, self.body))
+
+        original_post = panel._PostWorker
+        panel._PostWorker = _CapturePost
+        warned = []
+        original_warn = panel.QMessageBox.warning
+        panel.QMessageBox.warning = staticmethod(
+            lambda *a, **k: warned.append(a[2] if len(a) > 2 else ""))
+        original_exec = panel.QDialog.exec
+        panel.QDialog.exec = lambda self_: None
+        try:
+            emp._add_employee()
+            fields = emp.findChildren(panel.QLineEdit)
+            check("the create dialog asks for a full name",
+                  any(f.placeholderText() == "Rajesh Kumar"
+                      for d in emp.findChildren(panel.QDialog)
+                      for f in d.findChildren(panel.QLineEdit)),
+                  "no name field — every new account would be shown by its login")
+
+            dialog = emp.findChildren(panel.QDialog)[-1]
+            boxes = dialog.findChildren(panel.QLineEdit)
+            by_hint = {f.placeholderText(): f for f in boxes}
+            buttons = [b for b in dialog.findChildren(QPushButton)
+                       if "Create" in b.text()]
+
+            # Submitting with no name must not quietly create the account.
+            by_hint["rajesh"].setText("newguy")
+            buttons[0].click()
+            check("creating without a name is refused, with the reason",
+                  len(sent) == 0 and warned, str(warned))
+
+            by_hint["Rajesh Kumar"].setText("Sunita Verma")
+            by_hint["QA Engineer"].setText("Accounts")
+            buttons[0].click()
+            check("with a name, it is sent to the server",
+                  len(sent) == 1, str(len(sent)))
+            check("as full_name, the field the rest of the product reads",
+                  sent[0][1].get("full_name") == "Sunita Verma", str(sent[0][1]))
+            check("with the designation",
+                  sent[0][1].get("designation") == "Accounts", str(sent[0][1]))
+            check("and the login username kept separate",
+                  sent[0][1].get("username") == "newguy", str(sent[0][1]))
+
+            print("\nCorrecting a name later")
+            sent.clear()
+            emp._edit_profile({"employee_id": "EM101", "username": "rajesh",
+                               "full_name": "Rajesh Kumar", "designation": "QA"})
+            dialog = emp.findChildren(panel.QDialog)[-1]
+            boxes = dialog.findChildren(panel.QLineEdit)
+            check("the dialog opens with the name they have now",
+                  boxes[0].text() == "Rajesh Kumar", boxes[0].text())
+            boxes[0].setText("Rajesh Kumar Singh")
+            [b for b in dialog.findChildren(QPushButton) if b.text() == "Save"][0].click()
+            check("saving sends it to that employee's profile",
+                  sent and sent[0][0].endswith("/admin/employees/EM101/profile"),
+                  str(sent[0][0]) if sent else "nothing sent")
+            check("with the new name",
+                  sent[0][1].get("full_name") == "Rajesh Kumar Singh", str(sent[0][1]))
+        finally:
+            panel._PostWorker = original_post
+            panel.QMessageBox.warning = original_warn
+            panel.QDialog.exec = original_exec
 
         print("\nThe sidebar and the tabs must agree")
         keys = [p["key"] for p in panel.PAGES]

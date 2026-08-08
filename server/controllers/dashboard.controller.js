@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { isOnlineSql } = require("../utils/presence");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 
 exports.getStats = async (req, res) => {
@@ -73,13 +74,13 @@ exports.getAdminSummary = async (req, res) => {
         // andar shuru hui hain (ek realistic max-shift-length se zyada
         // purani open session ka matlab hai wo genuinely abandoned/stale
         // hai, real "online" nahi).
+        // Same rule as the employee list, from one place. When these two
+        // disagreed the dashboard counted somebody the list showed as
+        // offline, on the same screen. See utils/presence.js.
         const online = await pool.query(`
-            SELECT COUNT(DISTINCT a.employee_id) AS count
-            FROM attendance a
-            JOIN employees e ON e.employee_id = a.employee_id
-            WHERE a.logout_time IS NULL
-              AND a.login_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '16 hours'
-              AND e.role = 'employee'
+            SELECT COUNT(*) AS count
+            FROM employees e
+            WHERE e.role = 'employee' AND ${isOnlineSql("e")}
         `);
 
         const onlineCount = Number(online.rows[0].count || 0);

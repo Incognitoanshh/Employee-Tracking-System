@@ -3795,7 +3795,7 @@ class _EmployeesTab(QWidget):
         header.setSpacing(10)
 
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍  Search by Employee ID, Username or Role")
+        self._search_input.setPlaceholderText("🔍  Search by name, Employee ID, username or role")
         self._search_input.setFixedHeight(38)
         self._search_input.textChanged.connect(self._on_search_changed)
         header.addWidget(self._search_input, 1)
@@ -3824,7 +3824,7 @@ class _EmployeesTab(QWidget):
 
         self._table = _tune_table(QTableWidget(0, 6))
         self._table.setHorizontalHeaderLabels([
-            "Employee ID", "Username", "Role", "Status", "Last Seen", "Actions"
+            "Employee ID", "Name", "Role", "Status", "Last Seen", "Actions"
         ])
         
         hdr = self._table.horizontalHeader()
@@ -3833,7 +3833,7 @@ class _EmployeesTab(QWidget):
         for col, w in widths.items():
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
             self._table.setColumnWidth(col, w)
-        # Username ko bachi hui jagah lene do — sabse zyada variable hai.
+        # Name column ko bachi hui jagah lene do — sabse zyada variable hai.
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
         # Action buttons 30px ke hain + 4px upar-neeche margin = 38px. 42px
@@ -3946,12 +3946,15 @@ class _EmployeesTab(QWidget):
             return
 
         # Build CSV data
-        headers = ["Employee ID", "Username", "Role", "Status", "Last Seen (IST)"]
+        # Name as its own column. A CSV of usernames is handed to somebody in
+        # HR or payroll who has never seen a login name in their life.
+        headers = ["Employee ID", "Name", "Username", "Role", "Status", "Last Seen (IST)"]
         rows = []
         for emp in filtered:
             status_text, _ = self._status_to_text_color(emp.get('status'))
             rows.append([
                 emp.get('employee_id', ''),
+                emp.get('full_name', '') or '',
                 emp.get('username', ''),
                 emp.get('role', ''),
                 status_text,
@@ -3981,7 +3984,18 @@ class _EmployeesTab(QWidget):
             last_seen = _fmt_relative(emp.get("last_seen"))
 
             self._table.setItem(i, 0, _cell(str(emp_id), mono=True))
-            self._table.setItem(i, 1, _cell(str(username)))
+            # THE NAME, with the login username after it.
+            #
+            # This column used to show the username alone, and every other
+            # part of the product shows people by their full name — chat,
+            # reports, the audit log. So one account read as "Priya Nair" in a
+            # conversation and "manager" here, and an admin who had just read
+            # a message from her could not find her in her own employee list.
+            full_name = str(emp.get("full_name") or "").strip()
+            shown = f"{full_name}  ·  {username}" if full_name else str(username)
+            self._table.setItem(i, 1, _cell(
+                shown,
+                tooltip=f"Login username: {username}" if full_name else None))
             self._table.setItem(i, 2, QTableWidgetItem(self._role_label(role)))
 
             st_item = QTableWidgetItem(status_text)
@@ -4028,6 +4042,21 @@ class _EmployeesTab(QWidget):
                 if enabled:
                     act.triggered.connect(slot)
                 return act
+
+            # Editing the name, first because it is the one people look for.
+            # Every account created before this dialog asked for a name took
+            # the login username instead, and there was no way at all to fix
+            # one afterwards.
+            can_rename = i_am_super or (not tgt_super and (not tgt_admin or is_self))
+            add_action(
+                "✏️  Edit name",
+                lambda _=False, e=emp: self._edit_profile(e),
+                enabled=can_rename,
+                tip="" if can_rename else (
+                    "Only a super admin can manage this account." if tgt_super
+                    else "Admins cannot modify other admin accounts."),
+            )
+            menu.addSeparator()
 
             # Verbose logging — super admin ko koi aur nahi chhoo sakta;
             # admin doosre admin ka config nahi badal sakta.
@@ -4410,6 +4439,77 @@ class _EmployeesTab(QWidget):
         w.start()
 
         
+    def _edit_profile(self, emp: dict):
+        """Change the name somebody is shown by.
+
+        Old messages keep the old name. Chat stamps sender_name onto each
+        message when it is sent, so renaming today does not rewrite what
+        somebody was called last year — which is what makes the archive a
+        record rather than a view of the present.
+        """
+        emp_id = emp.get("employee_id", "")
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit name — {emp_id}")
+        dlg.setMinimumWidth(380)
+        dlg.setStyleSheet(f"QDialog {{ background: {C['bg_surface']}; }}")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(8)
+
+        name = QLineEdit(str(emp.get("full_name") or ""))
+        role_text = QLineEdit(str(emp.get("designation") or ""))
+
+        layout.addWidget(_muted_label("Full name"))
+        layout.addWidget(name)
+        layout.addSpacing(6)
+        layout.addWidget(_muted_label("Designation  (optional)"))
+        layout.addWidget(role_text)
+        layout.addSpacing(6)
+
+        note = QLabel(
+            f"Login username stays {emp.get('username', '')}. This changes how "
+            "they appear in chat, reports and the audit log from now on — "
+            "messages already sent keep the name they were sent under.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{C['text_muted']};font-size:11px;background:transparent;")
+        layout.addWidget(note)
+        layout.addSpacing(12)
+
+        save_btn = _btn("Save", variant="primary", height=40)
+        layout.addWidget(save_btn)
+
+        def submit():
+            typed = name.text().strip()
+            if not typed:
+                QMessageBox.warning(
+                    self, "Name needed",
+                    "A name is required. Leaving it empty would put this "
+                    "account back to showing its login username.")
+                return
+            worker = _PostWorker(
+                f"{API_BASE_URL}/admin/employees/{emp_id}/profile",
+                {"full_name": typed, "designation": role_text.text().strip()})
+
+            def done(data):
+                if data.get("success"):
+                    dlg.accept()
+                    self._load_employees()
+                else:
+                    QMessageBox.warning(
+                        self, "Could not save",
+                        data.get("message") or "Unknown error")
+
+            worker.result.connect(done)
+            worker.error.connect(
+                lambda e: QMessageBox.warning(self, "Could not save", str(e)))
+            _track_worker(self._workers, worker)
+            worker.start()
+
+        save_btn.clicked.connect(submit)
+        name.returnPressed.connect(submit)
+        dlg.exec()
+
     def _add_employee(self):
 
         dlg = QDialog(self)
@@ -4422,9 +4522,19 @@ class _EmployeesTab(QWidget):
         layout.setSpacing(8)
 
         emp_id = QLineEdit()
+        full_name = QLineEdit()
+        designation = QLineEdit()
         username = QLineEdit()
         password = QLineEdit()
         role = QComboBox()
+
+        # The name is what the rest of the product shows this person by —
+        # chat, reports, the audit log. Without this field the server fell
+        # back to the login username, so a real company's employee list read
+        # as a column of logins.
+        full_name.setPlaceholderText("Rajesh Kumar")
+        designation.setPlaceholderText("QA Engineer")
+        username.setPlaceholderText("rajesh")
 
         password.setEchoMode(QLineEdit.EchoMode.Password)
 
@@ -4448,7 +4558,15 @@ class _EmployeesTab(QWidget):
         layout.addWidget(emp_id)
         layout.addSpacing(6)
 
-        layout.addWidget(_muted_label("Username"))
+        layout.addWidget(_muted_label("Full name"))
+        layout.addWidget(full_name)
+        layout.addSpacing(6)
+
+        layout.addWidget(_muted_label("Designation  (optional)"))
+        layout.addWidget(designation)
+        layout.addSpacing(6)
+
+        layout.addWidget(_muted_label("Username  ·  what they type to log in"))
         layout.addWidget(username)
         layout.addSpacing(6)
 
@@ -4465,11 +4583,22 @@ class _EmployeesTab(QWidget):
 
         def submit():
         
+            typed_name = full_name.text().strip()
+            if not typed_name:
+                QMessageBox.warning(
+                    self, "Name needed",
+                    "Enter the person's name.\n\n"
+                    "It is what they appear as in chat, in reports and in the "
+                    "audit log. Without it they show up as their login username.")
+                return
+
             payload = {
                 "employee_id": emp_id.text().strip(),
                 "username": username.text().strip(),
                 "password": password.text(),
-                "role": role.currentText()
+                "role": role.currentText(),
+                "full_name": typed_name,
+                "designation": designation.text().strip(),
             }
 
             worker = _PostWorker(

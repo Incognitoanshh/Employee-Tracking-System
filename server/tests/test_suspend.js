@@ -65,12 +65,13 @@ async function main() {
 
         const bcrypt = require(path.join(root, "server", "node_modules", "bcryptjs"));
         const hash = await bcrypt.hash("SuperSecret123", 10);
-        psql(DB, `INSERT INTO employees (employee_id, username, password, role) VALUES
-            ('SA001','superadmin','${hash}','super_admin'),
-            ('SA002','superadmin2','${hash}','super_admin'),
-            ('A001','admin1','${hash}','admin'),
-            ('A002','admin2','${hash}','admin'),
-            ('E001','emp1','${hash}','employee')`);
+        psql(DB, `INSERT INTO employees
+                     (employee_id, username, password, role, full_name, designation) VALUES
+            ('SA001','superadmin','${hash}','super_admin','Ansh Owner','Founder'),
+            ('SA002','superadmin2','${hash}','super_admin','Second Owner','Founder'),
+            ('A001','admin1','${hash}','admin','Priya Nair','Operations Manager'),
+            ('A002','admin2','${hash}','admin','Second Admin','Operations'),
+            ('E001','emp1','${hash}','employee','Rajesh Kumar','QA Engineer')`);
 
         process.env.DB_HOST = process.env.PGHOST || "127.0.0.1";
         process.env.DB_PORT = process.env.PGPORT || "5432";
@@ -170,6 +171,108 @@ async function main() {
         check("the employee list reports who is suspended",
             rows.length > 0 && rows.every((r) => "suspended" in r),
             JSON.stringify(Object.keys(rows[0] || {})));
+
+        // ── finding somebody by the name you actually saw ───────────────
+        //
+        // Every other part of the product shows a person by their full name —
+        // chat, reports, the audit log. Only this list showed the login
+        // username, and it was also the only thing search matched. So an
+        // admin who had just read a message from "Priya Nair" searched for
+        // her here and was told there was no such person: the account is
+        // A001 / admin1.
+        res = await api("GET", "/admin/employees?search=Priya", { token: sa });
+        let found = res.body.employees || res.body.data || [];
+        check("searching the name somebody is shown by finds them",
+            found.some((r) => r.employee_id === "A001"),
+            JSON.stringify(found.map((r) => r.employee_id)));
+
+        res = await api("GET", "/admin/employees?search=nair", { token: sa });
+        found = res.body.employees || res.body.data || [];
+        check("a surname on its own works, in any case",
+            found.some((r) => r.employee_id === "A001"),
+            JSON.stringify(found.map((r) => r.employee_id)));
+
+        res = await api("GET", "/admin/employees?search=QA", { token: sa });
+        found = res.body.employees || res.body.data || [];
+        check("so does a job title — \"who are the QA people\" is a real question",
+            found.some((r) => r.employee_id === "E001"),
+            JSON.stringify(found.map((r) => r.employee_id)));
+
+        res = await api("GET", "/admin/employees?search=admin1", { token: sa });
+        found = res.body.employees || res.body.data || [];
+        check("and the username still works — nothing was traded away",
+            found.some((r) => r.employee_id === "A001"),
+            JSON.stringify(found.map((r) => r.employee_id)));
+
+        res = await api("GET", "/admin/employees?search=Priya", { token: sa });
+        check("the count matches the filtered rows, not the whole table",
+            Number(res.body.total ?? res.body.count ?? 1) === 1,
+            JSON.stringify({ total: res.body.total, count: res.body.count }));
+
+        res = await api("GET", "/admin/employees?search=zzz-nobody", { token: sa });
+        found = res.body.employees || res.body.data || [];
+        check("a search that matches nobody returns nobody",
+            found.length === 0, JSON.stringify(found.map((r) => r.employee_id)));
+
+        res = await api("GET", "/admin/employees", { token: sa });
+        found = res.body.employees || res.body.data || [];
+        check("the list carries the name, so the panel can show it",
+            found.every((r) => "full_name" in r),
+            JSON.stringify(Object.keys(found[0] || {})));
+
+        // ── changing the name somebody is shown by ──────────────────────
+        //
+        // Until this endpoint existed there was no way to correct a name at
+        // all, and every account made from the panel took the login username
+        // because the create dialog never asked for one.
+        res = await api("POST", "/admin/employees/E001/profile",
+            { token: sa, body: { full_name: "Rajesh K. Kumar", designation: "Senior QA" } });
+        check("an admin can correct a name", res.status === 200, `status ${res.status}`);
+        check("and it comes back changed",
+            res.body.employee.full_name === "Rajesh K. Kumar",
+            JSON.stringify(res.body.employee));
+        check("the designation with it",
+            res.body.employee.designation === "Senior QA",
+            JSON.stringify(res.body.employee));
+        check("the login username is NOT touched — they still sign in the same way",
+            psql(DB, `SELECT username FROM employees WHERE employee_id='E001'`) === "emp1");
+
+        check("renaming somebody is on the record",
+            Number(psql(DB, `SELECT COUNT(*) FROM activity_logs
+                              WHERE activity LIKE 'NAME CHANGED%'`)) === 1);
+        check("with both the old name and the new one",
+            /Rajesh Kumar.*Rajesh K\. Kumar/.test(
+                psql(DB, `SELECT activity FROM activity_logs
+                           WHERE activity LIKE 'NAME CHANGED%' LIMIT 1`)),
+            psql(DB, `SELECT activity FROM activity_logs
+                       WHERE activity LIKE 'NAME CHANGED%' LIMIT 1`));
+
+        res = await api("POST", "/admin/employees/E001/profile",
+            { token: sa, body: { full_name: "   " } });
+        check("an empty name is refused — it would go back to showing the login",
+            res.status === 400, `status ${res.status}`);
+        check("and the old one survives",
+            psql(DB, `SELECT full_name FROM employees WHERE employee_id='E001'`)
+                === "Rajesh K. Kumar");
+
+        res = await api("POST", "/admin/employees/E001/profile",
+            { token: sa, body: { full_name: "x".repeat(200) } });
+        check("a name longer than the column is refused with a message, not a crash",
+            res.status === 400, `status ${res.status}`);
+
+        res = await api("POST", "/admin/employees/E001/profile",
+            { token: empLive, body: { full_name: "Boss" } });
+        check("an employee cannot rename anybody", res.status === 403, `status ${res.status}`);
+
+        res = await api("POST", "/admin/employees/SA001/profile",
+            { token: admin, body: { full_name: "Not The Owner" } });
+        check("an ordinary admin cannot rename a super admin",
+            res.status === 403, `status ${res.status}`);
+
+        res = await api("POST", "/admin/employees/NOBODY/profile",
+            { token: sa, body: { full_name: "Ghost" } });
+        check("renaming somebody who does not exist is a 404",
+            res.status === 404, `status ${res.status}`);
 
         // ── it is on the record ─────────────────────────────────────────
         check("suspending is written to the audit log",

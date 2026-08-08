@@ -17,6 +17,9 @@ router.delete("/employees/:employee_id", adminCtrl.deleteEmployee);
 // Role change — sirf super_admin
 router.post("/employees/:employee_id/role", superAdminOnly, adminCtrl.changeRole);
 router.post("/employees/:employee_id/password", adminCtrl.resetPassword);
+// The name somebody is shown by. Without this there was no way to correct
+// one after the account was made.
+router.post("/employees/:employee_id/profile", adminCtrl.updateProfile);
 // Suspend / restore. Role rules are enforced in the controller, not here:
 // an admin may suspend employees, a super admin may suspend admins too.
 router.post("/employees/:employee_id/suspend", adminCtrl.setSuspended);

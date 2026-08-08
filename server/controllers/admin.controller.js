@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { isOnlineSql } = require("../utils/presence");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 const {
     canManage,
@@ -113,8 +114,16 @@ exports.getEmployees = async (req, res) => {
         const offset = (page - 1) * limit;
         const search = String(req.query.search || "").trim();
 
+        // full_name is searched too, and it is the field people actually
+        // type. Chat, reports and the audit log all show somebody by their
+        // NAME; only this table showed the login username. So an admin who
+        // had just read a message from "Priya Nair" searched for her here and
+        // was told there was no such person — the account is AD100/manager.
+        // designation as well: "who are the QA people" is a real question.
         const searchWhere = search
-            ? `WHERE (employee_id ILIKE $1 OR username ILIKE $1 OR role ILIKE $1)`
+            ? `WHERE (employee_id ILIKE $1 OR username ILIKE $1 OR role ILIKE $1
+                      OR COALESCE(full_name, '') ILIKE $1
+                      OR COALESCE(designation, '') ILIKE $1)`
             : "";
         const searchVals = search ? [`%${search}%`] : [];
         const p = searchVals.length;
@@ -143,12 +152,11 @@ exports.getEmployees = async (req, res) => {
                 LIMIT $${p + 1} OFFSET $${p + 2}
             ) e
             LEFT JOIN LATERAL (
-                SELECT 1 AS hit
-                FROM attendance a
-                WHERE a.employee_id = e.employee_id
-                  AND a.logout_time IS NULL
-                  AND a.login_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '16 hours'
-                LIMIT 1
+                -- Online needs a LIVE SESSION as well as an open attendance
+                -- row. An open row alone only says work was started; any app
+                -- that ended without a clean logout left a green dot for
+                -- sixteen hours. See utils/presence.js.
+                SELECT 1 AS hit WHERE ${isOnlineSql("e")}
             ) oa ON true
             LEFT JOIN LATERAL (
                 SELECT a2.logout_time AS last_logout
@@ -306,6 +314,98 @@ exports.createEmployee = async (req, res) => {
  * only a super admin can reset an admin. Deliberately unlike forceLogout,
  * which is looser on purpose.
  */
+/**
+ * POST /api/admin/employees/:employee_id/profile
+ *   body: { full_name, designation }
+ *
+ * Change the name somebody is shown by.
+ *
+ * Until this existed there was NO WAY to correct a name once an account had
+ * been created. Every account made from the panel took its name from the
+ * login username, because the create dialog never asked for one — so a real
+ * company's employee list read as a column of logins, and a typo in somebody's
+ * name was permanent short of editing the database by hand.
+ *
+ * The name is not decoration. Chat attributes messages by it, reports are read
+ * by it, and the audit log records it. A wrong one is wrong in all three.
+ *
+ * OLD MESSAGES KEEP THE OLD NAME, deliberately. Chat stores sender_name on the
+ * message when it is sent, so renaming somebody today does not rewrite what
+ * their name was last year. That is what makes the archive an honest record
+ * rather than a view of the present.
+ */
+exports.updateProfile = async (req, res) => {
+    const { employee_id } = req.params;
+    if (!employee_id) {
+        return res.status(400).json({ success: false, message: "employee_id required" });
+    }
+    if (!(await assertCanManage(req, res, employee_id))) return;
+
+    const raw = req.body || {};
+    const hasName = "full_name" in raw;
+    const hasRole = "designation" in raw;
+    if (!hasName && !hasRole) {
+        return res.status(400).json({ success: false, message: "Nothing to change" });
+    }
+
+    const fullName = String(raw.full_name ?? "").trim();
+    const designation = String(raw.designation ?? "").trim();
+
+    // The column is VARCHAR(120); a longer value is a database error rather
+    // than a message anybody can act on.
+    if (fullName.length > 120) {
+        return res.status(400).json({
+            success: false, message: "Name is too long — 120 characters at most.",
+        });
+    }
+    if (designation.length > 120) {
+        return res.status(400).json({
+            success: false, message: "Designation is too long — 120 characters at most.",
+        });
+    }
+    // An empty name would put the account back to being shown by its login
+    // username, which is the state this endpoint exists to get out of.
+    if (hasName && !fullName) {
+        return res.status(400).json({
+            success: false, message: "A name is required.",
+        });
+    }
+
+    try {
+        const before = await pool.query(
+            `SELECT username, full_name FROM employees WHERE employee_id = $1`,
+            [employee_id]);
+        if (before.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+        const was = before.rows[0].full_name || before.rows[0].username;
+
+        const updated = await pool.query(
+            `UPDATE employees
+                SET full_name   = COALESCE($2, full_name),
+                    designation = COALESCE($3, designation)
+              WHERE employee_id = $1
+              RETURNING employee_id, username, full_name, designation, role`,
+            [employee_id, hasName ? fullName : null, hasRole ? designation : null]
+        );
+
+        // On the record. Renaming somebody changes how every report and every
+        // conversation reads, so who did it has to be answerable.
+        if (hasName && fullName !== was) {
+            await pool.query(
+                `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+                [employee_id,
+                 `NAME CHANGED : "${was}" -> "${fullName}" by ${req.employee?.employee_id || "an admin"}`]
+            ).catch(() => {});
+        }
+
+        return res.json({ success: true, employee: updated.rows[0] });
+    } catch (err) {
+        console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.resetPassword = async (req, res) => {
     const { employee_id } = req.params;
     const { new_password } = req.body || {};
