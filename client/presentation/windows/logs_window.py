@@ -59,7 +59,10 @@ def to_ist(ts):
         try:
             dt = datetime.strptime(str(ts)[:26], fmt)
             return dt.replace(tzinfo=timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-        except:
+        except ValueError:
+            # ValueError, not everything. A bare except here also swallows
+            # KeyboardInterrupt and SystemExit, so a window that happened to
+            # be formatting a timestamp could refuse to close.
             continue
     return str(ts)
 

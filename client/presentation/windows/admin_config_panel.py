@@ -89,6 +89,8 @@ ACCENTS = {
 PAGES = [
     {"key": "dashboard",   "icon": "📊", "title": "Dashboard",
      "subtitle": "Live overview of your workforce and activity."},
+    {"key": "alerts",      "icon": "🔔", "title": "Alerts",
+     "subtitle": "What needs attention right now — apps that have stopped reporting, shifts nobody logged in for, and unusual idle time."},
     {"key": "config",      "icon": "⚙️", "title": "Configuration",
      "subtitle": "Set screenshot intervals, idle thresholds and upload frequency — globally or per employee."},
     {"key": "employees",   "icon": "👥", "title": "Employees",
@@ -948,6 +950,7 @@ class _ConfigTab(QWidget):
         self._load_employees()
         self._refresh_holidays()
         self._refresh_retention()
+        self._refresh_alert_settings()
         self._refresh_upcoming()
 
     def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
@@ -1048,6 +1051,100 @@ class _ConfigTab(QWidget):
         for row in rows:
             lay.addWidget(row)
         return card
+
+    # ── Alert thresholds ─────────────────────────────────────────────────
+    #
+    # These numbers, and not the code, decide what an alert means. That is
+    # deliberate: what counts as late, and how much idle is too much, are the
+    # owner's decisions about their own company. The defaults exist so the
+    # feature works on day one, not as a recommendation.
+    def _build_alerts_section(self) -> QFrame:
+        self._alert_on = QCheckBox("Show alerts in the panel")
+        self._alert_silent = QSpinBox(); self._alert_silent.setRange(1, 720)
+        self._alert_late   = QSpinBox(); self._alert_late.setRange(0, 1440)
+        self._alert_idle   = QSpinBox(); self._alert_idle.setRange(15, 1440)
+        for spin in (self._alert_silent, self._alert_late, self._alert_idle):
+            spin.setFixedHeight(36)
+            spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._alert_status = QLabel("Loading…")
+        self._alert_status.setWordWrap(True)
+        self._alert_status.setStyleSheet(
+            f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+
+        save = _btn("\U0001F4BE  Save alert settings", variant="primary", height=36)
+        save.clicked.connect(self._save_alert_settings)
+        row = QWidget()
+        row.setObjectName("alertSaveRow")
+        row.setStyleSheet("QWidget#alertSaveRow { background: transparent; }")
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 0, 0, 0)
+        row_lay.addStretch()
+        row_lay.addWidget(save)
+
+        return self._build_section(
+            "\U0001F514", "Alerts  ·  applies to everyone",
+            "The Alerts page shows what needs attention now. These numbers "
+            "decide when something is worth saying. Nobody is ever alerted on "
+            "a weekly off or a holiday.",
+            [
+                self._setting_row(
+                    "Alerts on",
+                    "Turn the whole thing off without losing these settings.",
+                    self._alert_on),
+                self._setting_row(
+                    "App silent for",
+                    "No heartbeat, no login and no screenshot for this long "
+                    "means the app has stopped. This is the alert that matters "
+                    "most — a stopped app and a day off look identical without it.",
+                    self._alert_silent, "hours"),
+                self._setting_row(
+                    "Late by",
+                    "Counted AFTER the shift's own grace period. An employee "
+                    "with no shift set is never chased.",
+                    self._alert_late, "minutes"),
+                self._setting_row(
+                    "Idle in a day",
+                    "Total idle time in one day. A reason to look at the day, "
+                    "not a conclusion about it.",
+                    self._alert_idle, "minutes"),
+                row,
+                self._alert_status,
+            ])
+
+    def _refresh_alert_settings(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/alerts/settings")
+
+        def fill(data: dict):
+            settings = data.get("settings") or {}
+            self._alert_on.setChecked(bool(settings.get("alerts_enabled", True)))
+            for key, spin in (("alert_silent_hours", self._alert_silent),
+                              ("alert_late_login_minutes", self._alert_late),
+                              ("alert_idle_minutes", self._alert_idle)):
+                if settings.get(key) is not None:
+                    spin.blockSignals(True)
+                    spin.setValue(int(settings[key]))
+                    spin.blockSignals(False)
+            self._alert_status.setText("These are the values in force now.")
+
+        w.result.connect(fill)
+        w.error.connect(lambda e: self._alert_status.setText(f"Could not load: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _save_alert_settings(self):
+        body = {
+            "alerts_enabled": self._alert_on.isChecked(),
+            "alert_silent_hours": self._alert_silent.value(),
+            "alert_late_login_minutes": self._alert_late.value(),
+            "alert_idle_minutes": self._alert_idle.value(),
+        }
+        w = _PostWorker(f"{API_BASE_URL}/admin/alerts/settings", body)
+        w.result.connect(lambda _d: self._alert_status.setText(
+            "Saved. The Alerts page uses these from its next check."))
+        w.error.connect(lambda e: self._alert_status.setText(f"Not saved — {e}"))
+        _track_worker(self._workers, w)
+        w.start()
 
     # ── Data retention ───────────────────────────────────────────────────
     #
@@ -1520,6 +1617,7 @@ class _ConfigTab(QWidget):
                                   self._weekly_offs_row),
             ]))
 
+        body.addWidget(self._build_alerts_section())
         body.addWidget(self._build_retention_section())
 
         body.addWidget(self._build_holidays_section())
@@ -2692,6 +2790,131 @@ class _LogsTab(QWidget):
 #  reason: an absence is the absence of a row, so it only exists once you walk
 #  a date range. This page has a date range; that one has pagination.
 # ──────────────────────────────────────────────────────────────────────────────
+class _AlertsTab(QWidget):
+    """What is wrong right now, and nothing else.
+
+    THIS PAGE EXISTS BECAUSE EVERYTHING ELSE HERE IS PULL. Every other tab
+    answers a question somebody thought to ask. The failure that prompted this
+    one — an employee's app quietly stopping — asks no question, produces no
+    row anywhere, and looks exactly like somebody being on leave. It went
+    unnoticed until a screenshot was wanted that had never been taken.
+
+    Nothing here can be dismissed, on purpose. An alert disappears when it
+    stops being true and not before. A dismiss button would let the one alert
+    that matters be waved away on a busy morning and never come back.
+    """
+
+    COLUMNS = [("", 46), ("Employee", 190), ("What", 300), ("Detail", 420)]
+
+    # How often the list refreshes itself. Slow: these are conditions measured
+    # in hours, and a page that re-queries every five seconds costs the server
+    # far more than the freshness is worth.
+    REFRESH_MS = 60_000
+
+    SEVERITY_LOOK = {
+        "HIGH":   ("\U0001F534", "danger"),
+        "MEDIUM": ("\U0001F7E0", "warning"),
+        "LOW":    ("\U0001F7E1", "text_muted"),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self._workers: list = []
+        self._alerts: list[dict] = []
+        self._build_ui()
+        self.refresh()
+
+        # NAMED _refresh_timer on purpose. _stop_background_services stops
+        # timers by name, from a fixed list; a timer called anything else goes
+        # on firing after logout, with a cleared token, at a widget that is
+        # being torn down.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start(self.REFRESH_MS)
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+
+        bar_card = _card()
+        bar = QHBoxLayout(bar_card)
+        bar.setContentsMargins(16, 12, 16, 12)
+        bar.setSpacing(12)
+
+        self._headline = QLabel("Checking…")
+        self._headline.setStyleSheet(
+            f"color:{C['text_primary']};font-size:14px;font-weight:700;background:transparent;")
+        bar.addWidget(self._headline)
+        bar.addStretch()
+
+        self._again = _btn("\u21bb  Check now", variant="secondary", height=34)
+        self._again.clicked.connect(self.refresh)
+        bar.addWidget(self._again)
+        root.addWidget(bar_card)
+
+        holder = _card(padding=0)
+        inner = QVBoxLayout(holder)
+        inner.setContentsMargins(0, 0, 0, 0)
+
+        self._table = QTableWidget(0, len(self.COLUMNS))
+        _tune_table(self._table)
+        self._table.setHorizontalHeaderLabels([c[0] for c in self.COLUMNS])
+        for i, (_title, width) in enumerate(self.COLUMNS):
+            self._table.setColumnWidth(i, width)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        inner.addWidget(self._table)
+        root.addWidget(holder, 1)
+
+        self._note = QLabel(
+            "Alerts are worked out fresh each time — there is nothing to dismiss. "
+            "One disappears when it stops being true. Thresholds live in Configuration.")
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet(
+            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+        root.addWidget(self._note)
+
+    # ── data ────────────────────────────────────────────────────────────
+    def refresh(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/alerts", {})
+        w.result.connect(self._populate)
+        w.error.connect(self._failed)
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _failed(self, message: str):
+        # Say the check itself failed. Showing an empty table would read as
+        # "all clear", which is the most damaging thing this page could lie
+        # about.
+        self._headline.setText("Could not check — " + str(message))
+        self._table.setRowCount(0)
+
+    def _populate(self, data: dict):
+        self._alerts = data.get("alerts") or []
+        if data.get("enabled") is False:
+            self._headline.setText("Alerts are switched off in Configuration.")
+        elif not self._alerts:
+            self._headline.setText("\u2713  Nothing needs attention.")
+        else:
+            counts = data.get("counts") or {}
+            parts = [f"{counts.get(k, 0)} {k.lower()}" for k in ("HIGH", "MEDIUM", "LOW")
+                     if counts.get(k)]
+            self._headline.setText(
+                f"{len(self._alerts)} thing(s) to look at  ·  " + ", ".join(parts))
+
+        self._table.setRowCount(len(self._alerts))
+        for row, alert in enumerate(self._alerts):
+            mark, colour_key = self.SEVERITY_LOOK.get(
+                alert.get("severity"), ("\u2022", "text_muted"))
+            self._table.setItem(row, 0, _cell(mark))
+            who = f"{alert.get('employee_id')} — {alert.get('employee_name') or ''}"
+            self._table.setItem(row, 1, _cell(who))
+            what = _cell(alert.get("title") or "")
+            what.setForeground(QColor(C[colour_key]))
+            self._table.setItem(row, 2, what)
+            self._table.setItem(row, 3, _cell(alert.get("detail") or "", muted=True))
+
+
 class _ReportsTab(QWidget):
 
     COLUMNS = [
@@ -4568,9 +4791,9 @@ class AdminConfigPanel(QMainWindow):
     # application down — which is the crash the comments in those two methods
     # are already about. One list, so the next tab cannot be forgotten.
     TAB_ATTRS = (
-        "_dashboard_tab", "_config_tab", "_employees_tab", "_attendance_tab",
-        "_screenshots_tab", "_teams_tab", "_mychat_tab", "_reports_tab",
-        "_logs_tab",
+        "_dashboard_tab", "_alerts_tab", "_config_tab", "_employees_tab",
+        "_attendance_tab", "_screenshots_tab", "_teams_tab", "_mychat_tab",
+        "_reports_tab", "_logs_tab",
     )
 
     def __init__(self):
@@ -4642,6 +4865,7 @@ class AdminConfigPanel(QMainWindow):
         # rehte the — cleared token ke saath, yaani endless failing calls
         # aur destroyed widgets pe callbacks (crash risk).
         self._dashboard_tab   = _DashboardTab()
+        self._alerts_tab      = _AlertsTab()
         self._config_tab      = _ConfigTab()
         self._employees_tab   = _EmployeesTab()
         self._attendance_tab  = _AttendanceTab()
@@ -4660,8 +4884,12 @@ class AdminConfigPanel(QMainWindow):
         if leftover:
             print(f"[ADMIN] {leftover} worker(s) timeout ke baad bhi chal rahe hain")
 
+        # ORDER MUST MATCH PAGES. The sidebar switches by index, so a tab
+        # added here but not there — or in the wrong place — silently shows
+        # the wrong page for every entry after it.
         for tab in (
             self._dashboard_tab,
+            self._alerts_tab,
             self._config_tab,
             self._employees_tab,
             self._attendance_tab,

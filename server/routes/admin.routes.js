@@ -4,6 +4,7 @@ const { adminOnly, superAdminOnly } = require("../middleware/admin.middleware");
 const adminCtrl      = require("../controllers/admin.controller");
 const reportCtrl     = require("../controllers/report.controller");
 const teamCtrl       = require("../controllers/team.controller");
+const alertsCtrl     = require("../controllers/alerts.controller");
 
 // Sab routes admin-only hain
 router.use(adminOnly);
@@ -19,6 +20,12 @@ router.post("/employees/:employee_id/password", adminCtrl.resetPassword);
 // Suspend / restore. Role rules are enforced in the controller, not here:
 // an admin may suspend employees, a super admin may suspend admins too.
 router.post("/employees/:employee_id/suspend", adminCtrl.setSuspended);
+
+// Alerts — what is wrong right now. Computed on read; nothing is stored.
+// Settings before /alerts so neither route can shadow the other.
+router.get("/alerts/settings",  alertsCtrl.getSettings);
+router.post("/alerts/settings", alertsCtrl.saveSettings);
+router.get("/alerts",           alertsCtrl.getAlerts);
 
 // Config
 router.get("/config/:employee_id", adminCtrl.getConfig);   // GET config for one employee or "global"

@@ -118,9 +118,33 @@ def main():
           built <= listed, f"missing: {sorted(built - listed)}")
     check("and the list names nothing that is not built",
           listed <= built, f"stale: {sorted(listed - built)}")
+    # The real invariant, rather than "teams is item five".
+    #
+    # The panel switches pages by INDEX, so the sidebar's order and the order
+    # widgets are added to the stack have to match exactly. This used to be
+    # written as a hardcoded position, which broke the day a page was added in
+    # front of Teams — a failure about counting, not about correctness.
+    #
+    # Every page key maps to `self._<key>_tab`, so the mount order can be read
+    # out of the source and compared against PAGES directly. Adding a page now
+    # only fails this if it is genuinely in the wrong place.
+    mounted = []
+    inside = False
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("for tab in ("):
+            inside = True
+            continue
+        if inside:
+            if stripped.startswith(")"):
+                break
+            if stripped.startswith("self._"):
+                mounted.append(stripped.rstrip(",").replace("self.", ""))
+    expected = [f'_{p["key"]}_tab' for p in acp.PAGES]
+    check("every menu entry has a page mounted for it",
+          len(mounted) == len(expected), f"{len(expected)} menu entries, {len(mounted)} mounted")
     check("the sidebar and the stack are in the same order",
-          [p["key"] for p in acp.PAGES].index("teams") == 5,
-          str([p["key"] for p in acp.PAGES]))
+          mounted == expected, f"menu {expected} vs stack {mounted}")
 
     # ── an ordinary admin ───────────────────────────────────────────────
     print("\nWhat an ordinary admin sees")

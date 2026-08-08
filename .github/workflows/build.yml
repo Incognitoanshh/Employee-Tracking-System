@@ -137,6 +137,14 @@ jobs:
           [Tasks]
           Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
+          [Registry]
+          ; The app registers itself to start at login (StartupManager). The
+          ; uninstaller has to take that entry away again, or Windows goes on
+          ; trying to launch a deleted executable at every login for as long
+          ; as the machine lives. ValueType none creates nothing at install —
+          ; this line exists only for the uninstall side.
+          Root: HKCU; Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Run"; ValueType: none; ValueName: "ETS"; Flags: uninsdeletevalue
+
           [Run]
           Filename: "{app}\\Amaze Connect.exe"; Description: "Start Amaze Connect"; Flags: nowait postinstall skipifsilent
           EOF

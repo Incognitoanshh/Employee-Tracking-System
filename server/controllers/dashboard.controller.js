@@ -103,17 +103,11 @@ exports.getAdminSummary = async (req, res) => {
             total_activity_logs: Number(logs.rows[0].count || 0),
         };
 
-        console.log(
-            "[ADMIN SUMMARY RAW]",
-            {
-                totalEmployees,
-                onlineCount,
-                offlineCount,
-                screenshots_count: Number(screenshots.rows[0].count || 0),
-                logs_count: Number(logs.rows[0].count || 0),
-                payload
-            }
-        );
+        // The debug line that used to live here is gone. The dashboard polls
+        // every few seconds while any admin has the panel open, so it wrote
+        // the same figures into PM2's log file around seventeen thousand
+        // times a day — burying the lines that mean something and filling a
+        // disk that also holds the screenshots.
 
         return res.json({
             success: true,

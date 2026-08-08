@@ -46,6 +46,9 @@ ets_db.sql
 
 # Local .env backups (never commit)
 client/.env.backup-*
+# .save is what nano leaves behind — one was committed, holding a
+# stale APP_NAME and API address that no longer matched anything.
+*.env.save
 server/.env.backup-*
 
 # Uploaded screenshots — data, never source.

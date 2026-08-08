@@ -103,7 +103,11 @@ app.get("/", async (req, res) => {
         const result = await pool.query("SELECT NOW()");
         res.json({ success: true, message: "ETS Server is running", database: "connected", time: result.rows[0] });
     } catch (error) {
-        res.status(500).json({ success: false, message: "Database error", error: error.message });
+        // The message is NOT returned. This route is unauthenticated — it is
+        // what a health check hits — and a database error message names the
+        // host, the database and sometimes the user it failed to connect as.
+        console.error("[500] GET /", error.message);
+        res.status(500).json({ success: false, message: "Database error" });
     }
 });
 
@@ -121,6 +125,31 @@ app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.url}` });
 });
 
+/**
+ * A request body with the secrets taken out, for logging.
+ *
+ * Names rather than routes: the same field can arrive at more than one
+ * endpoint, and a route-by-route list is a list somebody forgets to add to.
+ * Recursive because a password can sit one level down — `{ employee: { ... } }`.
+ */
+const SECRET_FIELDS = new Set([
+    "password", "new_password", "old_password", "current_password",
+    "confirm_password", "token", "auth_token", "refresh_token",
+    "jwt", "secret", "encryption_key", "api_key",
+]);
+
+function redactForLog(value, depth = 0) {
+    if (!value || typeof value !== "object" || depth > 4) return value;
+    if (Array.isArray(value)) return value.map((item) => redactForLog(item, depth + 1));
+    const safe = {};
+    for (const [key, entry] of Object.entries(value)) {
+        safe[key] = SECRET_FIELDS.has(String(key).toLowerCase())
+            ? "[redacted]"
+            : redactForLog(entry, depth + 1);
+    }
+    return safe;
+}
+
 // Advanced error formatter (must be the LAST middleware before app.listen)
 app.use((err, req, res, next) => {
     try {
@@ -132,8 +161,12 @@ app.use((err, req, res, next) => {
             message: err && err.message,
             stack: err && err.stack ? err.stack : err,
             route: req && (req.method + " " + req.originalUrl),
-            // Avoid logging huge bodies; keep it best-effort
-            body: req && req.body ? req.body : undefined,
+            // REDACTED. The body is genuinely useful for working out what a
+            // failing request contained — except that on /auth/login it
+            // contains the password in the clear, and these lines go to PM2's
+            // log files and stay there. Any error thrown anywhere downstream
+            // of a parsed login body wrote a working password to disk.
+            body: redactForLog(req && req.body),
         });
 
         // A 4xx is the caller's fault, so telling them what was wrong with
