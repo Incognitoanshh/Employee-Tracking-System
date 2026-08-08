@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import requests
+from client.core import http as _http
 from datetime import date, datetime
 from datetime import datetime, timezone, timedelta
 from PySide6.QtCore    import Qt, QThread, Signal, QDate, QTimer
@@ -98,6 +99,8 @@ PAGES = [
      "subtitle": "Browse captured screenshots by employee and date."},
     {"key": "teams",       "icon": "💬", "title": "Teams & Chat",
      "subtitle": "Teams, channels and membership. Conversations are readable only by a super admin, and every read is recorded."},
+    {"key": "mychat",      "icon": "🗨️", "title": "My Chat",
+     "subtitle": "The channels you are a member of. This is your own conversation — reading somebody else's is done from Teams & Chat, and is recorded."},
     {"key": "reports",     "icon": "📈", "title": "Reports",
      "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
@@ -256,7 +259,17 @@ def _global_stylesheet() -> str:
        loud lagti thi. Zebra striping (alternate-background) hi structure
        de deti hai, uske upar full-contrast line shor banti hai. */
     QTableWidget::item {{
-        padding: 10px 12px;
+        /* 4px, not 10px, top and bottom.
+         *
+         * BUG this fixes: item padding is taken out of the cell BEFORE a cell
+         * widget is given its geometry. At 10px it ate 21px of every row, so
+         * a 42px row left 21px for the widget — and every button in every
+         * table was drawn 32px tall into a 21px hole and clipped. It looked
+         * like a rendering fault rather than a measurement, which is why it
+         * survived two attempts to fix it by changing the button.
+         *
+         * Rows keep their height; text is centred in them either way. */
+        padding: 4px 12px;
         border: none;
         border-bottom: 1px solid {C['bg_surface_alt']};
     }}
@@ -308,7 +321,7 @@ def _global_stylesheet() -> str:
     QPushButton[variant="secondary"]:hover {{ background: {C['bg_elevated']}; }}
 
     QPushButton[variant="ghost"] {{ background: transparent; border: 1px solid transparent; color: {C['text_secondary']}; }}
-    QPushButton[variant="ghost"]:hover {{ background: rgba(255,255,255,0.05); color: {C['text_primary']}; }}
+    QPushButton[variant="ghost"]:hover {{ background: {C['bg_elevated']}; color: {C['text_primary']}; }}
 
     QPushButton[variant="warning"] {{ background: {C['warning_soft']}; border: 1px solid rgba(245,158,11,0.4); color: {C['warning']}; }}
     QPushButton[variant="warning"]:hover {{ background: rgba(245,158,11,0.24); }}
@@ -330,8 +343,8 @@ def _global_stylesheet() -> str:
         font-size: 13px;
         border-radius: 0px;
     }}
-    QPushButton[variant="navitem"]:hover {{ background: rgba(255,255,255,0.04); color: {C['text_primary']}; }}
-    QPushButton[variant="navitem"]:checked {{ background: {C['accent_soft']}; border-left: 3px solid {C['accent']}; color: white; }}
+    QPushButton[variant="navitem"]:hover {{ background: {C['bg_elevated']}; color: {C['text_primary']}; }}
+    QPushButton[variant="navitem"]:checked {{ background: {C['selected_bg']}; border-left: 3px solid {C['accent']}; color: {C['selected_text']}; }}
 
     /* Dialogs / message boxes */
     QDialog {{ background: {C['bg_app']}; }}
@@ -388,10 +401,23 @@ def _track_worker(workers_list: list, w) -> None:
     w.finished.connect(_cleanup)
 
 
+# The shortest a button can be before the global stylesheet's own padding
+# starts cutting it off. Measured, not guessed: with `padding: 7px 14px` and
+# a 13px label, minimumSizeHint().height() comes out at 31.
+_MIN_BUTTON_HEIGHT = 32
+
+
 def _btn(text: str, variant: str = "secondary", height: int = 36, width: int | None = None) -> QPushButton:
     b = QPushButton(text)
     b.setProperty("variant", variant)
-    b.setFixedHeight(height)
+    # A floor, not the requested value.
+    #
+    # BUG this fixes: call sites asked for 24 or 26 to fit buttons into table
+    # rows, and setFixedHeight honoured it — so the bottom of every one of
+    # them was clipped, across the Employees, Screenshots, Attendance and
+    # Teams tabs. It looked like a rendering glitch rather than a size anyone
+    # had chosen, which is why it survived so long.
+    b.setFixedHeight(max(height, _MIN_BUTTON_HEIGHT))
     if width:
         b.setFixedWidth(width)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -446,7 +472,9 @@ def _tune_table(table: "QTableWidget"):
     table.setAlternatingRowColors(True)
     table.setShowGrid(False)
     table.verticalHeader().setVisible(False)
-    table.verticalHeader().setDefaultSectionSize(42)   # rows tang lag rahi thin
+    # 44, and it has to stay at least ITEM_PADDING*2 + border above the
+    # tallest thing a cell can hold — see _MIN_BUTTON_HEIGHT.
+    table.verticalHeader().setDefaultSectionSize(44)
     table.setFocusPolicy(Qt.FocusPolicy.NoFocus)       # dotted focus box hata do
     table.setWordWrap(False)
     table.horizontalHeader().setHighlightSections(False)
@@ -777,7 +805,7 @@ class _FetchWorker(QThread):
 
     def run(self):
         try:
-            r = requests.get(
+            r = _http.get(
                 self._url,
                 params=self._params,
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
@@ -829,7 +857,7 @@ class _PostWorker(QThread):
 
     def run(self):
         try:
-            r = requests.post(
+            r = _http.post(
                 self._url,
                 json=self._body,
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
@@ -865,7 +893,7 @@ class _ExportWorker(QThread):
             rows, page = [], 1
             while len(rows) < self.MAX_ROWS:
                 q = dict(self._params); q["page"] = page
-                r = requests.get(
+                r = _http.get(
                     self._url, params=q,
                     headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                     timeout=30,
@@ -892,7 +920,7 @@ class _DeleteWorker(QThread):
 
     def run(self):
         try:
-            r = requests.delete(
+            r = _http.delete(
                 self._url,
                 headers=_auth_headers(),
                 timeout=20
@@ -2759,11 +2787,30 @@ class _ReportsTab(QWidget):
         w = _FetchWorker(f"{API_BASE_URL}/admin/employees", {"limit": 200})
 
         def fill(data: dict):
+            # REBUILT, not appended to.
+            #
+            # This used to add straight onto the end. The page reloads the
+            # list every time it is opened, so after four visits the dropdown
+            # listed every employee four times over — with the same names
+            # repeating down a list far taller than the window.
+            #
+            # The current choice is kept across the rebuild: reloading while
+            # somebody has picked an employee must not quietly reset the
+            # report to "All employees".
+            chosen = self._emp.currentData()
+            self._emp.blockSignals(True)
+            self._emp.clear()
+            self._emp.addItem("All employees", "all")
             for emp in data.get("employees", data.get("data", [])) or []:
                 if emp.get("role") == "super_admin":
                     continue
                 label = f"{emp.get('employee_id')} — {emp.get('username', '')}"
                 self._emp.addItem(label, emp.get("employee_id"))
+            if chosen:
+                index = self._emp.findData(chosen)
+                if index >= 0:
+                    self._emp.setCurrentIndex(index)
+            self._emp.blockSignals(False)
 
         w.result.connect(fill)
         w.error.connect(lambda _e: None)
@@ -4274,9 +4321,9 @@ class _Sidebar(QFrame):
         b_lay.setContentsMargins(24, 28, 24, 20)
         b_lay.setSpacing(2)
 
-        badge = QLabel("ETS")
+        badge = QLabel("AMAZE")
         badge.setStyleSheet(f"color:{C['accent']}; font-size:13px; font-weight:800; background:transparent;")
-        title = QLabel("Employee Tracking")
+        title = QLabel("Connect")
         title.setWordWrap(True)
         title.setStyleSheet(f"color:{C['text_primary']}; font-size:16px; font-weight:700; background:transparent;")
         sub = QLabel("Admin Console")
@@ -4398,7 +4445,7 @@ class _TopHeader(QFrame):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        self._title = QLabel("ETS Control Center")
+        self._title = QLabel("Amaze Connect")
         self._title.setStyleSheet(
             f"color:{C['text_primary']}; font-size:22px; font-weight:800; background:transparent;"
         )
@@ -4522,17 +4569,30 @@ class AdminConfigPanel(QMainWindow):
     # are already about. One list, so the next tab cannot be forgotten.
     TAB_ATTRS = (
         "_dashboard_tab", "_config_tab", "_employees_tab", "_attendance_tab",
-        "_screenshots_tab", "_teams_tab", "_reports_tab", "_logs_tab",
+        "_screenshots_tab", "_teams_tab", "_mychat_tab", "_reports_tab",
+        "_logs_tab",
     )
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Amaze ETS — Control Center")
+        self.setWindowTitle("Amaze Connect — Control Center")
         self.setMinimumSize(1080, 680)
         self.resize(1300, 820)
         self._logging_out = False  # Guard flag to prevent recursion
         self._force_close = False  # True = asli exit (tray se), minimise nahi
         self.setStyleSheet(_global_stylesheet())
+
+        # Built here, NOT in _build_central: a theme switch rebuilds the tabs,
+        # and a ChatManager created in there would be replaced each time,
+        # leaving the previous one polling with nothing attached to it.
+        #
+        # An admin who is a member of a team is a member like anybody else —
+        # the server has always served them their channels. They simply had no
+        # screen to read them on, because chat lived only in the employee
+        # panel and an admin never sees that panel.
+        from client.application.managers.chat_manager import ChatManager
+        self.chat = ChatManager(self)
+
         self._build_central()
         self._after_central()
 
@@ -4590,6 +4650,8 @@ class AdminConfigPanel(QMainWindow):
         # this file's helpers, so importing it at the top would be circular.
         from client.presentation.windows.admin_teams_tab import _TeamsTab
         self._teams_tab       = _TeamsTab()
+        from client.presentation.windows.team_page import TeamPage
+        self._mychat_tab      = TeamPage(self, self.chat)
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
 
@@ -4605,6 +4667,7 @@ class AdminConfigPanel(QMainWindow):
             self._attendance_tab,
             self._screenshots_tab,
             self._teams_tab,
+            self._mychat_tab,
             self._reports_tab,
             self._logs_tab,
         ):
@@ -4620,7 +4683,7 @@ class AdminConfigPanel(QMainWindow):
         )
         sb = QHBoxLayout(status)
         sb.setContentsMargins(28, 0, 28, 0)
-        ver = QLabel(f"ETS Admin Console v{APP_VERSION}")
+        ver = QLabel(f"Amaze Connect · Admin Console v{APP_VERSION}")
         ver.setStyleSheet(f"color:{C['text_muted']};font-size:11px;border:none;background:transparent;")
         self._status_server = QLabel("●  Connected to Production Server")
         self._status_server.setStyleSheet(
@@ -4702,6 +4765,12 @@ class AdminConfigPanel(QMainWindow):
 
     def _after_central(self):
         self._wire_central(0)
+
+        # Polls whether or not the tab is open, so the sidebar count is right
+        # before somebody goes looking for it.
+        self.chat.messages.connect(self._on_chat_messages)
+        self.chat.start()
+
         self.scheduler = SchedulerService()
         self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
         if hasattr(self.scheduler, "force_logout"):
@@ -4933,9 +5002,38 @@ class AdminConfigPanel(QMainWindow):
                 except Exception:
                     pass
 
+    def _on_chat_messages(self, arrived: list):
+        """Tell the admin about a message when they are looking elsewhere."""
+        if not arrived or self.stack.currentWidget() is getattr(self, "_mychat_tab", None):
+            return
+        mine = SessionManager.employee_id
+        others = [m for m in arrived if m.get("sender_id") != mine]
+        if not others:
+            return
+        latest = others[-1]
+        body = str(latest.get("body") or "")
+        tray = getattr(self, "tray", None)
+        if tray is None:
+            return
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon as _Tray
+            tray.showMessage(
+                f"{latest.get('sender_name', 'Someone')}"
+                + (f" and {len(others) - 1} more" if len(others) > 1 else ""),
+                body if len(body) <= 90 else body[:87] + "…",
+                _Tray.MessageIcon.Information, 6000)
+        except Exception:
+            pass
+
     def _stop_background_services(self):
         """Sirf timers/threads/workers rokta hai — session ko touch nahi
         karta. closeEvent aur logout() dono isko use karte hain."""
+        chat = getattr(self, "chat", None)
+        if chat is not None:
+            try:
+                chat.stop()
+            except Exception:
+                pass
         if hasattr(self, 'scheduler'):
             self.scheduler.stop()
         if hasattr(self, 'idle_tracker'):
@@ -5069,7 +5167,7 @@ class AdminConfigPanel(QMainWindow):
             if not getattr(self, "_tray_hint_shown", False):
                 self._tray_hint_shown = True
                 self.tray.showMessage(
-                    "Amaze ETS",
+                    "Amaze Connect",
                     "Still running in the background. Use the tray icon to reopen.",
                     QSystemTrayIcon.MessageIcon.Information,
                     4000,
@@ -5095,7 +5193,7 @@ class AdminConfigPanel(QMainWindow):
 
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(_app_icon() or self.windowIcon())
-        self.tray.setToolTip("Amaze ETS — Control Center")
+        self.tray.setToolTip("Amaze Connect — Control Center")
 
         menu = QMenu()
         act_open = QAction("🖥  Open Control Center", menu)
@@ -5112,7 +5210,7 @@ class AdminConfigPanel(QMainWindow):
         act_logout.triggered.connect(self.logout)
         menu.addAction(act_logout)
 
-        act_quit = QAction("🚪  Quit Amaze ETS", menu)
+        act_quit = QAction("🚪  Quit Amaze Connect", menu)
         act_quit.triggered.connect(self._quit_from_tray)
         menu.addAction(act_quit)
 

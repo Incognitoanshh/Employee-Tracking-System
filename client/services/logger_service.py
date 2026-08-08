@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 import requests
+from client.core import http as _http
 
 from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
@@ -104,7 +105,7 @@ class LoggerService:
 
         # API upload try karo
         try:
-            response = requests.post(
+            response = _http.post(
                 f"{API_BASE_URL}/logs/create",
                 json={
                     "employee_id": employee_id,

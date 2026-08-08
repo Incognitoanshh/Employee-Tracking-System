@@ -34,6 +34,12 @@ const RATE_LIMIT_PER_MINUTE = 20;
 const PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 const MAX_PINNED = 20;
+/**
+ * How far back the poll looks for withdrawn messages. Only has to outlast the
+ * gap between two polls; minutes of margin because a laptop that slept through
+ * a deletion should still catch it on waking.
+ */
+const DELETION_LOOKBACK_MINUTES = 10;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
 /**
@@ -84,7 +90,13 @@ function serverError(res, req, err) {
 
 /** Shape a message row for the client. */
 function toMessage(row) {
+    // Deleted messages come back from SQL with their body intact — the record
+    // keeps it — so the withholding happens here, at the single point every
+    // read path passes through. Doing it in each query instead would mean one
+    // forgotten WHERE clause leaks the text of a withdrawn message.
+    const deleted = Boolean(row.deleted_at);
     return {
+        deleted,
         seq:          Number(row.seq),
         channel_id:   row.channel_id,
         sender_id:    row.sender_id,
@@ -94,11 +106,13 @@ function toMessage(row) {
         sender_name:  row.sender_name,
         sender_code:  row.sender_employee_code,
         former:       row.sender_id === null,
-        body:         row.body,
+        body:         deleted ? "" : row.body,
         reply_to:     row.reply_to === null ? null : Number(row.reply_to),
         created_at:   row.created_at,
-        edited:       row.edit_count > 0,
-        edit_count:   row.edit_count,
+        // A withdrawn message is not also "edited" — the pencil next to a
+        // tombstone reads as though the text was changed before it went.
+        edited:       !deleted && row.edit_count > 0,
+        edit_count:   deleted ? 0 : row.edit_count,
         pinned:       Boolean(row.pinned_at),
         pinned_at:    row.pinned_at || null,
         // Filled in by enrich(). Present as empty rather than absent so the
@@ -122,7 +136,12 @@ function toMessage(row) {
 async function enrich(rows, me) {
     if (!rows.length) return rows;
     const seqs = rows.map((m) => m.seq);
-    const byseq = new Map(rows.map((m) => [m.seq, m]));
+    // Withdrawn messages are deliberately left out of the lookup map. Their
+    // file is still on disk and still in the attachments table — the record
+    // keeps it — but hanging it back on the message would mean deleting a
+    // photograph removed the words and left the picture, which is not what
+    // anybody means by delete. Same for who was named in it.
+    const byseq = new Map(rows.filter((m) => !m.deleted).map((m) => [m.seq, m]));
 
     const files = await pool.query(
         `SELECT id, message_seq, file_name, mime_type, size_bytes
@@ -155,7 +174,7 @@ async function enrich(rows, me) {
     const replyTargets = rows.map((m) => m.reply_to).filter(Boolean);
     if (replyTargets.length) {
         const parents = await pool.query(
-            `SELECT seq, sender_name, body FROM messages WHERE seq = ANY($1)`,
+            `SELECT seq, sender_name, body, deleted_at FROM messages WHERE seq = ANY($1)`,
             [replyTargets]);
         const byParent = new Map(parents.rows.map((r) => [Number(r.seq), r]));
         for (const message of rows) {
@@ -164,7 +183,14 @@ async function enrich(rows, me) {
             message.reply = {
                 seq: Number(parent.seq),
                 sender_name: parent.sender_name,
-                excerpt: String(parent.body || "").slice(0, 140),
+                // Quoting a message that has been withdrawn would put the very
+                // text back on screen that its author just took down — and
+                // permanently, because the quote sits in somebody else's
+                // message and cannot be deleted by them.
+                excerpt: parent.deleted_at
+                    ? "This message was deleted"
+                    : String(parent.body || "").slice(0, 140),
+                deleted: Boolean(parent.deleted_at),
             };
         }
     }
@@ -173,7 +199,7 @@ async function enrich(rows, me) {
 
 const MESSAGE_COLUMNS = `
     m.seq, m.channel_id, m.sender_id, m.sender_name, m.sender_employee_code,
-    m.body, m.reply_to, m.created_at, m.edit_count, m.pinned_at`;
+    m.body, m.reply_to, m.created_at, m.edit_count, m.pinned_at, m.deleted_at`;
 
 // ───────────────────────────────────────────────────────────────────────────
 //  What the employee can see
@@ -281,14 +307,15 @@ exports.getUpdates = async (req, res) => {
         const cursor = Number(head.rows[0].head);
 
         if (since === 0) {
-            return res.json({ success: true, cursor, messages: [], notifications: [] });
+            return res.json({
+                success: true, cursor, messages: [], notifications: [], deletions: [] });
         }
 
         const messages = await pool.query(
             `SELECT ${MESSAGE_COLUMNS}
                FROM messages m
                JOIN channels c ON c.id = m.channel_id
-              WHERE m.seq > $2 AND m.deleted_at IS NULL AND ${visibleChannelSql("c", 1)}
+              WHERE m.seq > $2 AND ${visibleChannelSql("c", 1)}
               ORDER BY m.seq
               LIMIT 500`,
             [me, since]
@@ -306,6 +333,29 @@ exports.getUpdates = async (req, res) => {
             [me]
         );
 
+        // Deletions travel OUTSIDE the cursor, and they have to.
+        //
+        // The cursor only moves forward, so a message deleted after everybody
+        // has already polled past it is invisible to this query — the panel
+        // would keep showing text its author withdrew until they happened to
+        // reopen the channel. Which is the one failure this feature cannot
+        // have.
+        //
+        // So the recently-withdrawn seqs ride along separately. A lookback
+        // window rather than a second cursor because applying a tombstone is
+        // idempotent: re-sending the same seq every poll for a few minutes
+        // costs a few bytes and removes the need to track per-client state.
+        const deletions = await pool.query(
+            `SELECT m.seq
+               FROM messages m
+               JOIN channels c ON c.id = m.channel_id
+              WHERE m.deleted_at IS NOT NULL
+                AND m.deleted_at > NOW() - INTERVAL '${DELETION_LOOKBACK_MINUTES} minutes'
+                AND ${visibleChannelSql("c", 1)}
+              LIMIT 200`,
+            [me]
+        );
+
         const rows = messages.rows;
         const shaped = await enrich(rows.map(toMessage), me);
         return res.json({
@@ -316,6 +366,7 @@ exports.getUpdates = async (req, res) => {
             cursor: rows.length === 500 ? Number(rows[rows.length - 1].seq) : cursor,
             messages: shaped,
             notifications: notifications.rows,
+            deletions: deletions.rows.map((r) => Number(r.seq)),
         });
     } catch (err) {
         return serverError(res, req, err);
@@ -352,7 +403,7 @@ exports.getMessages = async (req, res) => {
         const result = await pool.query(
             `SELECT ${MESSAGE_COLUMNS}
                FROM messages m
-              WHERE m.channel_id = $1 AND m.deleted_at IS NULL
+              WHERE m.channel_id = $1
                 AND ($2::BIGINT IS NULL OR m.seq < $2)
               ORDER BY m.seq DESC
               LIMIT $3`,
@@ -672,6 +723,106 @@ exports.editMessage = async (req, res) => {
     }
 };
 
+/**
+ * DELETE /api/chat/messages/:seq
+ *
+ * Withdraw your own message. Everybody who could see it now sees
+ * "This message was deleted" in its place.
+ *
+ * THE TEXT IS NOT DESTROYED, and that is the point of the whole design. The
+ * row stays, the body stays, `deleted_at` and `deleted_by` are stamped. What
+ * changes is who is shown it: the channel gets the tombstone, the audited
+ * super-admin transcript still gets the words.
+ *
+ * The reason is a direct instruction from the owner of this system — company
+ * records must not be erasable by the person being recorded — set against the
+ * later, equally direct instruction that people must be able to take back a
+ * message. Both are satisfied by removing it from view rather than from the
+ * database. A hard DELETE would satisfy only the second, and would hand any
+ * employee a way to remove evidence from the record after the fact.
+ *
+ * A TOMBSTONE IS LEFT RATHER THAN CLOSING THE GAP. A message that vanishes
+ * completely rewrites the conversation around it: replies point at nothing
+ * and the remaining messages read as if the exchange never happened. The
+ * marker keeps the shape of the conversation honest, and it is what everybody
+ * already expects from every messaging application they use.
+ *
+ * There is no time limit, unlike editing. Editing is limited because a
+ * quietly rewritten message five days later misrepresents what was said;
+ * deletion announces itself, so it cannot be used to do that.
+ */
+exports.deleteMessage = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const seq = Number.parseInt(req.params.seq, 10);
+    if (!Number.isFinite(seq)) return fail(res, 400, "Invalid message");
+
+    let client;
+    try {
+        // Visibility on the pool before a dedicated client is taken — holding
+        // one connection while asking the pool for another is what exhausts
+        // it under load. Same shape as sendMessage and editMessage.
+        const locate = await pool.query(
+            `SELECT channel_id FROM messages WHERE seq = $1`, [seq]);
+        if (locate.rows.length === 0) return fail(res, 404, "Message not found");
+
+        const channel = await loadVisibleChannel(pool, me, locate.rows[0].channel_id);
+        if (!channel) return fail(res, 404, "Message not found");
+
+        client = await pool.connect();
+        await client.query("BEGIN");
+        const found = await client.query(
+            `SELECT m.seq, m.sender_id, m.deleted_at, t.is_archived
+               FROM messages m
+               JOIN channels c ON c.id = m.channel_id
+               JOIN teams t ON t.id = c.team_id
+              WHERE m.seq = $1
+              FOR UPDATE OF m`,
+            [seq]
+        );
+        if (found.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return fail(res, 404, "Message not found");
+        }
+        const message = found.rows[0];
+
+        // Deleting twice is not an error — two clicks on a slow link would
+        // otherwise show a failure for something that plainly worked.
+        if (message.deleted_at) {
+            await client.query("ROLLBACK");
+            return res.json({ success: true, seq, already: true });
+        }
+        if (message.sender_id !== me) {
+            await client.query("ROLLBACK");
+            return fail(res, 403, "You can only delete your own messages.");
+        }
+        if (message.is_archived) {
+            await client.query("ROLLBACK");
+            return fail(res, 409, "This team is archived — it is read-only.");
+        }
+
+        // Unpinned on the way out. A pinned message that reads "deleted" at
+        // the top of the channel is a permanent piece of noise on the one
+        // shelf that is supposed to stay short.
+        await client.query(
+            `UPDATE messages
+                SET deleted_at = clock_timestamp(), deleted_by = $2,
+                    pinned_at = NULL, pinned_by = NULL
+              WHERE seq = $1`,
+            [seq, me]
+        );
+        await client.query("COMMIT");
+
+        return res.json({ success: true, seq });
+    } catch (err) {
+        if (client) await client.query("ROLLBACK").catch(() => {});
+        return serverError(res, req, err);
+    } finally {
+        if (client) client.release();
+    }
+};
+
 // ───────────────────────────────────────────────────────────────────────────
 //  Read state, search, presence
 // ───────────────────────────────────────────────────────────────────────────
@@ -822,6 +973,11 @@ exports.getChannelMembers = async (req, res) => {
                  SELECT cm.employee_id
                    FROM channel_members cm
                   WHERE cm.channel_id = $3
+                 UNION
+                 -- Every super admin, in every channel, without being added.
+                 -- They are shown rather than hidden: somebody in a channel
+                 -- should be able to see that the owner is in it too.
+                 SELECT e.employee_id FROM employees e WHERE e.role = 'super_admin'
              )
              SELECT e.employee_id,
                     COALESCE(NULLIF(e.full_name, ''), e.username) AS name,

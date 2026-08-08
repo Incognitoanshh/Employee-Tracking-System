@@ -1,4 +1,5 @@
 import requests
+from client.core import http as _http
 from client.infrastructure.database.database import Database
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
@@ -27,7 +28,7 @@ class LogService:
             endpoint = f"{API_BASE_URL}/logs/all"
             params = {}
         try:
-            response = requests.get(endpoint, headers=headers, params=params, timeout=10)
+            response = _http.get(endpoint, headers=headers, params=params, timeout=10)
             data = response.json()
             if data.get("success") and data.get("data"):
                 return data["data"]
@@ -66,7 +67,7 @@ class LogService:
         if not headers:
             return []
         try:
-            response = requests.get(
+            response = _http.get(
                 f"{API_BASE_URL}/screenshots/all",
                 headers=headers,
                 timeout=10

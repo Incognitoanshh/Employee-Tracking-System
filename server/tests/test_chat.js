@@ -373,9 +373,14 @@ async function main() {
         check("and the message is unchanged",
             psql(DB, `SELECT body FROM messages WHERE seq=${editable}`) === "Hello sir");
 
+        // Deleting has no time limit, unlike editing, and the difference is
+        // deliberate: a quiet rewrite days later misrepresents what was said,
+        // whereas a deletion announces itself and cannot be used to do that.
         res = await api("DELETE", `/chat/messages/${editable}`, { token: e1 });
-        check("there is no route to delete a message at all",
-            res.status === 404, `status ${res.status}`);
+        check("a message too old to edit can still be withdrawn",
+            res.status === 200, `status ${res.status}`);
+        check("and withdrawing it does not erase it from the record",
+            psql(DB, `SELECT body FROM messages WHERE seq=${editable}`) === "Hello sir");
 
         // ── renaming a channel ──────────────────────────────────────────
         //  Reachable from the admin panel's Edit dialog. It had no test at
@@ -622,6 +627,64 @@ async function main() {
         res = await api("GET", "/admin/chat/access-log", { token: admin });
         check("an ordinary admin cannot read the access log either",
             res.status === 403, `status ${res.status}`);
+
+        // ── the super admin sees everything ─────────────────────────────
+        console.log("\nThe super admin");
+        // The owner's decision, and it has a cost worth keeping visible: read
+        // this way there is no record, whereas /admin/chat/view demands a
+        // purpose and writes one. What it buys is the opposite kind of
+        // honesty — the super admin shows up in the member list, so the people
+        // in a channel can see the owner is in it.
+        res = await api("GET", "/chat/me/teams", { token: sa });
+        const saTeams = (res.body.teams || []).map((t) => t.name).sort();
+        check("a super admin sees every team without being added to any",
+            saTeams.includes("Development") && saTeams.includes("HR"),
+            JSON.stringify(saTeams));
+        check("and there is no team_members row saying so",
+            psql(DB, `SELECT COUNT(*) FROM team_members WHERE employee_id='SA001'`) === "0");
+
+        const saDev = res.body.teams.find((t) => t.name === "Development");
+        check("including a channel nobody added them to",
+            saDev.channels.some((c) => c.id === backend),
+            JSON.stringify(saDev.channels.map((c) => c.name)));
+
+        res = await api("GET", `/chat/channels/${backend}/messages`, { token: sa });
+        check("they can read it", res.status === 200, `status ${res.status}`);
+        res = await api("GET", `/chat/channels/${hrGeneral}/messages`, { token: sa });
+        check("and another team's General too", res.status === 200, `status ${res.status}`);
+
+        res = await api("GET", `/chat/channels/${backend}/members`, { token: e1 });
+        check("everyone in a channel can SEE the super admin is in it",
+            (res.body.members || []).some((m) => m.employee_id === "SA001"),
+            JSON.stringify((res.body.members || []).map((m) => m.employee_id)));
+
+        res = await api("GET", "/chat/search?q=VPN", { token: sa });
+        check("search reaches every channel for them too",
+            res.body.total >= 0 && res.status === 200, `status ${res.status}`);
+
+        // Nobody may take that away.
+        res = await api("DELETE", `/admin/teams/${devTeam}/members/SA001`, { token: admin });
+        check("an admin cannot remove a super admin from a team",
+            res.status === 403, `status ${res.status}`);
+        check("and is told why rather than getting a bare refusal",
+            /every team/i.test(res.body.message || ""), res.body.message);
+
+        res = await api("DELETE", `/admin/channels/${backend}/members/SA001`, { token: admin });
+        check("nor from a channel", res.status === 403, `status ${res.status}`);
+
+        res = await api("DELETE", `/admin/teams/${devTeam}/members/SA001`, { token: sa });
+        check("not even the super admin themselves",
+            res.status === 403, `status ${res.status}`);
+
+        res = await api("GET", "/chat/me/teams", { token: sa });
+        check("so they still see everything afterwards",
+            (res.body.teams || []).length >= 2,
+            String((res.body.teams || []).length));
+
+        // An ordinary admin gets none of this.
+        res = await api("GET", `/chat/channels/${hrGeneral}/messages`, { token: admin });
+        check("an ordinary admin still sees nothing they were not added to",
+            res.status === 404, `status ${res.status}`);
 
         // ── a person leaves ─────────────────────────────────────────────
         console.log("\nWhen somebody leaves");

@@ -60,7 +60,7 @@ def stylesheets(root: QWidget) -> str:
 # built under it. Shared values (pure white, the accents that appear in both)
 # are excluded, or every check would trip on a legitimate match.
 DARK_ONLY = ["#0a0e1a", "#0d1220", "#111827", "#1a2337", "#e8edf7", "#0a0e16"]
-LIGHT_ONLY = ["#eef2f7", "#0f172a", "#e6ecf4", "#d3dce8", "#f6f9fc"]
+LIGHT_ONLY = ["#e7edf5", "#0f172a", "#f4f7fb", "#c8d4e4", "#e2e9f3"]
 
 # Sanity: a colour in both palettes proves nothing and would make the
 # checks below fail for the wrong reason. #0f172a was in both — the dark
@@ -99,7 +99,7 @@ def main():
           ADMIN_C is ADMIN)
     theme.set_theme("light")
     check("so switching reaches it without re-importing anything",
-          ADMIN_C["bg_app"] == "#eef2f7", ADMIN_C["bg_app"])
+          ADMIN_C["bg_app"] == "#e7edf5", ADMIN_C["bg_app"])
     theme.set_theme("dark")
 
     # ── the trap that started this ──────────────────────────────────────
@@ -111,7 +111,7 @@ def main():
     check("scrollbar() with no argument follows the current theme",
           "#0a0e1a" not in theme.scrollbar(), theme.scrollbar()[:70])
     check("and app_style() does too",
-          "#0a0e1a" not in theme.app_style() and "#eef2f7" in theme.app_style())
+          "#0a0e1a" not in theme.app_style() and "#e7edf5" in theme.app_style())
     theme.set_theme("dark")
     check("in the other direction as well",
           "#0a0e1a" in theme.scrollbar())

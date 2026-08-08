@@ -24,13 +24,14 @@ monitoring product makes the chat better rather than worse.
 from __future__ import annotations
 
 from datetime import datetime
+from time import monotonic
 
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QAction, QCursor, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
-    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+    QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from client.presentation.theme import C, R, R_SM, button, input_style, scrollbar
@@ -89,12 +90,158 @@ def _day_label(value) -> str:
     return local.strftime("%d %b %Y")
 
 
+# How long after asking for the bottom we keep following it down. Long enough
+# for a layout pass and a picture to decode, short enough that it never fights
+# somebody who has started scrolling back.
+FOLLOW_SECONDS = 0.6
+
+
 PRESENCE = {
     "ACTIVE":      ("●", C.GREEN,      "Active"),
     "IDLE":        ("●", C.AMBER,      "Idle"),
     "OFFLINE":     ("●", C.TEXT_DIM,   "Offline"),
     "SHIFT_ENDED": ("●", C.PURPLE,     "Shift ended"),
 }
+
+
+
+# Pictures already fetched and decrypted, keyed by attachment id.
+#
+# IN MEMORY, never on disk. The server keeps these encrypted so that a copy of
+# every photograph anybody sent does not sit around in the clear; a cache
+# folder of decrypted ones would hand that back. The cost is re-fetching after
+# a restart, which is a second on a conversation nobody scrolls twice.
+#
+# The feed is rebuilt from scratch on every new message, so without a cache a
+# channel with four images would re-download all four every few seconds.
+_IMAGE_CACHE: dict[int, bytes] = {}
+_IMAGE_CACHE_MAX = 40
+
+# Pictures that could not be fetched, and why.
+#
+# WITHOUT THIS a failing image is indistinguishable from a slow one. The feed
+# is rebuilt on every new message, and each rebuild made a fresh label saying
+# "Loading image…" and asked again — so a picture whose file the server cannot
+# find sat on "Loading…" for ever while quietly re-requesting itself for the
+# life of the session. It looked like the image system was stuck. It was not;
+# it was retrying, forever, and never saying so.
+#
+# Found when a restarted demo server was pointed at the wrong upload folder,
+# which is exactly the shape of a real accident on a server.
+_IMAGE_FAILED: dict[int, str] = {}
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+THUMB_WIDTH = 340
+
+
+def _looks_like_image(attachment: dict) -> bool:
+    name = str(attachment.get("file_name") or "").lower()
+    if name.endswith(".enc"):          # the stored name, not what it is
+        name = name[:-4]
+    return name.endswith(IMAGE_SUFFIXES)
+
+
+def _cache_image(attachment_id: int, blob: bytes) -> None:
+    if len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
+        # Oldest first. Nothing clever — a chat holds a handful of these.
+        _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)), None)
+    _IMAGE_CACHE[attachment_id] = blob
+
+
+def _thumbnail(blob: bytes) -> QPixmap | None:
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(blob):
+        return None
+    if pixmap.width() > THUMB_WIDTH:
+        pixmap = pixmap.scaledToWidth(
+            THUMB_WIDTH, Qt.TransformationMode.SmoothTransformation)
+    return pixmap
+
+
+class _ClickableImage(QLabel):
+    """The picture in the conversation. Clicking it opens it properly."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class ImageViewer(QDialog):
+    """One picture, as large as the screen allows.
+
+    IN MEMORY, NOT VIA A TEMPORARY FILE. Handing the picture to the system
+    viewer would mean writing the decrypted bytes to disk, and the whole
+    reason chat attachments are stored encrypted is that a copy of every
+    photograph anybody sent must not sit around in the clear. A temporary file
+    is exactly that copy — and one nothing reliably deletes. So the image is
+    shown here, from the bytes already in memory.
+
+    Save is still offered, because wanting to keep a picture is legitimate.
+    The difference is that it then goes where the employee chose, knowingly.
+    """
+
+    save_requested = Signal()
+
+    def __init__(self, blob: bytes, file_name: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(file_name or "Image")
+        self.setStyleSheet(f"QDialog {{ background:{C.BG}; }}")
+
+        pixmap = QPixmap()
+        pixmap.loadFromData(blob)
+        self.pixmap = pixmap
+
+        # Fit the screen rather than the picture: a phone photograph is far
+        # larger than any monitor, and a window bigger than the screen has its
+        # close button somewhere nobody can reach.
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None and not pixmap.isNull():
+            room = screen.availableGeometry()
+            limit_w, limit_h = int(room.width() * 0.85), int(room.height() * 0.85)
+            if pixmap.width() > limit_w or pixmap.height() > limit_h:
+                pixmap = pixmap.scaled(
+                    limit_w, limit_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation)
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(12, 12, 12, 12)
+        col.setSpacing(10)
+
+        view = QLabel()
+        view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        view.setStyleSheet("background:transparent;border:none;")
+        if pixmap.isNull():
+            view.setText("This picture could not be displayed.")
+            view.setStyleSheet(f"color:{C.TEXT_DIM};background:transparent;border:none;")
+        else:
+            view.setPixmap(pixmap)
+        col.addWidget(view, 1)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        save = QPushButton("Save…")
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.setStyleSheet(button("primary"))
+        save.clicked.connect(self.save_requested.emit)
+        row.addWidget(save)
+        close = QPushButton("Close")
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setStyleSheet(button("ghost"))
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        col.addLayout(row)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        # Escape closes it. Every picture viewer anybody has used does this,
+        # and a modal window that ignores Escape feels stuck.
+        if event.key() == Qt.Key.Key_Escape:
+            self.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _Worker(QThread):
@@ -141,6 +288,8 @@ class _ChannelRow(QPushButton):
         self._badge.setFixedHeight(18)
         self._badge.setMinimumWidth(18)
         self._badge.hide()
+        self._unread = 0
+        self._selected = False
 
         row.addWidget(self._icon)
         row.addWidget(self._name, 1)
@@ -155,11 +304,37 @@ class _ChannelRow(QPushButton):
                 text-align:left;
             }}
             QPushButton#channelRow:hover {{ background:{C.CARD_HOVER}; }}
-            QPushButton#channelRow:checked {{ background:{C.PRIMARY_DIM}; }}
+            QPushButton#channelRow:checked {{ background:{C.SELECTED_BG}; }}
         """)
         self.set_unread(int(channel.get("unread") or 0))
 
+    def set_selected(self, selected: bool) -> None:
+        """Recolour the labels inside the row.
+
+        The row's own :checked rule paints the background, but the name and
+        the icon are separate QLabels with their own colour — so a selected
+        row went dark-blue while its text stayed dark, and the channel you
+        were looking at became the one you could not read.
+        """
+        self._selected = selected
+        self._icon.setStyleSheet(
+            f"color:{C.SELECTED_TEXT if selected else C.TEXT_DIM};font-size:12px;"
+            f"border:none;background:transparent;")
+        self.set_unread(self._unread)
+
     def set_unread(self, count: int) -> None:
+        self._unread = count
+        if getattr(self, "_selected", False):
+            self._name.setStyleSheet(
+                f"color:{C.SELECTED_TEXT};font-size:13px;font-weight:600;"
+                f"border:none;background:transparent;")
+            self._badge.setVisible(count > 0)
+            if count > 0:
+                self._badge.setText(str(count) if count < 100 else "99+")
+                self._badge.setStyleSheet(
+                    f"background:{C.SELECTED_TEXT};color:{C.SELECTED_BG};font-size:10px;"
+                    f"font-weight:800;border-radius:9px;padding:0 5px;border:none;")
+            return
         if count > 0:
             self._badge.setText(str(count) if count < 100 else "99+")
             self._badge.setStyleSheet(
@@ -187,16 +362,23 @@ class _Bubble(QFrame):
     reply_requested = Signal(int)               # seq
     edit_requested = Signal(int, str)           # seq, current body
     pin_requested = Signal(int, bool)           # seq, pinned
+    delete_requested = Signal(int)              # seq
     download_requested = Signal(int, str)       # attachment id, file name
     jump_requested = Signal(int)                # seq of the message replied to
+    image_wanted = Signal(int, object)          # attachment id, the label to fill
+    image_clicked = Signal(int, str)            # attachment id, file name
 
     def __init__(self, message: dict, mine: bool, can_post: bool = True, parent=None):
         super().__init__(parent)
         self.seq = message.get("seq")
         self.client_msg_id = message.get("client_msg_id")
+        self._pending_images: list = []
+        self.deleted = bool(message.get("deleted"))
         self.setObjectName("bubble")
 
-        mentions_me = bool(message.get("mentions_me"))
+        # A withdrawn message keeps no highlight. Leaving the amber edge on a
+        # tombstone would draw the eye to the one line with nothing in it.
+        mentions_me = bool(message.get("mentions_me")) and not self.deleted
         # A message that names you gets a marked edge. Being named is the one
         # thing that has to survive being scrolled past, and colouring the
         # whole row would fight with every other state the bubble can be in.
@@ -239,7 +421,7 @@ class _Bubble(QFrame):
                 f"border:none;background:transparent;")
             head.addWidget(tag)
 
-        if message.get("pinned"):
+        if message.get("pinned") and not self.deleted:
             pin = QLabel("📌")
             pin.setStyleSheet("font-size:10px;border:none;background:transparent;")
             head.addWidget(pin)
@@ -259,7 +441,9 @@ class _Bubble(QFrame):
 
         # Actions are only offered where they can succeed. A button that
         # always fails teaches people the panel is unreliable.
-        if self.seq and can_post and not message.get("pending"):
+        # Nothing is offered on a withdrawn message: there is nothing to
+        # reply to, quote, pin, or take back a second time.
+        if self.seq and can_post and not message.get("pending") and not self.deleted:
             head.addWidget(self._action("Reply",
                                         lambda: self.reply_requested.emit(self.seq)))
             if mine and _within_edit_window(message.get("created_at")):
@@ -269,6 +453,12 @@ class _Bubble(QFrame):
             head.addWidget(self._action(
                 "Unpin" if message.get("pinned") else "Pin",
                 lambda: self.pin_requested.emit(self.seq, not message.get("pinned"))))
+            # Delete lives behind "⋯" rather than beside Pin, and only on your
+            # own messages. A destructive action sitting in the same row as
+            # three harmless ones is a mis-click waiting to happen, and one
+            # that cannot be undone.
+            if mine:
+                head.addWidget(self._more_button())
         col.addLayout(head)
 
         # ── what this replies to ────────────────────────────────────────
@@ -286,6 +476,17 @@ class _Bubble(QFrame):
             col.addWidget(quote)
 
         # ── the message ─────────────────────────────────────────────────
+        if self.deleted:
+            # The row stays. Closing the gap would rewrite the conversation
+            # around it — replies would answer nothing, and the exchange would
+            # read as if it never happened.
+            stone = QLabel("This message was deleted")
+            stone.setStyleSheet(
+                f"color:{C.TEXT_DIM};font-size:12px;font-style:italic;"
+                f"border:none;background:transparent;padding:2px 0;")
+            col.addWidget(stone)
+            return
+
         text = str(message.get("body") or "")
         if text:
             body = QLabel(text)
@@ -302,6 +503,8 @@ class _Bubble(QFrame):
 
         # ── files ───────────────────────────────────────────────────────
         for attachment in message.get("attachments") or []:
+            if _looks_like_image(attachment):
+                col.addWidget(self._image(attachment))
             col.addWidget(self._file_row(attachment))
 
         # A queued message knows only how many files it carries, not what the
@@ -313,6 +516,36 @@ class _Bubble(QFrame):
                 f"color:{C.TEXT_DIM};font-size:11px;border:none;background:transparent;")
             col.addWidget(waiting)
 
+    def _more_button(self) -> QPushButton:
+        button_ = self._action("⋯", self._more_menu)
+        button_.setToolTip("More")
+        return button_
+
+    def _more_menu(self):
+        menu = self.build_more_menu()
+        origin = self.sender()
+        where = (origin.mapToGlobal(origin.rect().bottomLeft())
+                 if isinstance(origin, QPushButton) else QCursor.pos())
+        menu.exec(where)
+
+    def build_more_menu(self) -> QMenu:
+        """The menu on its own, so it can be checked without a modal loop.
+
+        exec() blocks until something is clicked, so a test that called the
+        handler would simply hang. Building and showing are separate for that
+        reason — see build_attach_menu, which was split for the same one.
+        """
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{C.CARD}; color:{C.TEXT}; border:1px solid {C.BORDER};"
+            f"border-radius:{R_SM}px; padding:4px; }}"
+            f"QMenu::item {{ padding:7px 18px 7px 12px; border-radius:{R_SM}px; }}"
+            f"QMenu::item:selected {{ background:{C.SELECTED_BG}; color:{C.SELECTED_TEXT}; }}")
+        remove = QAction("🗑   Delete message", menu)
+        remove.triggered.connect(lambda: self.delete_requested.emit(self.seq))
+        menu.addAction(remove)
+        return menu
+
     def _action(self, text: str, slot) -> QPushButton:
         button_ = QPushButton(text)
         button_.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -323,6 +556,57 @@ class _Bubble(QFrame):
             f"QPushButton#bubbleAction:hover {{ color:{C.PRIMARY}; }}")
         button_.clicked.connect(slot)
         return button_
+
+    def _image(self, attachment: dict) -> QWidget:
+        """A picture shown in the conversation, not a file to go and fetch.
+
+        Cached ones appear immediately. The rest say so and fill in when they
+        arrive — the alternative is a blank gap for a second on this
+        connection, which reads as something having gone wrong.
+        """
+        holder = _ClickableImage()
+        holder.setObjectName("chatImage")
+        holder.setStyleSheet(
+            f"QLabel#chatImage {{ background:{C.ELEVATED};border:1px solid {C.BORDER};"
+            f"border-radius:{R_SM}px;padding:6px;color:{C.TEXT_DIM};font-size:11px; }}")
+        holder.setCursor(Qt.CursorShape.PointingHandCursor)
+        holder.setToolTip("Click to open")
+
+        attachment_id = int(attachment["id"])
+        holder.clicked.connect(
+            lambda: self.image_clicked.emit(
+                attachment_id, str(attachment.get("file_name") or "image")))
+        cached = _IMAGE_CACHE.get(attachment_id)
+        if cached is not None:
+            pixmap = _thumbnail(cached)
+            if pixmap is not None:
+                holder.setPixmap(pixmap)
+                return holder
+
+        problem = _IMAGE_FAILED.get(attachment_id)
+        if problem:
+            # Say what went wrong, and stop asking. Clicking tries again —
+            # a server that has come back should not need a restart here.
+            holder.setText(f"⚠  {problem}\nClick to try again")
+            holder.setToolTip("Click to try again")
+            return holder
+
+        holder.setText("Loading image…")
+        # QUEUED, not emitted.
+        #
+        # BUG this fixes: this used to emit image_wanted right here — inside
+        # the constructor — while the page connects to that signal only after
+        # the bubble has been built. Every request fired into nothing, so no
+        # picture ever loaded and no error ever appeared either: just
+        # "Loading image…" for good.
+        self._pending_images.append((attachment_id, holder))
+        return holder
+
+    def request_images(self) -> None:
+        """Ask for the pictures. Called once the page has connected."""
+        for attachment_id, holder in self._pending_images:
+            self.image_wanted.emit(attachment_id, holder)
+        self._pending_images = []
 
     def _file_row(self, attachment: dict) -> QWidget:
         size = int(attachment.get("size_bytes") or 0)
@@ -467,10 +751,16 @@ class TeamPage(QWidget):
         self._staged: list[dict] = []      # files uploaded, message not sent yet
         self._members_cache: list[dict] = []
         self._pinned: list[dict] = []
+        # Requests in flight, so a rebuild mid-download does not start a
+        # second fetch for the same picture.
+        self._loading_images: set[int] = set()
 
         self._build()
 
         self._chat.messages.connect(self._on_messages)
+        # Withdrawals arrive on their own signal — they are removals, not
+        # arrivals, and they come from outside the cursor.
+        self._chat.deletions.connect(self._mark_deleted)
         self._chat.outbox_changed.connect(self._on_outbox_changed)
         self._chat.online_changed.connect(self._on_online_changed)
 
@@ -605,6 +895,10 @@ class TeamPage(QWidget):
         self._scroll.setWidget(host)
         col.addWidget(self._scroll, 1)
 
+        # Follow the conversation down as the feed grows — see _scroll_to_bottom
+        # for why asking for the bottom once is not enough.
+        self._scroll.verticalScrollBar().rangeChanged.connect(self._range_changed)
+
         # The member list that opens while an "@" is being typed. A plain
         # widget above the composer rather than a popup window: a popup on
         # macOS steals focus from the text box it is meant to be helping.
@@ -664,7 +958,7 @@ class TeamPage(QWidget):
             f"QPushButton {{ background:{C.CARD};color:{C.TEXT_MUTED};"
             f"border:1px solid {C.BORDER};border-radius:{R_SM}px;font-size:15px; }}"
             f"QPushButton:hover {{ color:{C.TEXT};border-color:{C.PRIMARY}; }}")
-        attach.clicked.connect(self._attach_file)
+        attach.clicked.connect(self._attach_menu)
         row.addWidget(attach)
 
         self._composer = _Composer()
@@ -786,8 +1080,10 @@ class TeamPage(QWidget):
                     lambda _checked=False, cid=channel["id"]: self.open_channel(cid))
                 self._channel_list.insertWidget(index, row)
                 self._rows[channel["id"]] = row
-                row.setChecked(self._channel is not None
-                               and self._channel["id"] == channel["id"])
+                selected = (self._channel is not None
+                            and self._channel["id"] == channel["id"])
+                row.setChecked(selected)
+                row.set_selected(selected)
                 index += 1
 
     # ── one channel ─────────────────────────────────────────────────────
@@ -797,6 +1093,7 @@ class TeamPage(QWidget):
         self._back.hide()
         for cid, row in self._rows.items():
             row.setChecked(cid == channel_id)
+            row.set_selected(cid == channel_id)
         self._chat.set_active_channel(channel_id)
         self._member_timer.start()
         self._cancel_reply()
@@ -848,10 +1145,15 @@ class TeamPage(QWidget):
                 if channel.get("type") == "ANNOUNCEMENT"
                 else "This team is archived. You can read it, but not add to it.")
 
-        self._render_feed()
+        self._render_feed(force_bottom=True)
         self._mark_read()
 
-    def _render_feed(self):
+    def _render_feed(self, force_bottom: bool = False):
+        # Opening a channel always lands on the newest message. Without the
+        # override it would inherit the scroll position of whatever channel
+        # was open before, so switching from halfway up one conversation
+        # dropped you halfway up the next.
+        at_bottom = force_bottom or self._at_bottom()
         while self._feed.count() > 1:
             item = self._feed.takeAt(0)
             if item.widget():
@@ -906,16 +1208,56 @@ class TeamPage(QWidget):
             bubble.reply_requested.connect(self._start_reply)
             bubble.edit_requested.connect(self._start_edit)
             bubble.pin_requested.connect(self._toggle_pin)
+            bubble.delete_requested.connect(self._delete_message)
             bubble.download_requested.connect(self._download_file)
             bubble.jump_requested.connect(self._jump_to)
+            bubble.image_wanted.connect(self._load_image)
+            bubble.image_clicked.connect(self._open_image)
+            # Only now is anything listening — see _Bubble.request_images.
+            bubble.request_images()
             self._feed.insertWidget(index, bubble)
             index += 1
 
-        QTimer.singleShot(0, self._scroll_to_bottom)
+        # Only follow the conversation down if it was already at the bottom.
+        #
+        # Rebuilding the feed resets the scrollbar, so somebody reading back
+        # through history was thrown to the end every time anything arrived —
+        # or, worse, snapped away mid-sentence. If they have scrolled up, they
+        # are reading something; leave them there.
+        if at_bottom:
+            QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _at_bottom(self, slack: int = 60) -> bool:
+        bar = self._scroll.verticalScrollBar()
+        # A fresh, empty feed has maximum 0 and counts as "at the bottom", so
+        # the first load still lands on the newest message.
+        return bar.maximum() - bar.value() <= slack
 
     def _scroll_to_bottom(self):
+        """Go to the end, and keep going there until the feed stops growing.
+
+        Asking for the bottom once does not reach it. Sending a message makes
+        the feed taller, but the scrollbar's maximum only grows after Qt has
+        laid the new bubble out, and that has not happened yet when this runs.
+        So `maximum()` is still the height from BEFORE the message — we scroll
+        to the old end, the feed then grows past it, and the conversation looks
+        like it jumped upwards on every send. That was the actual bug; it was
+        not a scroll going up, it was a scroll stopping short.
+
+        So we also stay hungry for a moment: any range change in the next
+        FOLLOW_SECONDS pins us to the new bottom. That window also covers a
+        picture finishing its decode and pushing the feed down.
+        """
+        self._follow_until = monotonic() + FOLLOW_SECONDS
         bar = self._scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    def _range_changed(self, _minimum: int, maximum: int) -> None:
+        # Deliberately time-limited rather than a flag somebody has to clear.
+        # A flag left set would yank a person who had scrolled up back to the
+        # end the moment anything changed height.
+        if monotonic() < getattr(self, "_follow_until", 0.0):
+            self._scroll.verticalScrollBar().setValue(maximum)
 
     def _mark_read(self):
         if not self._channel or not self._messages:
@@ -1042,7 +1384,8 @@ class TeamPage(QWidget):
         self._composer.clear()
         self._cancel_reply()
         self._clear_staged()
-        self._render_feed()
+        # Your own message always scrolls into view — you just wrote it.
+        self._render_feed(force_bottom=True)
 
     def _on_outbox_changed(self):
         if self._channel and not self._searching:
@@ -1168,6 +1511,68 @@ class TeamPage(QWidget):
                   lambda error: QMessageBox.information(self, "Not pinned", error),
                   seq, pinned)
 
+    def _open_image(self, attachment_id: int, file_name: str):
+        """Show the picture full size.
+
+        Only from the cache. If it is on screen it has already been fetched
+        and decrypted, so opening it is instant — and if it has not arrived
+        yet, there is nothing to open and the bubble still says so.
+        """
+        blob = _IMAGE_CACHE.get(int(attachment_id))
+        if blob is None:
+            # Nothing to open. If it failed, this click means "try again";
+            # if it is merely still arriving, leave it alone.
+            if _IMAGE_FAILED.pop(int(attachment_id), None) is not None:
+                self._render_feed()
+            return
+        # .enc is the name it is STORED under. Showing that to somebody who
+        # sent "invoice.png" is confusing, and the viewer's title is the only
+        # place the name appears.
+        clean = file_name[:-4] if file_name.lower().endswith(".enc") else file_name
+        viewer = ImageViewer(blob, clean, self)
+        viewer.save_requested.connect(
+            lambda: self._download_file(int(attachment_id), clean))
+        viewer.exec()
+
+    def _delete_message(self, seq: int):
+        """Confirm, then withdraw. Nothing about this can be undone."""
+        answer = QMessageBox.question(
+            self, "Delete message",
+            "Delete this message?\n\n"
+            "Everyone in the channel will see that a message was deleted. "
+            "It stays in the company record.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run(ChatManager.delete_message,
+                  lambda _p: self._mark_deleted([seq]),
+                  lambda error: QMessageBox.information(self, "Not deleted", error),
+                  seq)
+
+    def _mark_deleted(self, seqs: list):
+        """Turn messages already on screen into tombstones.
+
+        Applied locally rather than by refetching the channel: on this link a
+        refetch is most of a second, and a message that stays readable for that
+        long after its author took it back is the one thing this must not do.
+        Everything here is idempotent, because the poll re-sends the same seqs
+        for several minutes.
+        """
+        wanted = {int(seq) for seq in seqs}
+        touched = False
+        for message in self._messages:
+            if int(message.get("seq") or 0) in wanted and not message.get("deleted"):
+                message["deleted"] = True
+                message["body"] = ""
+                message["attachments"] = []
+                message["pinned"] = False
+                touched = True
+        if touched:
+            self._render_feed()
+            # A withdrawn message may have been on the pinned shelf.
+            self._load_pinned()
+
     def _load_pinned(self, channel_id: int | None = None):
         channel_id = channel_id or self._channel_id
         if not channel_id:
@@ -1201,18 +1606,83 @@ class TeamPage(QWidget):
 
     # ── files ───────────────────────────────────────────────────────────
 
-    def _attach_file(self):
+    def _attach_menu(self):
+        """A small menu, rather than dropping straight into a file browser.
+
+        Picking a photograph and picking a document are different errands, and
+        a plain "choose a file" box makes finding a picture among a folder of
+        everything else the employee's problem. This is the one place people
+        will use most, so it gets the filter.
+        """
         if not self._channel:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Attach a file")
+        menu = self.build_attach_menu()
+        button = self.sender()
+        origin = button.mapToGlobal(button.rect().bottomLeft()) if button else None
+        menu.exec(origin or QCursor.pos())
+
+    def build_attach_menu(self) -> QMenu:
+        """The menu itself, separate from showing it.
+
+        exec() runs a modal loop, so anything that calls it and then looks at
+        the result never gets there. Building and showing are split so the
+        contents can be checked without opening a window.
+        """
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{C.ELEVATED};color:{C.TEXT};"
+            f"border:1px solid {C.BORDER};border-radius:{R_SM}px;padding:6px; }}"
+            f"QMenu::item {{ padding:9px 22px;border-radius:6px;font-size:13px; }}"
+            f"QMenu::item:selected {{ background:{C.SELECTED_BG};"
+            f"color:{C.SELECTED_TEXT}; }}")
+
+        photos = QAction("🖼   Photo", menu)
+        photos.triggered.connect(lambda: self._attach_file(images_only=True))
+        menu.addAction(photos)
+
+        any_file = QAction("📄   File", menu)
+        any_file.triggered.connect(lambda: self._attach_file(images_only=False))
+        menu.addAction(any_file)
+        return menu
+
+    def _attach_file(self, images_only: bool = False):
+        if not self._channel:
+            return
+        if images_only:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Choose a photo", "",
+                "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)")
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, "Choose a file")
         if not path:
             return
         self._staged_note(f"Uploading {path.split('/')[-1]}…")
+        # Remembered so the picture can be cached from the copy already on
+        # this machine — see _on_uploaded.
+        self._last_upload_path = path
         self._run(ChatManager.upload_attachment, self._on_uploaded,
                   self._on_upload_failed, self._channel["id"], path)
 
     def _on_uploaded(self, attachment: dict):
         self._staged.append(attachment)
+
+        # Cache the picture from the file the employee just chose.
+        #
+        # Without this, sending an image meant encrypting it, uploading it,
+        # and then DOWNLOADING IT BACK and decrypting it to draw — a round
+        # trip and a decryption for bytes that were already sitting on this
+        # machine. On this connection that is a visible wait to see the thing
+        # you just sent.
+        path = getattr(self, "_last_upload_path", None)
+        if path and _looks_like_image({"file_name": path}):
+            try:
+                with open(path, "rb") as handle:
+                    _cache_image(int(attachment["id"]), handle.read())
+            except OSError:
+                # Unreadable now for some reason; it will be fetched the
+                # ordinary way when it is drawn.
+                pass
+        self._last_upload_path = None
         self._render_staged()
 
     def _on_upload_failed(self, error: str):
@@ -1272,6 +1742,71 @@ class TeamPage(QWidget):
                       self, "Saved", f"Saved to:\n{saved}"),
                   lambda error: QMessageBox.warning(self, "Download failed", error),
                   attachment_id, path)
+
+    # ── pictures ────────────────────────────────────────────────────────
+
+    def _load_image(self, attachment_id: int, label):
+        """Fetch and decrypt one image, then put it in the label that asked.
+
+        The label is passed by reference rather than looked up afterwards
+        because the feed is rebuilt constantly — by the time this returns, the
+        widget that wanted it may already have been replaced, and writing into
+        a deleted one is a crash. Hence the liveness check on the way back.
+        """
+        if attachment_id in self._loading_images:
+            return
+        self._loading_images.add(attachment_id)
+
+        def done(blob: bytes, _id=attachment_id, _label=label):
+            self._loading_images.discard(_id)
+            _cache_image(_id, blob)
+            pixmap = _thumbnail(blob)
+            try:
+                # NOT `isVisible()`. A widget inside a scroll area that is
+                # scrolled past — or one Qt has not painted yet — reports
+                # False, so every picture was skipped here and sat on
+                # "Loading image…" for good. The only thing worth guarding
+                # against is the C++ object having been deleted by a rebuild,
+                # and that raises RuntimeError on touch.
+                if pixmap is not None:
+                    _label.setText("")
+                    _label.setPixmap(pixmap)
+                    _label.setFixedSize(pixmap.size())
+                else:
+                    _label.setText("Could not read this image")
+            except RuntimeError:
+                # The label was deleted by a rebuild while this was in
+                # flight. The bytes are cached; the redraw below puts them on
+                # whatever took its place.
+                pass
+
+            # Redraw once the picture is in hand.
+            #
+            # BUG this fixes: the feed is rebuilt more than once while a
+            # download is running — opening a channel renders, then the
+            # history reply renders again. The first render's label was
+            # deleted, so the picture landed on a dead widget; the second
+            # render asked for the same image and was turned away by
+            # _loading_images because the first request was still in flight.
+            # The bytes ended up cached and NOTHING on screen ever changed:
+            # four labels stuck on "Loading image…" with the images sitting
+            # in memory beside them.
+            #
+            # Rebuilding here is safe from looping: a bubble only asks for a
+            # picture that is not already cached, and by now it is.
+            if not self._loading_images:
+                self._render_feed()
+
+        def failed(error: str, _id=attachment_id, _label=label):
+            self._loading_images.discard(_id)
+            _IMAGE_FAILED[_id] = str(error) or "Image could not be loaded"
+            try:
+                if _label is not None:
+                    _label.setText(f"⚠  {_IMAGE_FAILED[_id]}\nClick to try again")
+            except RuntimeError:
+                pass
+
+        self._run(ChatManager.attachment_bytes, done, failed, attachment_id)
 
     # ── mentions ────────────────────────────────────────────────────────
 

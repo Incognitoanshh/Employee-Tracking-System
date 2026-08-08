@@ -1,5 +1,6 @@
 import os
 import requests
+from client.core import http as _http
 
 from client.application.managers.session_manager import SessionManager
 from client.core.config import API_BASE_URL
@@ -139,7 +140,7 @@ class SyncManager:
                 with open(file_path, "rb") as file:
                     encrypted_bytes = file.read()
 
-                response = requests.post(
+                response = _http.post(
                     f"{API_BASE_URL}/screenshots/upload",
                     files={"screenshot": (f"{screenshot_id}.enc", encrypted_bytes, "application/octet-stream")},
                     headers=headers,
@@ -251,7 +252,7 @@ class SyncManager:
 
         for day, seconds in pending:
             try:
-                response = requests.post(
+                response = _http.post(
                     f"{API_BASE_URL}/logs/idle-daily",
                     json={"day": day, "idle_seconds": int(seconds)},
                     headers=headers,
@@ -295,7 +296,7 @@ class SyncManager:
                     "activity": log["activity"],
                 }
 
-                response = requests.post(
+                response = _http.post(
                     f"{API_BASE_URL}/logs/create",
                     json=payload,
                     headers=headers,

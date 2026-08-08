@@ -4,6 +4,7 @@ import threading
 from typing import Callable, Optional
 
 import requests
+from client.core import http as _http
 
 from client.core.config import API_BASE_URL
 from client.services.settings_service import SettingsService
@@ -76,7 +77,7 @@ class ConfigSyncManager:
 
     def _do_sync(self) -> dict | None:
         try:
-            response = requests.post(
+            response = _http.post(
                 f"{API_BASE_URL}/config/sync",
                 json={
                     "employee_id": self._employee_id,

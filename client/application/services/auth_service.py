@@ -1,4 +1,5 @@
 import requests
+from client.core import http as _http
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
 
@@ -9,7 +10,7 @@ class AuthService:
     def login(username, password):
 
         try:
-            response = requests.post(
+            response = _http.post(
                 f"{API_BASE_URL}/auth/login",
                 json={
                     "username": username,
@@ -39,7 +40,7 @@ class AuthService:
         out to the login screen.
         """
         try:
-            response = requests.post(
+            response = _http.post(
                 f"{API_BASE_URL}/auth/password",
                 json={
                     "current_password": current_password,

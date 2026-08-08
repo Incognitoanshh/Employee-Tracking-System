@@ -183,6 +183,8 @@ exports.getTeam = async (req, res) => {
               WHERE c.team_id = $1
               ORDER BY c.is_default DESC, LOWER(c.name)`, [teamId]);
 
+        // Super admins appear in every team without a team_members row, so
+        // the console shows the same membership the employees see.
         const members = await pool.query(
             `SELECT e.employee_id,
                     COALESCE(NULLIF(e.full_name, ''), e.username) AS name,
@@ -191,9 +193,10 @@ exports.getTeam = async (req, res) => {
                             JOIN channels c ON c.id = cm.channel_id
                            WHERE cm.employee_id = e.employee_id AND c.team_id = $1)
                         AS channel_ids
-               FROM team_members tm
-               JOIN employees e ON e.employee_id = tm.employee_id
-              WHERE tm.team_id = $1
+               FROM employees e
+               LEFT JOIN team_members tm
+                      ON tm.employee_id = e.employee_id AND tm.team_id = $1
+              WHERE tm.employee_id IS NOT NULL OR e.role = 'super_admin'
               ORDER BY name`, [teamId]);
 
         return res.json({
@@ -552,6 +555,16 @@ exports.removeMember = async (req, res) => {
         const team = await client.query(`SELECT name FROM teams WHERE id = $1`, [teamId]);
         if (team.rows.length === 0) return fail(res, 404, "Team not found");
 
+        // A super admin is in every team by role, not by a row — so there is
+        // nothing to delete, and letting the attempt look like it worked
+        // would be worse than refusing it.
+        const target = await client.query(
+            `SELECT role FROM employees WHERE employee_id = $1`, [employeeId]);
+        if (target.rows[0]?.role === "super_admin") {
+            return fail(res, 403,
+                "A super admin is in every team and cannot be removed from one.");
+        }
+
         await client.query("BEGIN");
         const removed = await client.query(
             `DELETE FROM team_members WHERE team_id = $1 AND employee_id = $2
@@ -641,6 +654,13 @@ exports.removeChannelMember = async (req, res) => {
                 `Access to ${channel.rows[0].name} comes from team membership — remove them from the team instead.`);
         }
 
+        const target = await pool.query(
+            `SELECT role FROM employees WHERE employee_id = $1`, [employeeId]);
+        if (target.rows[0]?.role === "super_admin") {
+            return fail(res, 403,
+                "A super admin can see every channel and cannot be removed from one.");
+        }
+
         const removed = await pool.query(
             `DELETE FROM channel_members WHERE channel_id = $1 AND employee_id = $2
              RETURNING employee_id`, [channelId, employeeId]);
@@ -701,9 +721,9 @@ exports.viewChannel = async (req, res) => {
         const messages = await pool.query(
             `SELECT m.seq, m.channel_id, m.sender_id, m.sender_name,
                     m.sender_employee_code, m.body, m.reply_to, m.created_at,
-                    m.edited_at, m.edit_count
+                    m.edited_at, m.edit_count, m.deleted_at, m.deleted_by
                FROM messages m
-              WHERE m.channel_id = $1 AND m.deleted_at IS NULL
+              WHERE m.channel_id = $1
                 AND ($2::BIGINT IS NULL OR m.seq < $2)
               ORDER BY m.seq DESC LIMIT $3`,
             [channelId, before, limit]);
@@ -742,7 +762,17 @@ exports.viewChannel = async (req, res) => {
                 sender_id: r.sender_id,
                 sender_name: r.sender_name,
                 former: r.sender_id === null,
+                // The ORIGINAL text, deliberately, even for a message its
+                // author has withdrawn. This is the whole reason deletion is a
+                // flag rather than a DELETE: the channel shows a tombstone,
+                // this recorded and purpose-bound view shows what was said.
+                // Anything else would let an employee remove evidence from the
+                // company record after the fact, which the owner of this
+                // system ruled out before chat was built.
                 body: r.body,
+                deleted: Boolean(r.deleted_at),
+                deleted_at: r.deleted_at || null,
+                deleted_by: r.deleted_by || null,
                 created_at: r.created_at,
                 edited_at: r.edited_at,
                 edit_count: r.edit_count,

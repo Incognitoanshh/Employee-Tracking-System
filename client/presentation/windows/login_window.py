@@ -116,7 +116,7 @@ class _PostLoginWorker(QThread):
 class LoginWindow(BaseWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ETS — Login")
+        self.setWindowTitle("Amaze Connect — Sign in")
         self.resize(460, 580)
         self.setMinimumSize(400, 520)
         self.setup_ui()
@@ -134,7 +134,7 @@ class LoginWindow(BaseWindow):
         card_layout.setSpacing(0)
 
         # ── Brand ────────────────────────────────────────────
-        brand_label = QLabel("ETS")
+        brand_label = QLabel("AMAZE")
         brand_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_label.setStyleSheet(
             f"""
@@ -146,7 +146,7 @@ class LoginWindow(BaseWindow):
             """
         )
 
-        title = QLabel("Employee Tracking")
+        title = QLabel("Amaze Connect")
         title_font = QFont()
         title_font.setPointSize(20)
         title_font.setBold(True)

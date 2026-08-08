@@ -9,7 +9,10 @@
  * should ever write its own membership test.
  *
  * THE RULE
- *   A channel is visible when the person is in its team, AND one of:
+ *   A super admin sees every channel, always — see below.
+ *
+ *   Anybody else: the channel is visible when they are in its team, AND one
+ *   of:
  *     - it is the team's default channel (General), or
  *     - it is an announcement channel that is not private, or
  *     - they have been added to it explicitly.
@@ -27,9 +30,21 @@
  * was found by the announcement checks in test_chat rather than by reasoning.
  * A private announcement channel still works the explicit way.
  *
- * Administrators get no implicit access here. An admin who is not in the
- * team sees nothing, and a super admin reads conversations through the
- * audited route in team.controller — never through this.
+ * ORDINARY ADMINS get no implicit access. An admin who is not in the team
+ * sees nothing.
+ *
+ * A SUPER ADMIN sees everything, without being added and without being
+ * removable. That is a deliberate choice by the owner of this system, and it
+ * has a cost worth stating: reading a conversation this way leaves NO record,
+ * whereas the audited route in team.controller demands a purpose and a
+ * reference and writes both to a table that is never purged.
+ *
+ * What it buys in exchange is honesty in the other direction — a super admin
+ * who is in the channel appears in its member list, so the people in it can
+ * see that the owner is there. Silent reading does not offer them that.
+ *
+ * Both routes still exist. This one is open and unrecorded; that one is
+ * deliberate and recorded.
  */
 
 /**
@@ -50,14 +65,27 @@ function visibleChannelSql(channelAlias = "c", employee = 1) {
     const c = channelAlias;
     const who = typeof employee === "number" ? `$${employee}` : employee;
     return `(
+        ${isSuperAdminSql(who)}
+        OR (
         EXISTS (SELECT 1 FROM team_members tm
                  WHERE tm.team_id = ${c}.team_id AND tm.employee_id = ${who})
         AND (
             ${teamWideSql(c)}
             OR EXISTS (SELECT 1 FROM channel_members cm
                         WHERE cm.channel_id = ${c}.id AND cm.employee_id = ${who})
-        )
+        ))
     )`;
+}
+
+/**
+ * True when the given employee is a super admin.
+ *
+ * Written once, here, because six queries need it and a role test spelled out
+ * by hand in each of them is six chances for one to say `role = 'admin'`.
+ */
+function isSuperAdminSql(who) {
+    return `EXISTS (SELECT 1 FROM employees sa
+                     WHERE sa.employee_id = ${who} AND sa.role = 'super_admin')`;
 }
 
 /**
@@ -106,4 +134,7 @@ async function loadVisibleChannel(pool, employeeId, channelId) {
     return result.rows[0] || null;
 }
 
-module.exports = { visibleChannelSql, teamWideSql, isTeamWide, loadVisibleChannel };
+module.exports = {
+    visibleChannelSql, teamWideSql, isTeamWide, isSuperAdminSql,
+    loadVisibleChannel,
+};

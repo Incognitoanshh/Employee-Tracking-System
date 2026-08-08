@@ -105,7 +105,10 @@ def main():
         # endswith, not "in" — `self._logs_table` contains "_tab" too, and
         # matching it made this check fail for a reason that had nothing to do
         # with what it is testing.
-        if not (stripped.startswith("self._") and "= _" in stripped):
+        # `= _` alone misses a tab whose class is not underscore-prefixed —
+        # _mychat_tab is a TeamPage, borrowed from the employee panel.
+        if not (stripped.startswith("self._") and "= " in stripped
+                and stripped.rstrip().endswith(")")):
             continue
         attr = stripped.split("=")[0].strip().replace("self.", "")
         if attr.endswith("_tab"):
@@ -447,6 +450,148 @@ def main():
               fits, str(measured["ok"]))
     finally:
         att._BaseDialog.exec = original
+
+    # ── an admin who is in a team can actually talk in it ────────────────
+    print("\nThe admin's own chat")
+    # The gap this closes: an admin could be ADDED to a team — the server
+    # served them their channels like anybody else — but chat existed only in
+    # the employee panel, which an admin never sees. So they were a member
+    # with no way to read or send anything, and the only sign was somebody
+    # asking why their messages went unanswered.
+    from client.presentation.windows.admin_config_panel import AdminConfigPanel, PAGES
+
+    keys = [p["key"] for p in PAGES]
+    check("the console has a page for it", "mychat" in keys, str(keys))
+    check("and it is listed after Teams & Chat, which is a different thing",
+          keys.index("mychat") == keys.index("teams") + 1, str(keys))
+    check("the shutdown list knows about it",
+          "_mychat_tab" in AdminConfigPanel.TAB_ATTRS,
+          str(AdminConfigPanel.TAB_ATTRS))
+    check("the sidebar and the stack still line up",
+          len(keys) == len(AdminConfigPanel.TAB_ATTRS),
+          f"{len(keys)} pages vs {len(AdminConfigPanel.TAB_ATTRS)} tabs")
+
+    # It must be the SAME widget the employees use — a second chat
+    # implementation is a second set of the bugs already fixed in this one.
+    # NOT rebound to `acp` — that name is already imported at module scope,
+    # and assigning it here makes Python treat every earlier use in this
+    # function as a local read before assignment.
+    source = open(acp.__file__.replace(".pyc", ".py"), encoding="utf-8").read()
+    check("it reuses the employee panel's chat rather than a second copy",
+          "from client.presentation.windows.team_page import TeamPage" in source)
+    check("and the chat connection is built outside _build_central, so a "
+          "theme switch does not replace it",
+          source.index("self.chat = ChatManager(self)")
+          < source.index("def _build_central"),
+          "a rebuild would leave the old one polling")
+
+    # ── two things that only show up on screen ──────────────────────────
+    print("\nWhat the table actually draws")
+    from PySide6.QtGui import QPalette
+    from client.presentation.windows.admin_config_panel import _global_stylesheet
+    from client.presentation import theme as _th
+
+    _th.set_theme("light")
+    painted = att._TeamsTab()
+    painted.setStyleSheet(_global_stylesheet())
+    painted._on_teams({"teams": [{**TEAM, "member_count": 1, "channel_count": 3}]})
+    painted._on_detail(DETAIL)
+    painted.show()
+    app.processEvents()
+
+    # A wrapper styled with a bare `background:transparent` applies that to
+    # everything inside it too, so the button in the cell lost its own fill
+    # and rendered as an empty outline — right variant, right rule, painted
+    # over by its own parent.
+    post = None
+    for row in range(painted._channels.rowCount()):
+        holder = painted._channels.cellWidget(row, 3)
+        if holder is None:
+            continue
+        for widget in holder.findChildren(_PB):
+            if widget.text() == "Post":
+                post = widget
+    check("the Post button exists", post is not None)
+    check("and its background survives the cell wrapper",
+          post is not None
+          and post.palette().color(QPalette.ColorRole.Button).name() == "#2563eb",
+          post.palette().color(QPalette.ColorRole.Button).name() if post else "-")
+
+    # A cell holds an item OR a widget, and setting one does not remove the
+    # other. These tables are refilled in place, so a cell that held text and
+    # now holds a button showed both at once, overlapping into nonsense.
+    def both_in_channels_cell():
+        offenders = []
+        for row in range(painted._members.rowCount()):
+            if painted._members.item(row, 3) and painted._members.cellWidget(row, 3):
+                offenders.append(row)
+        return offenders
+
+    painted._on_detail({**DETAIL, "team": {**TEAM, "is_archived": True,
+                                           "archived_reason": "merged"}})
+    painted._on_detail(DETAIL)
+    painted._on_detail({**DETAIL, "team": {**TEAM, "is_archived": True,
+                                           "archived_reason": "merged"}})
+    app.processEvents()
+    check("no cell ends up holding text AND a widget after repeated refills",
+          both_in_channels_cell() == [], f"rows {both_in_channels_cell()}")
+    painted.hide()
+    _th.set_theme("dark")
+
+    # ── nothing is clipped by its own height ────────────────────────────
+    print("\nButtons are tall enough for their labels")
+    # Call sites asked for 24 or 26 to fit table rows and setFixedHeight
+    # honoured it, so the bottom of every button was cut — on every tab, not
+    # just this one. It read as a rendering glitch rather than a size someone
+    # had chosen, which is why nobody traced it.
+    from client.presentation.windows.admin_config_panel import _btn as _mkbtn
+    from PySide6.QtWidgets import QWidget as _QW, QHBoxLayout as _QH
+
+    holder = _QW()
+    holder.setStyleSheet(_global_stylesheet())
+    line = _QH(holder)
+    asked = [_mkbtn(label, "secondary", height=h)
+             for label, h in (("View", 26), ("Manage ▾", 24), ("Remove", 26))]
+    for b in asked:
+        line.addWidget(b)
+    holder.show()
+    app.processEvents()
+    clipped = [f"{b.text()}({b.height()}<{b.minimumSizeHint().height()})"
+               for b in asked if b.height() < b.minimumSizeHint().height()]
+    check("a button asked for less than it needs is given what it needs",
+          clipped == [], ", ".join(clipped))
+    holder.hide()
+
+    # And the row it sits in has to be able to hold it.
+    #
+    # This is where the last two attempts went wrong: the button was the right
+    # height and still drawn clipped, because QTableWidget::item padding is
+    # taken out of the cell BEFORE the cell widget is given its geometry. At
+    # 10px top and bottom it ate 21px, so a 42px row offered 21px of usable
+    # space to a 32px button. Measuring the button alone never showed it.
+    measured_rows = att._TeamsTab()
+    measured_rows.setStyleSheet(_global_stylesheet())
+    measured_rows._on_teams({"teams": [{**TEAM, "member_count": 1, "channel_count": 3}]})
+    measured_rows._on_detail(DETAIL)
+    measured_rows.resize(1000, 700)
+    measured_rows.show()
+    app.processEvents()
+    app.processEvents()
+
+    too_small = []
+    for table in (measured_rows._channels, measured_rows._members):
+        for row in range(table.rowCount()):
+            for column in range(table.columnCount()):
+                cell = table.cellWidget(row, column)
+                if cell is None:
+                    continue
+                for button in cell.findChildren(_PB):
+                    if button.height() > cell.height():
+                        too_small.append(
+                            f"{button.text()} {button.height()}px in {cell.height()}px")
+    check("and the table row leaves enough space for it after cell padding",
+          too_small == [], "; ".join(too_small))
+    measured_rows.hide()
 
     print()
     if failures:

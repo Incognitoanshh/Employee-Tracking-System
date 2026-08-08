@@ -52,12 +52,27 @@ _DARK = {
     "CYAN": "#22d3ee", "CYAN_BG": "#0b2b33",
     "DANGER_BG": "#7f1d1d", "DANGER_BORDER": "#991b1b",
     "ON_ACCENT": "#ffffff",
+    # What a selected row looks like. Kept as a PAIR so the background and
+    # the text on it can never be chosen separately and end up the same
+    # colour — which is exactly what happened: a light theme kept the dark
+    # theme's white-on-accent text and put it on a pale background.
+    "SELECTED_BG": "#1d4ed8", "SELECTED_TEXT": "#ffffff",
 }
 
+# Light is not "dark with the values flipped". Three things had to change
+# after seeing it on a real screen:
+#
+#   * SIDEBAR and CARD were both pure white, so the sidebar and the content
+#     it sits beside dissolved into one another — the only thing between them
+#     was a hairline nobody notices. The sidebar is now a shade cooler than
+#     the cards, which is what makes the layout read as a layout.
+#   * The page behind the cards was too close to the cards themselves, so
+#     white panels on near-white had no edge. It is a step darker now.
+#   * The borders were too faint to do their job at all.
 _LIGHT = {
-    "BG": "#eef2f7", "SIDEBAR": "#ffffff", "CARD": "#ffffff",
-    "CARD_HOVER": "#eef2f7", "ELEVATED": "#e6ecf4",
-    "BORDER": "#d3dce8", "BORDER_SOFT": "#e6ecf4",
+    "BG": "#e7edf5", "SIDEBAR": "#f4f7fb", "CARD": "#ffffff",
+    "CARD_HOVER": "#eaf0f8", "ELEVATED": "#e2e9f3",
+    "BORDER": "#c8d4e4", "BORDER_SOFT": "#dde5ef",
     "TEXT": "#0f172a", "TEXT_MUTED": "#475569", "TEXT_DIM": "#7b8aa1",
     "PRIMARY": "#2563eb", "PRIMARY_DIM": "#1d4ed8",
     "GREEN": "#15803d", "GREEN_BG": "#dcfce7",
@@ -68,6 +83,7 @@ _LIGHT = {
     "CYAN": "#0e7490", "CYAN_BG": "#cffafe",
     "DANGER_BG": "#dc2626", "DANGER_BORDER": "#b91c1c",
     "ON_ACCENT": "#ffffff",
+    "SELECTED_BG": "#2563eb", "SELECTED_TEXT": "#ffffff",
 }
 
 # The admin console's names for the same idea.
@@ -82,12 +98,13 @@ _ADMIN_DARK = {
     "danger": "#ef4444", "danger_strong": "#dc2626",
     "danger_soft": "rgba(239, 68, 68, 0.14)",
     "warning_soft": "rgba(245, 158, 11, 0.14)",
+    "selected_bg": "rgba(37, 99, 235, 0.16)", "selected_text": "#ffffff",
 }
 
 _ADMIN_LIGHT = {
-    "bg_app": "#eef2f7", "bg_sidebar": "#ffffff", "bg_surface": "#ffffff",
-    "bg_surface_alt": "#f6f9fc", "bg_elevated": "#eef2f7",
-    "border": "#d3dce8", "border_light": "#bccadb",
+    "bg_app": "#e7edf5", "bg_sidebar": "#f4f7fb", "bg_surface": "#ffffff",
+    "bg_surface_alt": "#f3f7fb", "bg_elevated": "#e2e9f3",
+    "border": "#c8d4e4", "border_light": "#aebdd2",
     "text_primary": "#0f172a", "text_secondary": "#475569", "text_muted": "#64748b",
     "accent": "#2563eb", "accent_hover": "#1d4ed8", "accent_pressed": "#1e40af",
     "accent_soft": "rgba(37, 99, 235, 0.12)",
@@ -95,6 +112,10 @@ _ADMIN_LIGHT = {
     "danger": "#dc2626", "danger_strong": "#b91c1c",
     "danger_soft": "rgba(220, 38, 38, 0.10)",
     "warning_soft": "rgba(180, 83, 9, 0.12)",
+    # Solid, with white on it. A translucent wash was unreadable here: the
+    # sidebar is already pale, so tinting it 12% blue and writing white on
+    # top produced white-on-white.
+    "selected_bg": "#2563eb", "selected_text": "#ffffff",
 }
 
 THEMES = ("dark", "light")

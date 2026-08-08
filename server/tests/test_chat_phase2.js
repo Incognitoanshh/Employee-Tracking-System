@@ -359,7 +359,139 @@ async function main() {
         check("search still cannot reach another team",
             res.body.total === 0, JSON.stringify(res.body.total));
 
+
+        // ── deletion ────────────────────────────────────────────────────
+        //
+        // Deleting is a flag, not a DELETE. Everything below exists to check
+        // that the two halves of that promise both hold: the channel really
+        // stops showing it, and the record really keeps it.
+        console.log("\nDeleting a message");
+
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "galti se bhej diya, ignore karo" } });
+        const doomed = res.body.message.seq;
+
+        res = await api("DELETE", `/chat/messages/${doomed}`, { token: e2 });
+        check("somebody else cannot delete your message",
+            res.status === 403, `status ${res.status}`);
+
+        res = await api("DELETE", `/chat/messages/${doomed}`, { token: e1 });
+        check("but you can delete your own", res.status === 200, `status ${res.status}`);
+
+        res = await api("GET", `/chat/channels/${general}/messages`, { token: e2 });
+        let gone = res.body.messages.find((m) => m.seq === doomed);
+        check("it is still IN the conversation, not silently missing",
+            Boolean(gone), "the message vanished, leaving replies pointing at nothing");
+        check("marked deleted, so the panel can say so",
+            gone && gone.deleted === true, JSON.stringify(gone && gone.deleted));
+        check("and the words are gone from what anybody is sent",
+            !JSON.stringify(res.body).includes("galti se"),
+            "the deleted text was still in the response");
+
+        // Polling is a separate read path and had its own WHERE clause.
+        res = await api("GET", `/chat/updates?since=${doomed - 1}`, { token: e2 });
+        const polled = (res.body.messages || []).find((m) => m.seq === doomed);
+        check("polling reports the deletion too, so an open panel updates",
+            Boolean(polled) && polled.deleted === true, JSON.stringify(polled));
+        check("and leaks nothing either",
+            !JSON.stringify(res.body).includes("galti se"), "poll returned the text");
+
+        // The one a cursor cannot carry: an OLD message withdrawn after
+        // everybody has already polled past it. Without a separate channel for
+        // deletions, every open panel keeps showing the text for as long as it
+        // stays open.
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "purana message jo baad me hataunga" } });
+        const oldOne = res.body.message.seq;
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e2, body: { body: "aur uske baad ka" } });
+        const newerCursor = res.body.message.seq;
+        await api("DELETE", `/chat/messages/${oldOne}`, { token: e1 });
+
+        res = await api("GET", `/chat/updates?since=${newerCursor}`, { token: e3 });
+        check("a panel already past a message still learns it was withdrawn",
+            (res.body.deletions || []).includes(oldOne),
+            JSON.stringify(res.body.deletions));
+
+        res = await api("GET", `/chat/updates?since=${newerCursor}`, { token: e4 });
+        check("but not from a team it is not in",
+            !(res.body.deletions || []).includes(oldOne),
+            JSON.stringify(res.body.deletions));
+
+        res = await api("GET", "/chat/search?q=galti", { token: e1 });
+        check("a deleted message cannot be found by searching for its words",
+            res.body.total === 0, JSON.stringify(res.body.total));
+
+        // The record. This is the half a hard DELETE would have thrown away.
+        const kept = psql(DB, `SELECT body FROM messages WHERE seq = ${doomed}`);
+        check("the text is STILL IN THE DATABASE — deletion is not erasure",
+            kept.includes("galti se"), `stored body: ${JSON.stringify(kept)}`);
+        const stamped = psql(DB,
+            `SELECT deleted_by FROM messages WHERE seq = ${doomed}`);
+        check("and who withdrew it is recorded", stamped === "E001", stamped);
+
+        res = await api("POST", "/admin/chat/view", {
+            token: await login("superadmin"),
+            body: { channel_id: general, purpose: "COMPLAINT", reference_id: "C-1" } });
+        const audited = (res.body.messages || []).find((m) => m.seq === doomed);
+        check("the audited view still shows what was actually said",
+            Boolean(audited) && String(audited.body).includes("galti se"),
+            JSON.stringify(audited && audited.body));
+        check("and shows that it was withdrawn, so the reader is not misled",
+            Boolean(audited) && audited.deleted === true,
+            JSON.stringify(audited && audited.deleted));
+
+        // A deleted message must not be editable back into existence.
+        res = await api("PATCH", `/chat/messages/${doomed}`, {
+            token: e1, body: { body: "actually never mind" } });
+        check("a deleted message cannot be edited back to life",
+            res.status === 404, `status ${res.status}`);
+
+        res = await api("DELETE", `/chat/messages/${doomed}`, { token: e1 });
+        check("deleting twice is not an error — a slow link means double clicks",
+            res.status === 200, `status ${res.status}`);
+
+        // Files and quotes: the two ways a deleted message keeps speaking.
+        const upload = await uploadFile(e1, general, "secret.txt", "confidential");
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "file attached", attachments: [upload.body.attachment.id] } });
+        const withFile = res.body.message.seq;
+        await api("DELETE", `/chat/messages/${withFile}`, { token: e1 });
+        res = await api("GET", `/chat/channels/${general}/messages`, { token: e2 });
+        const stripped = res.body.messages.find((m) => m.seq === withFile);
+        check("deleting a message takes its attachment down with it",
+            stripped && stripped.attachments.length === 0,
+            JSON.stringify(stripped && stripped.attachments));
+
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "meeting 4 baje, secret code is ALPHA" } });
+        const quoted = res.body.message.seq;
+        await api("POST", `/chat/channels/${general}/messages`, {
+            token: e2, body: { body: "theek hai", reply_to: quoted } });
+        await api("DELETE", `/chat/messages/${quoted}`, { token: e1 });
+        res = await api("GET", `/chat/channels/${general}/messages`, { token: e3 });
+        check("a reply stops quoting a message that has been withdrawn",
+            !JSON.stringify(res.body).includes("ALPHA"),
+            "the deleted text survived inside somebody else's reply");
+
+        // Pinned and then deleted: the shelf must not keep a tombstone.
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "pin karke delete karta hoon" } });
+        const pinnedThenGone = res.body.message.seq;
+        await api("POST", `/chat/messages/${pinnedThenGone}/pin`, {
+            token: e1, body: { pinned: true } });
+        await api("DELETE", `/chat/messages/${pinnedThenGone}`, { token: e1 });
+        res = await api("GET", `/chat/channels/${general}/pinned`, { token: e1 });
+        check("deleting a pinned message unpins it, leaving no tombstone on the shelf",
+            !res.body.messages.some((m) => m.seq === pinnedThenGone),
+            JSON.stringify(res.body.messages.map((m) => m.seq)));
+
+        res = await api("DELETE", `/chat/messages/${hrMessage}`, { token: e1 });
+        check("a message in a channel you cannot see reads as not found, not forbidden",
+            res.status === 404, `status ${res.status}`);
+
         for (const [method, route] of [
+            ["DELETE", `/chat/messages/${parent}`],
             ["POST", `/chat/messages/${parent}/pin`],
             ["GET", `/chat/channels/${general}/pinned`],
             ["POST", `/chat/channels/${general}/attachments`],

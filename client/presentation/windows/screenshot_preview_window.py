@@ -10,6 +10,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QThread, Signal
 import tempfile
 import requests
+from client.core import http as _http
 from client.presentation.windows.base_window import BaseWindow
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
@@ -39,7 +40,7 @@ class _DownloadWorker(QThread):
 
     def run(self):
         """
-        CRASH FIX: pehle ye ek hi blocking `requests.get(timeout=30)` tha.
+        CRASH FIX: pehle ye ek hi blocking `_http.get(timeout=30)` tha.
         `cancel()` sirf ek flag set karta hai, aur wo flag request ke return
         hone tak padha hi nahi jaata — yaani thread 30 second tak zinda
         rehta chahe user ne window kabka band kar diya ho. Us beech me app
@@ -53,7 +54,7 @@ class _DownloadWorker(QThread):
         """
         try:
             print(f"[DOWNLOAD WORKER] Fetching screenshot_id={self.screenshot_id}")
-            with requests.get(
+            with _http.get(
                 f"{API_BASE_URL}/screenshots/download/{self.screenshot_id}",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=(5, 30),          # (connect, read)
@@ -141,7 +142,7 @@ class ScreenshotPreviewWindow(BaseWindow):
             self._worker.deleteLater()       # <-- yahan crash
 
         Teen problem thin:
-          1. `cancel()` sirf flag set karta hai. Download `requests.get(...)`
+          1. `cancel()` sirf flag set karta hai. Download `_http.get(...)`
              pe BLOCK hota hai — wo flag tab tak padha hi nahi jaata jab tak
              request return na ho (30 second tak).
           2. `quit()` aise QThread pe bekaar hai jiska `run()` override kiya

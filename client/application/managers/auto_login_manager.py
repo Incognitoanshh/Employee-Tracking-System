@@ -1,4 +1,5 @@
 import requests
+from client.core import http as _http
 
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
@@ -44,7 +45,7 @@ class AutoLoginManager:
             # Token abhi expire nahi hua — server se fresh 24h token le lo
             # taaki session server-side bhi valid rahe (active_sessions table).
             try:
-                response = requests.post(
+                response = _http.post(
                     f"{API_BASE_URL}/auth/refresh",
                     headers={"Authorization": f"Bearer {old_token}"},
                     timeout=10,

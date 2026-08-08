@@ -4,6 +4,10 @@ import platform
 
 from client.services.logger_service import LoggerService
 
+# NOT the product name. This is the Windows registry value and the macOS
+# LaunchAgent filename that register the app to start at login. Renaming it
+# would leave the OLD entry in place — pointing at an executable the update
+# has replaced — and add a second one beside it.
 APP_NAME = "ETS"
 
 

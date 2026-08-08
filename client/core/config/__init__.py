@@ -35,6 +35,13 @@ load_dotenv(os.path.join(base_path, ".env"))
 # Fix: ek FIXED, per-user, OS-appropriate, hamesha-writable folder use karo
 # (CWD se independent) — `ETS_DATA_DIR` env var se override ho sakta hai.
 def _resolve_data_dir() -> str:
+    # The folder is still called ETS, and must stay that way.
+    #
+    # This is where the local database lives — the screenshot queue waiting to
+    # upload, the settings, the session. Renaming it to match the product name
+    # would point an updated app at an empty directory and every install would
+    # come up looking freshly installed, with whatever had not yet been
+    # uploaded stranded in a folder nothing reads any more.
     override = os.getenv("ETS_DATA_DIR")
     if override:
         data_dir = override
@@ -56,12 +63,12 @@ STORAGE_DIR = os.path.join(DATA_DIR, "storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://65.21.212.85:8000/api")
-APP_NAME    = os.getenv("APP_NAME", "Amaze ETS")
+APP_NAME    = os.getenv("APP_NAME", "Amaze Connect")
 # SINGLE SOURCE OF TRUTH — poora UI yahi padhta hai.
 # BUG FIX: pehle version 4 jagah alag-alag hardcoded tha (login "v1.0",
 # employee panel "2.1.0", admin console "v2.1.0", settings "1.0") — employee
 # support pe jo version batata wo screen pe depend karta tha.
-APP_VERSION = "3.0.2"
+APP_VERSION = "1.0.0"
 SCREENSHOT_MIN_INTERVAL = int(os.getenv("SCREENSHOT_MIN_INTERVAL", 180))
 SCREENSHOT_MAX_INTERVAL = int(os.getenv("SCREENSHOT_MAX_INTERVAL", 600))
 IDLE_THRESHOLD          = int(os.getenv("IDLE_THRESHOLD", 60))

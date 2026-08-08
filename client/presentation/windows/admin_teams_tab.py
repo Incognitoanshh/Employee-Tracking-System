@@ -25,6 +25,7 @@ and chat is the one thing in this system kept indefinitely.
 from __future__ import annotations
 
 import requests
+from client.core import http as _http
 from PySide6.QtCore import Qt, QSize, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
@@ -76,7 +77,7 @@ class _ApiWorker(QThread):
 
     def run(self):
         try:
-            response = requests.request(
+            response = _http.request(
                 self._method,
                 f"{API_BASE_URL}{self._path}",
                 json=self._body,
@@ -167,8 +168,7 @@ def _people_rows(parent, height: int = 170):
     area.setStyleSheet(
         f"QScrollArea{{background:{C['bg_surface_alt']};"
         f"border:1px solid {C['border']};border-radius:8px;}}")
-    host = QWidget()
-    host.setStyleSheet("background:transparent;")
+    host = _cell_holder()
     column = QVBoxLayout(host)
     column.setContentsMargins(6, 6, 6, 6)
     column.setSpacing(2)
@@ -176,9 +176,40 @@ def _people_rows(parent, height: int = 170):
     return area, column
 
 
+
+def _cell_holder() -> QWidget:
+    """A transparent wrapper for a widget placed inside a table cell.
+
+    The stylesheet is SCOPED to the wrapper by objectName. A bare
+    `background:transparent` — which is what this used to be — is applied by
+    Qt to the widget and everything inside it, so the button in the cell lost
+    its own background and rendered as an empty outline. The Post button on
+    announcement channels was invisible for exactly this reason: correct
+    variant, correct rule, painted over by its own parent.
+    """
+    holder = QWidget()
+    holder.setObjectName("cellHolder")
+    holder.setStyleSheet("QWidget#cellHolder { background: transparent; }")
+    return holder
+
+
+def _clear_cell(table, row: int, column: int) -> None:
+    """Remove whatever is in a cell — item AND widget.
+
+    A cell can hold either, and setting one does not remove the other. These
+    tables are refilled in place, so a cell that held plain text and now holds
+    a button ended up showing both, drawn on top of each other: "General" and
+    "General, Backend" overlapping into "Genemerall".
+    """
+    existing = table.cellWidget(row, column)
+    if existing is not None:
+        table.removeCellWidget(row, column)
+        existing.deleteLater()
+    table.setItem(row, column, None)
+
+
 def _person_row(text: str, button: QPushButton | None = None) -> QWidget:
-    row = QWidget()
-    row.setStyleSheet("background:transparent;")
+    row = _cell_holder()
     line = QHBoxLayout(row)
     line.setContentsMargins(8, 3, 8, 3)
     line.setSpacing(8)
@@ -428,8 +459,7 @@ class _TranscriptDialog(QDialog):
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setStyleSheet("QScrollArea{background:transparent;border:none;}")
-        host = QWidget()
-        host.setStyleSheet("background:transparent;")
+        host = _cell_holder()
         feed = QVBoxLayout(host)
         feed.setContentsMargins(0, 0, 8, 0)
         feed.setSpacing(10)
@@ -469,8 +499,7 @@ class _TranscriptDialog(QDialog):
                     f"background:transparent;")
                 block.addWidget(old)
 
-            wrapper = QWidget()
-            wrapper.setStyleSheet("background:transparent;")
+            wrapper = _cell_holder()
             wrapper.setLayout(block)
             feed.addWidget(wrapper)
 
@@ -519,7 +548,7 @@ class _TeamsTab(QWidget):
         head = QHBoxLayout()
         head.addWidget(_section("Teams"))
         head.addStretch()
-        new_team = _btn("+ New", "primary", height=30, width=70)
+        new_team = _btn("+ New", "primary", height=32, width=80)
         new_team.clicked.connect(self._new_team)
         head.addWidget(new_team)
         left_col.addLayout(head)
@@ -582,7 +611,7 @@ class _TeamsTab(QWidget):
         # one.
         header = self._channels.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column, width in ((1, 140), (2, 90), (3, 230)):
+        for column, width in ((1, 140), (2, 90), (3, 250)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self._channels.setColumnWidth(column, width)
         right_col.addWidget(self._channels)
@@ -718,6 +747,8 @@ class _TeamsTab(QWidget):
     def _fill_channels(self, channels: list, archived: bool):
         self._channels.setRowCount(len(channels))
         for row, channel in enumerate(channels):
+            for column in range(self._channels.columnCount()):
+                _clear_cell(self._channels, row, column)
             name = channel["name"]
             if channel.get("is_default"):
                 name += "  (default)"
@@ -730,14 +761,13 @@ class _TeamsTab(QWidget):
             self._channels.setItem(row, 2, _cell(str(channel["message_count"]),
                                                  mono=True, align_right=True))
 
-            actions = QWidget()
-            actions.setStyleSheet("background:transparent;")
+            actions = _cell_holder()
             line = QHBoxLayout(actions)
             line.setContentsMargins(4, 2, 4, 2)
             line.setSpacing(6)
 
             if channel["type"] == "ANNOUNCEMENT" and not archived:
-                post = _btn("Post", "primary", height=26, width=58)
+                post = _btn("Post", "primary", height=32, width=76)
                 post.clicked.connect(lambda _=False, c=channel: self._announce(c))
                 line.addWidget(post)
 
@@ -749,7 +779,7 @@ class _TeamsTab(QWidget):
             # differs by channel: everything can be renamed and described,
             # and the people list appears only where it means something.
             if not archived:
-                who = _btn("Edit", "secondary", height=26, width=64)
+                who = _btn("Edit", "secondary", height=32, width=74)
                 who.setToolTip("Rename, describe, and choose who can see it")
                 who.clicked.connect(lambda _=False, c=channel: self._edit_channel(c))
                 line.addWidget(who)
@@ -757,7 +787,7 @@ class _TeamsTab(QWidget):
             # Only a super admin sees this at all. An ordinary admin pressing a
             # button that always fails teaches them the panel is unreliable.
             if self._is_super_admin():
-                read = _btn("Read", "secondary", height=26, width=64)
+                read = _btn("Read", "secondary", height=32, width=76)
                 read.clicked.connect(lambda _=False, c=channel: self._read_channel(c))
                 line.addWidget(read)
 
@@ -775,6 +805,8 @@ class _TeamsTab(QWidget):
 
         self._members.setRowCount(len(members))
         for row, member in enumerate(members):
+            for column in range(self._members.columnCount()):
+                _clear_cell(self._members, row, column)
             self._members.setItem(row, 0, _cell(member.get("name") or member["username"]))
             self._members.setItem(row, 1, _cell(member["employee_id"], mono=True))
             self._members.setItem(row, 2, _cell(member.get("role", ""), muted=True))
@@ -822,12 +854,11 @@ class _TeamsTab(QWidget):
             # the bottom of that editor, behind its own heading. The dangerous
             # action is still one click away — it is just no longer the click
             # you make by accident.
-            edit = _btn("Edit", "secondary", height=26, width=90)
+            edit = _btn("Edit", "secondary", height=32, width=84)
             edit.setToolTip("Channels, and removing them from the team")
             edit.clicked.connect(
                 lambda _=False, m=member: self._member_channels(m, editable))
-            holder = QWidget()
-            holder.setStyleSheet("background:transparent;")
+            holder = _cell_holder()
             line = QHBoxLayout(holder)
             line.setContentsMargins(4, 2, 4, 2)
             line.addWidget(edit)
@@ -874,7 +905,7 @@ class _TeamsTab(QWidget):
         dialog.body.addWidget(_muted_label(
             "This is the whole team, not one channel — they lose General too. "
             "Their messages stay either way."))
-        kick = _btn(f"Remove {name} from the team", "danger", height=30)
+        kick = _btn(f"Remove {name} from the team", "danger", height=34)
         dialog.body.addWidget(kick)
 
         leaving = {"team": False}
@@ -1080,7 +1111,7 @@ class _TeamsTab(QWidget):
                     column.addStretch()
                     return
                 for member in staying:
-                    drop = _btn("Remove", "danger", height=24, width=82)
+                    drop = _btn("Remove", "danger", height=32, width=96)
                     drop.setToolTip(f"Remove from {channel['name']} only")
                     drop.clicked.connect(lambda _c=False, m=member: take_out(m))
                     column.addWidget(_person_row(

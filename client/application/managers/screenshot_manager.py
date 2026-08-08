@@ -6,6 +6,7 @@ import uuid
 
 import pyautogui
 import requests
+from client.core import http as _http
 from PIL import Image
 
 from client.application.managers.session_manager import SessionManager
@@ -276,7 +277,7 @@ class ScreenshotManager:
                 enc_bytes = f.read()
 
             upload_filename = f"{screenshot_id}.enc"
-            response = requests.post(
+            response = _http.post(
                 f"{API_BASE_URL}/screenshots/upload",
                 files={"screenshot": (upload_filename, enc_bytes, "application/octet-stream")},
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},

@@ -12,6 +12,7 @@ Bugs fixed:
 from __future__ import annotations
 
 import requests
+from client.core import http as _http
 from PySide6.QtCore    import QTimer
 from PySide6.QtGui     import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -34,10 +35,10 @@ def _color_icon(hex_color: str, size: int = 16) -> QIcon:
 
 # Status → (hex color, tooltip text)
 _STATUS_MAP = {
-    "active":    ("#22c55e", "ETS — Tracking Active"),
-    "idle":      ("#f59e0b", "ETS — User Idle"),
-    "error":     ("#ef4444", "ETS — Upload Error"),
-    "offshift":  ("#64748b", "ETS — Off Shift"),
+    "active":    ("#22c55e", "Amaze Connect — Tracking Active"),
+    "idle":      ("#f59e0b", "Amaze Connect — User Idle"),
+    "error":     ("#ef4444", "Amaze Connect — Upload Error"),
+    "offshift":  ("#64748b", "Amaze Connect — Off Shift"),
 }
 
 
@@ -68,7 +69,7 @@ class SystemTray(QSystemTrayIcon):
 
         tray_menu.addSeparator()
 
-        exit_action = QAction("🚪  Exit ETS", tray_menu)
+        exit_action = QAction("🚪  Exit Amaze Connect", tray_menu)
         exit_action.triggered.connect(self.exit_application)
         tray_menu.addAction(exit_action)
 
@@ -93,7 +94,7 @@ class SystemTray(QSystemTrayIcon):
     def show_message(self):
         """Show startup notification."""
         self.showMessage(
-            "ETS Running",
+            "Amaze Connect",
             "Tracking active in background.",
             QSystemTrayIcon.MessageIcon.Information,
             3000,   # 3 seconds
@@ -102,7 +103,7 @@ class SystemTray(QSystemTrayIcon):
         # ── Private helpers ──────────────────────────────────────
 
     def _apply_status(self, status: str):
-        color, tooltip = _STATUS_MAP.get(status, ("#22c55e", "ETS"))
+        color, tooltip = _STATUS_MAP.get(status, ("#22c55e", "Amaze Connect"))
         self.setIcon(_color_icon(color))
         self.setToolTip(tooltip)
 
@@ -141,7 +142,7 @@ class SystemTray(QSystemTrayIcon):
 
     def exit_application(self):
         try:
-            requests.post(
+            _http.post(
                 f"{API_BASE_URL}/auth/logout",
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=5,

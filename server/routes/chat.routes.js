@@ -53,9 +53,11 @@ router.post("/channels/:id/attachments",
 router.get("/attachments/:id", chatCtrl.downloadAttachment);
 
 // Editing is allowed for a few minutes and keeps every previous version.
-// There is deliberately no delete route.
 router.patch("/messages/:seq", chatCtrl.editMessage);
 router.post("/messages/:seq/pin", chatCtrl.setPinned);
+// Withdraws a message from view. The row and its text stay — see the note on
+// deleteMessage for why this is not a DELETE in the database.
+router.delete("/messages/:seq", chatCtrl.deleteMessage);
 
 router.post("/notifications/read", chatCtrl.markNotificationsRead);
 

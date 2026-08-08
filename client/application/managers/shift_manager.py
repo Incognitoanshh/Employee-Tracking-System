@@ -1,5 +1,6 @@
 from datetime import datetime
 import requests
+from client.core import http as _http
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
 from client.core.config import API_BASE_URL
@@ -11,7 +12,7 @@ class ShiftManager:
     def _has_open_server_session(employee_id, auth_token):
         """Ask the server whether an open session already exists."""
         try:
-            response = requests.get(
+            response = _http.get(
                 f"{API_BASE_URL}/attendance/all",
                 headers={"Authorization": f"Bearer {auth_token}"},
                 params={"employee_id": employee_id},
@@ -87,7 +88,7 @@ class ShiftManager:
             return
 
         try:
-            requests.post(
+            _http.post(
                 f"{API_BASE_URL}/attendance/login",
                 json={"employee_id": employee_id, "login_time": login_time},
                 headers={
@@ -156,7 +157,7 @@ class ShiftManager:
         connection.close()
 
         try:
-            requests.post(
+            _http.post(
                 f"{API_BASE_URL}/attendance/logout",
                 json={
                     "employee_id": SessionManager.employee_id,

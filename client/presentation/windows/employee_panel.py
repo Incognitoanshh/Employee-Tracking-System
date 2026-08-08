@@ -21,6 +21,7 @@ import os
 from datetime import datetime, timezone, timedelta
 
 import requests
+from client.core import http as _http
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QDate
 from PySide6.QtGui import QCursor, QColor
 from PySide6.QtWidgets import (
@@ -150,7 +151,7 @@ class Worker(QThread):
 
 
 def api_get(path: str, params: dict | None = None, timeout: int = 12):
-    response = requests.get(
+    response = _http.get(
         f"{API_BASE_URL}{path}",
         params=params or {},
         headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
@@ -1093,7 +1094,7 @@ class EmployeePanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ETS Employee Panel")
+        self.setWindowTitle("Amaze Connect")
         self.resize(1320, 880)
         self.setMinimumSize(1060, 700)
         self.setStyleSheet(app_style())
@@ -1209,12 +1210,12 @@ class EmployeePanel(QWidget):
         )
         names = QVBoxLayout()
         names.setSpacing(0)
-        title = QLabel("ETS")
+        title = QLabel("AMAZE")
         title.setStyleSheet(
             f"color:{C.PRIMARY};font-size:19px;font-weight:800;"
             f"letter-spacing:1px;border:none;"
         )
-        sub = QLabel("EMPLOYEE PANEL")
+        sub = QLabel("CONNECT")
         sub.setStyleSheet(
             f"color:{C.TEXT_DIM};font-size:9px;font-weight:700;"
             f"letter-spacing:1.4px;border:none;"
@@ -1563,7 +1564,7 @@ class EmployeePanel(QWidget):
 
         def probe():
             start = datetime.now()
-            requests.get(f"{API_BASE_URL}/health", timeout=6)
+            _http.get(f"{API_BASE_URL}/health", timeout=6)
             return int((datetime.now() - start).total_seconds() * 1000)
 
         worker = Worker(probe)

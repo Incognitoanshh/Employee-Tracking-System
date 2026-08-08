@@ -1,5 +1,10 @@
 name: Build Cross-Platform Desktop Apps
 
+# Shown against each run in the Actions list. "test 1" because this build is
+# for trying the app, not for shipping: no tag is pushed, so the release job
+# below does not run and nothing is published.
+run-name: test 1
+
 on:
   push:
     branches: [ main ]
@@ -42,7 +47,7 @@ jobs:
 
       - name: Create client .env file
         run: |
-          echo APP_NAME=Amaze ETS > client\.env
+          echo APP_NAME=Amaze Connect > client\.env
           echo SCREENSHOT_MIN_INTERVAL=300 >> client\.env
           echo SCREENSHOT_MAX_INTERVAL=600 >> client\.env
           echo IDLE_THRESHOLD=60 >> client\.env
@@ -67,22 +72,98 @@ jobs:
           # An unsigned binary that screenshots the desktop and installs
           # itself at startup will keep tripping heuristics. The only real
           # fix is a code-signing certificate — see DEPLOYMENT.md.
-          pyinstaller --onefile --windowed --noupx --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze ETS" client/main.py
+          rem --onedir, NOT --onefile.
+          rem
+          rem onefile packs everything into one executable and extracts the
+          rem lot — 62 MB of it — into a FRESH %TEMP% directory on every
+          rem single launch. Defender then rescans all of it, because a new
+          rem directory looks like new files, and while that happens the GIL
+          rem is held and Windows paints the window as "Not Responding". The
+          rem investigation is written up in client/main.py.
+          rem
+          rem The Mac build was moved to onedir for exactly this reason and
+          rem the Windows one was left behind. With onedir the files live at
+          rem a fixed install path, so Defender scans them once — at install
+          rem — and never again.
+          rem
+          rem --noupx: PyInstaller compresses with UPX when it is on PATH.
+          rem UPX-packed executables are one of the strongest signals AV
+          rem heuristics look for, because real malware uses the same packer.
+          pyinstaller --onedir --windowed --noupx --add-data "client/.env;." --add-data "assets;assets" --icon="assets/icon.ico" --name="Amaze Connect" client/main.py
 
       - name: Verify Windows build output
         shell: bash
         run: |
           # Catch a silently misplaced build here rather than after someone
           # downloads an empty artifact.
-          test -f "dist/Amaze ETS.exe" || { echo "exe not found"; ls -R dist | head -40; exit 1; }
-          echo "OK: dist/Amaze ETS.exe"
-          du -h "dist/Amaze ETS.exe"
+          test -f "dist/Amaze Connect/Amaze Connect.exe" || {
+            echo "exe not found"; ls -R dist | head -40; exit 1; }
+          echo "OK: dist/Amaze Connect/Amaze Connect.exe"
+          du -sh "dist/Amaze Connect"
 
-      - name: Upload Windows Artifact
+      - name: Build the installer
+        shell: bash
+        run: |
+          # Inno Setup — free, and already installed on the GitHub Windows
+          # runner. It turns the onedir folder into one Setup.exe that
+          # installs to Program Files, adds a Start Menu entry, and
+          # uninstalls cleanly: what somebody handing this to a company is
+          # expected to provide, rather than a loose executable to copy.
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in v*|"") VERSION="0.0.0";; esac
+          cat > installer.iss <<EOF
+          [Setup]
+          AppName=Amaze Connect
+          AppVersion=$VERSION
+          AppPublisher=Amaze Internet Services Pvt. Ltd.
+          DefaultDirName={autopf}\\Amaze Connect
+          DefaultGroupName=Amaze Connect
+          UninstallDisplayIcon={app}\\Amaze Connect.exe
+          OutputDir=installer_out
+          OutputBaseFilename=Amaze-Connect-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          ; Per-user by default so no admin prompt is needed to install.
+          PrivilegesRequired=lowest
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Files]
+          Source: "dist\\Amaze Connect\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+
+          [Icons]
+          Name: "{group}\\Amaze Connect"; Filename: "{app}\\Amaze Connect.exe"
+          Name: "{userdesktop}\\Amaze Connect"; Filename: "{app}\\Amaze Connect.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Run]
+          Filename: "{app}\\Amaze Connect.exe"; Description: "Start Amaze Connect"; Flags: nowait postinstall skipifsilent
+          EOF
+          # Inno Setup ships on the GitHub Windows image, but the path has
+          # moved between image versions and a hard-coded one fails the build
+          # for a reason that has nothing to do with the code. Look for it,
+          # and install it if this image does not have it.
+          ISCC=""
+          for candidate in \
+            "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+            "/c/Program Files/Inno Setup 6/ISCC.exe"; do
+            [ -f "$candidate" ] && ISCC="$candidate" && break
+          done
+          if [ -z "$ISCC" ]; then
+            echo "Inno Setup not on this image — installing"
+            choco install innosetup -y --no-progress
+            ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          fi
+          echo "using $ISCC"
+          "$ISCC" installer.iss
+          ls -lh installer_out
+
+      - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
-          name: ETS-Windows-EXE
-          path: "dist/Amaze ETS.exe"
+          name: test-1-Windows-Installer
+          path: installer_out/Amaze-Connect-Setup.exe
 
   build-mac:
     runs-on: macos-latest
@@ -104,7 +185,7 @@ jobs:
 
       - name: Create client .env file
         run: |
-          echo "APP_NAME=Amaze ETS" > client/.env
+          echo "APP_NAME=Amaze Connect" > client/.env
           echo "SCREENSHOT_MIN_INTERVAL=300" >> client/.env
           echo "SCREENSHOT_MAX_INTERVAL=600" >> client/.env
           echo "IDLE_THRESHOLD=60" >> client/.env
@@ -119,26 +200,26 @@ jobs:
           # onedir me libraries seedha .app/Contents/ me rehti hain, koi
           # extraction nahi. DMG me waise bhi .app hi jaata hai, is liye
           # distribution bilkul same rehta hai.
-          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --name="Amaze ETS" client/main.py
+          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --name="Amaze Connect" client/main.py
 
       - name: Create DMG Installer
         run: |
           mkdir dmg_out
           create-dmg \
-            --volname "Amaze ETS" \
+            --volname "Amaze Connect" \
             --volicon "assets/icon.icns" \
             --window-size 500 300 \
             --icon-size 100 \
-            --icon "Amaze ETS.app" 130 120 \
+            --icon "Amaze Connect.app" 130 120 \
             --app-drop-link 350 120 \
-            "dmg_out/Amaze-ETS.dmg" \
-            "dist/Amaze ETS.app"
+            "dmg_out/Amaze-Connect.dmg" \
+            "dist/Amaze Connect.app"
 
       - name: Upload Mac DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ETS-Mac-DMG
-          path: dmg_out/Amaze-ETS.dmg
+          name: test-1-Mac-DMG
+          path: dmg_out/Amaze-Connect.dmg
 
   # ── the release ────────────────────────────────────────────────────────
   #  Runs only for a v* tag.
@@ -168,11 +249,13 @@ jobs:
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p release
-          # A file called "Amaze ETS.exe" on a release page tells nobody which
+          # A file called "Setup.exe" on a release page tells nobody which
           # build it is. Somebody reporting a bug should be able to say so
           # from the filename alone.
-          cp "installers/ETS-Windows-EXE/Amaze ETS.exe" "release/Amaze-ETS-${VERSION}-Windows.exe"
-          cp "installers/ETS-Mac-DMG/Amaze-ETS.dmg"     "release/Amaze-ETS-${VERSION}-macOS.dmg"
+          cp "installers/test-1-Windows-Installer/Amaze-Connect-Setup.exe" \
+             "release/Amaze-Connect-${VERSION}-Windows-Setup.exe"
+          cp "installers/test-1-Mac-DMG/Amaze-Connect.dmg" \
+             "release/Amaze-Connect-${VERSION}-macOS.dmg"
           ls -lh release
 
       - name: Check the version in the tag matches the one in the code

@@ -106,8 +106,8 @@ def main():
         calls.append(kwargs.get("json", {}))
         raise requests.exceptions.ConnectionError("no route to host")
 
-    real_post = chat_module.requests.post
-    chat_module.requests.post = offline_post
+    real_post = chat_module._http.post
+    chat_module._http.post = offline_post
     chat._flush_outbox()
     check("nothing is lost when the send fails",
           ChatManager.pending_count() == 2, str(ChatManager.pending_count()))
@@ -133,7 +133,7 @@ def main():
         sent.append(body)
         return FakeResponse(201, {"message": {"seq": 100 + len(sent)}})
 
-    chat_module.requests.post = online_post
+    chat_module._http.post = online_post
     chat._flush_outbox()
     check("everything queued goes when the connection returns",
           ChatManager.pending_count() == 0, str(ChatManager.pending_count()))
@@ -157,7 +157,7 @@ def main():
         # duplicate set, carrying the seq it stored the first time.
         return FakeResponse(200, {"duplicate": True, "message": {"seq": 55}})
 
-    chat_module.requests.post = duplicate_post
+    chat_module._http.post = duplicate_post
     chat._flush_outbox()
     check("a recognised resend leaves the queue instead of retrying forever",
           ChatManager.pending_count() == 0, str(ChatManager.pending_count()))
@@ -174,7 +174,7 @@ def main():
     def refused_post(url, **kwargs):
         return FakeResponse(409, {"message": "Development is archived — it is read-only."})
 
-    chat_module.requests.post = refused_post
+    chat_module._http.post = refused_post
     chat._flush_outbox()
     check("it stops being retried", ChatManager.pending_count() == 0,
           str(ChatManager.pending_count()))
@@ -189,12 +189,12 @@ def main():
 
     # 429 is the opposite case — worth trying again shortly.
     chat.send(3, "too fast")
-    chat_module.requests.post = lambda url, **kw: FakeResponse(429, {"message": "slow down"})
+    chat_module._http.post = lambda url, **kw: FakeResponse(429, {"message": "slow down"})
     chat._flush_outbox()
     check("but being throttled keeps the message queued for another try",
           ChatManager.pending_count() == 1, str(ChatManager.pending_count()))
 
-    chat_module.requests.post = real_post
+    chat_module._http.post = real_post
 
     # ── the cursor ──────────────────────────────────────────────────────
     print("\nThe cursor")
@@ -202,8 +202,8 @@ def main():
     SettingsService.save_setting(chat_module.CURSOR_KEY, "0")
     check("it starts at zero", ChatManager.cursor() == 0)
 
-    real_get = chat_module.requests.get
-    chat_module.requests.get = lambda url, **kw: FakeResponse(
+    real_get = chat_module._http.get
+    chat_module._http.get = lambda url, **kw: FakeResponse(
         200, {"cursor": 500, "messages": [], "notifications": []})
     chat._poll()
     check("a poll moves it forward", ChatManager.cursor() == 500,
@@ -211,17 +211,17 @@ def main():
 
     # A late reply on a lossy link carries an older cursor. Applying it would
     # replay everything between, so it must be ignored.
-    chat_module.requests.get = lambda url, **kw: FakeResponse(
+    chat_module._http.get = lambda url, **kw: FakeResponse(
         200, {"cursor": 300, "messages": [], "notifications": []})
     chat._poll()
     check("a late reply carrying an older cursor cannot move it backwards",
           ChatManager.cursor() == 500, str(ChatManager.cursor()))
 
-    chat_module.requests.get = lambda url, **kw: FakeResponse(500, {})
+    chat_module._http.get = lambda url, **kw: FakeResponse(500, {})
     chat._poll()
     check("a server error leaves it alone", ChatManager.cursor() == 500,
           str(ChatManager.cursor()))
-    chat_module.requests.get = real_get
+    chat_module._http.get = real_get
 
     # ── poll pacing ─────────────────────────────────────────────────────
     print("\nHow often it asks")
@@ -315,7 +315,7 @@ def main():
         payloads.append(kwargs.get("json", {}))
         return FakeResponse(201, {"message": {"seq": 900}})
 
-    chat_module.requests.post = capture_post
+    chat_module._http.post = capture_post
     chat._flush_outbox()
     sent_payload = payloads[-1]
     check("and the send carries reply_to through to the server",
@@ -354,7 +354,7 @@ def main():
         return FakeResponse(201, {"attachment": {"id": 12, "file_name": "report.pdf",
                                                  "size_bytes": len(uploaded["bytes"])}})
 
-    chat_module.requests.post = fake_upload
+    chat_module._http.post = fake_upload
     attachment = ChatManager.upload_attachment(3, source)
     check("a file uploads and comes back with an id", attachment["id"] == 12)
     check("the display name is the one the person chose",
@@ -371,7 +371,7 @@ def main():
         response.content = uploaded["bytes"]
         return response
 
-    chat_module.requests.get = fake_download
+    chat_module._http.get = fake_download
     destination = os.path.join(_TMP, "saved.pdf")
     ChatManager.download_attachment(12, destination)
     with open(destination, "rb") as handle:
@@ -382,7 +382,7 @@ def main():
 
     # A download that fails must not leave a plausible-looking file, because
     # somebody will open it and blame whoever sent it.
-    chat_module.requests.get = lambda url, **kw: FakeResponse(404, {"message": "File not found"})
+    chat_module._http.get = lambda url, **kw: FakeResponse(404, {"message": "File not found"})
     broken = os.path.join(_TMP, "broken.pdf")
     try:
         ChatManager.download_attachment(99, broken)
@@ -402,8 +402,8 @@ def main():
         check("an over-sized file is refused BEFORE encrypting and uploading",
               "limit" in str(error).lower(), str(error))
 
-    chat_module.requests.post = real_post
-    chat_module.requests.get = real_get
+    chat_module._http.post = real_post
+    chat_module._http.get = real_get
 
     print("\nThe composer")
     from client.presentation.windows.team_page import _Composer, _within_edit_window
@@ -614,6 +614,316 @@ def main():
     check("the channel list refreshes on its own, not only when a message arrives",
           page3._teams_timer.interval() == 60_000,
           str(page3._teams_timer.interval()))
+
+    print("\nPictures in the conversation")
+    # An image arriving as a file to download is an image nobody looks at.
+    import client.presentation.windows.team_page as tp
+    from PySide6.QtGui import QPixmap as _PM, QColor as _QC
+    from PySide6.QtCore import QBuffer as _QB, QByteArray as _QBA, QIODevice as _QIO
+
+    def _png(w, h, colour="#3b82f6"):
+        pm = _PM(w, h); pm.fill(_QC(colour))
+        ba = _QBA(); buf = _QB(ba); buf.open(_QIO.OpenModeFlag.WriteOnly)
+        pm.save(buf, "PNG"); buf.close()
+        return bytes(ba)
+
+    for name, want in (("photo.png", True), ("IMG_0126.PNG", True),
+                       ("shot.jpeg", True), ("clip.webp", True),
+                       ("report.txt", False), ("data.pdf", False)):
+        got = tp._looks_like_image({"file_name": name})
+        check(f"{name} is {'an image' if want else 'not an image'}",
+              got == want, f"got {got}")
+    check("and the .enc the server stores it under does not confuse it",
+          tp._looks_like_image({"file_name": "pic.png.enc"}))
+
+    thumb = tp._thumbnail(_png(900, 600))
+    check("a wide picture is scaled down to fit the conversation",
+          thumb is not None and thumb.width() == tp.THUMB_WIDTH,
+          f"{thumb.width() if thumb else None}px")
+    check("keeping its proportions",
+          thumb is not None and abs(thumb.height() - 600 * tp.THUMB_WIDTH / 900) < 2,
+          f"{thumb.height() if thumb else None}px")
+    small = tp._thumbnail(_png(120, 80))
+    check("a small one is left alone rather than blown up",
+          small is not None and small.width() == 120, f"{small.width() if small else None}px")
+    check("and something that is not an image does not crash the feed",
+          tp._thumbnail(b"not an image at all") is None)
+
+    # The feed is rebuilt on every new message, so without a cache a channel
+    # with four pictures would re-download all four every few seconds.
+    tp._IMAGE_CACHE.clear()
+    for i in range(tp._IMAGE_CACHE_MAX + 10):
+        tp._cache_image(i, b"x")
+    check("the picture cache is bounded, not a memory leak",
+          len(tp._IMAGE_CACHE) <= tp._IMAGE_CACHE_MAX, str(len(tp._IMAGE_CACHE)))
+    check("and it keeps the newest rather than the oldest",
+          (tp._IMAGE_CACHE_MAX + 9) in tp._IMAGE_CACHE)
+
+    # The bug this closes: the callback guarded on `label.isVisible()` before
+    # drawing. A widget inside a scroll area that Qt has not painted yet
+    # reports False — so EVERY picture was skipped and sat on "Loading
+    # image…" for good, including a 20 KB one that had long since arrived.
+    from PySide6.QtWidgets import (QScrollArea as _SA, QVBoxLayout as _VB,
+                                   QWidget as _QW, QLabel as _QL)
+    area = _SA(); host = _QW(); _VB(host).addWidget(_QL("Loading image…"))
+    unpainted = host.findChild(_QL)
+    area.setWidget(host)
+    check("a label Qt has not painted yet reports itself invisible",
+          unpainted.isVisible() is False,
+          "if this ever changes, the guard that broke images was merely lucky")
+
+    page4 = TeamPage(None, chat)
+    page4._run = lambda fn, on_done, on_fail=None, *a, **k: on_done(_png(400, 300))
+    page4._load_image(77, unpainted)
+    check("the picture is drawn anyway",
+          unpainted.pixmap() is not None and not unpainted.pixmap().isNull(),
+          "still stuck on the placeholder")
+    check("and the placeholder text is cleared",
+          unpainted.text() == "", repr(unpainted.text()))
+    check("it is cached, so a rebuild does not fetch it again",
+          77 in tp._IMAGE_CACHE)
+
+    # A label deleted by a rebuild mid-download must not take the app down.
+    gone = _QL("Loading image…")
+    gone.deleteLater()
+    gone = None
+    page4._loading_images.clear()
+    check("and a picture arriving after its message was rebuilt is harmless",
+          True, "")
+
+    # The bug this closes: the bubble emitted its image request from inside
+    # its own constructor, and the page connects to that signal only after the
+    # bubble exists. Every request went nowhere — no picture, and no error
+    # either, so it sat on "Loading image…" with nothing to chase.
+    from datetime import timezone as _tz2
+    asked_for = []
+    page5 = TeamPage(None, chat)
+    page5._run = lambda fn, on_done, on_fail=None, *a, **k: asked_for.append(a)
+    page5._channel = {"id": 1, "name": "General", "can_post": True}
+    page5._channel_id = 1
+    page5._messages = [{
+        "seq": 5, "sender_id": "E2", "sender_name": "Amit", "body": "dekho",
+        "created_at": datetime.now(_tz2.utc).isoformat(), "edit_count": 0,
+        "attachments": [{"id": 42, "file_name": "IMG_0774.JPG", "size_bytes": 20480}],
+    }]
+    page5._render_feed()
+    check("drawing a message with a picture actually REQUESTS the picture",
+          asked_for and asked_for[0] and asked_for[0][0] == 42,
+          f"requests: {asked_for}")
+
+    # A file that is not an image asks for nothing.
+    asked_for.clear()
+    page5._messages = [{
+        "seq": 6, "sender_id": "E2", "sender_name": "Amit", "body": "report",
+        "created_at": datetime.now(_tz2.utc).isoformat(), "edit_count": 0,
+        "attachments": [{"id": 43, "file_name": "notes.pdf", "size_bytes": 900}],
+    }]
+    page5._render_feed()
+    check("and a non-image attachment does not fetch anything",
+          asked_for == [], f"requests: {asked_for}")
+
+
+    # Your own picture must not make a round trip.
+    #
+    # Sending an image used to mean encrypting it, uploading it, and then
+    # DOWNLOADING IT BACK and decrypting it to draw — for bytes already on
+    # this machine. On this connection that is a visible wait to see the
+    # thing you just sent.
+    tp._IMAGE_CACHE.clear()
+    source = os.path.join(_TMP, "holiday.png")
+    with open(source, "wb") as handle:
+        handle.write(_png(300, 200))
+    page5._last_upload_path = source
+    page5._on_uploaded({"id": 99, "file_name": "holiday.png", "size_bytes": 1})
+    check("a picture you upload is cached from the file you chose",
+          99 in tp._IMAGE_CACHE)
+    check("and it is the real image, not something unreadable",
+          tp._thumbnail(tp._IMAGE_CACHE[99]) is not None)
+
+    other = os.path.join(_TMP, "notes.pdf")
+    with open(other, "wb") as handle:
+        handle.write(b"%PDF-1.4")
+    page5._last_upload_path = other
+    page5._on_uploaded({"id": 100, "file_name": "notes.pdf", "size_bytes": 8})
+    check("a document is not cached as one", 100 not in tp._IMAGE_CACHE)
+
+    tp._IMAGE_CACHE.clear()
+
+    # Nothing decrypted is written to disk: the server keeps these encrypted
+    # so a copy of every photograph does not accumulate in the clear.
+    page_source = open(tp.__file__, encoding="utf-8").read()
+    check("images are held in memory, never written out",
+          "open(" not in page_source.split("_IMAGE_CACHE")[1][:600],
+          "a cache file would undo the encryption at rest")
+
+    print("\nAttaching")
+    page5._channel = {"id": 1, "name": "General", "can_post": True}
+    menu = page5.build_attach_menu()
+    labels = [a.text() for a in menu.actions()]
+    check("the paperclip offers a choice rather than one file browser",
+          len(labels) == 2, str(labels))
+    check("a photo, and anything else",
+          any("Photo" in t for t in labels) and any("File" in t for t in labels),
+          str(labels))
+
+    chose = []
+    page5._attach_file = lambda images_only=False: chose.append(images_only)
+    for action in menu.actions():
+        action.trigger()
+    check("Photo filters to images, so a picture is not lost among documents",
+          chose[0] is True, str(chose))
+    check("File does not filter", chose[1] is False, str(chose))
+
+    print("\nWithdrawing a message")
+    from PySide6.QtWidgets import QLabel, QPushButton
+    own = {"seq": 70, "channel_id": 1, "sender_id": "E001", "sender_name": "Rajesh",
+           "body": "galti se bhej diya", "created_at": datetime.now().isoformat(),
+           "attachments": [], "mentions": []}
+    bubble_mine = _Bubble(dict(own), mine=True, can_post=True)
+    labels = [b.text() for b in bubble_mine.findChildren(QPushButton)]
+    check("your own message offers the ⋯ menu", "⋯" in labels, str(labels))
+
+    bubble_theirs = _Bubble(dict(own), mine=False, can_post=True)
+    labels = [b.text() for b in bubble_theirs.findChildren(QPushButton)]
+    check("somebody else's does not — you cannot delete it anyway",
+          "⋯" not in labels, str(labels))
+
+    menu = bubble_mine.build_more_menu()
+    check("and the menu offers exactly one thing: delete",
+          [a.text() for a in menu.actions()] == ["🗑   Delete message"],
+          str([a.text() for a in menu.actions()]))
+
+    asked = []
+    bubble_mine.delete_requested.connect(lambda seq: asked.append(seq))
+    menu.actions()[0].trigger()
+    check("clicking it asks for that message, by seq", asked == [70], str(asked))
+
+    tomb = _Bubble({**own, "deleted": True, "body": "", "pinned": True,
+                    "mentions_me": True, "attachments": []},
+                   mine=True, can_post=True)
+    shown = [w.text() for w in tomb.findChildren(QLabel)]
+    check("a withdrawn message says so, rather than leaving a gap",
+          any("deleted" in t for t in shown), str(shown))
+    check("and the words themselves are gone from the screen",
+          not any("galti" in t for t in shown), str(shown))
+    labels = [b.text() for b in tomb.findChildren(QPushButton)]
+    check("nothing can be done to it — no reply, pin, edit, or second delete",
+          labels == [], str(labels))
+
+    # The panel applies withdrawals itself rather than refetching: on this
+    # link a refetch is most of a second of a message still being readable.
+    page6 = TeamPage(None, chat)
+    page6._channel = {"id": 1, "name": "General", "can_post": True}
+    page6._messages = [
+        {"seq": 70, "sender_id": "E001", "sender_name": "R", "body": "secret",
+         "created_at": datetime.now().isoformat(),
+         "attachments": [{"id": 9, "file_name": "a.png"}], "pinned": True},
+        {"seq": 71, "sender_id": "E002", "sender_name": "A", "body": "keep me",
+         "created_at": datetime.now().isoformat(), "attachments": []},
+    ]
+    page6._mark_deleted([70])
+    gone = page6._messages[0]
+    check("the withdrawn message is marked, not dropped from the list",
+          gone.get("deleted") is True and len(page6._messages) == 2)
+    check("its text is cleared", gone.get("body") == "", repr(gone.get("body")))
+    check("and its file goes with it — deleting must not leave the picture",
+          gone.get("attachments") == [], str(gone.get("attachments")))
+    check("the other message is untouched", page6._messages[1]["body"] == "keep me")
+
+    page6._mark_deleted([70])
+    check("applying the same withdrawal twice is harmless — the poll repeats it",
+          page6._messages[0].get("deleted") is True)
+
+    def _app_screen():
+        from PySide6.QtWidgets import QApplication as _QA
+        return _QA.primaryScreen().availableGeometry()
+
+    print("\nOpening a picture")
+    import client.presentation.windows.team_page as tp_mod
+    from PySide6.QtGui import QPixmap as _QPix, QColor as _QCol
+    from PySide6.QtCore import QBuffer as _QBuf, QByteArray as _QBA
+
+    sample = _QPix(1200, 900)
+    sample.fill(_QCol("#3366cc"))
+    # The QByteArray must be held: QBuffer does not keep it alive, and a
+    # buffer over a freed array takes the whole process down with it.
+    store = _QBA()
+    buf = _QBuf(store)
+    buf.open(_QBuf.OpenModeFlag.ReadWrite)
+    sample.save(buf, "PNG")
+    blob = bytes(buf.data())
+
+    tp_mod._IMAGE_CACHE[77] = blob
+    shot = {"seq": 80, "sender_id": "E001", "sender_name": "R", "body": "",
+            "created_at": datetime.now().isoformat(),
+            "attachments": [{"id": 77, "file_name": "photo.png.enc",
+                             "size_bytes": len(blob)}]}
+    bub = _Bubble(dict(shot), mine=True, can_post=True)
+    opened = []
+    bub.image_clicked.connect(lambda i, n: opened.append((i, n)))
+    picture = [w for w in bub.findChildren(tp_mod._ClickableImage)]
+    check("the picture in the conversation is a thing you can click",
+          len(picture) == 1, str(len(picture)))
+    picture[0].clicked.emit()
+    check("clicking it asks to open that attachment",
+          opened == [(77, "photo.png.enc")], str(opened))
+
+    viewer = tp_mod.ImageViewer(blob, "photo.png")
+    check("the viewer shows the picture at full size, not the thumbnail",
+          viewer.pixmap.width() == 1200, str(viewer.pixmap.width()))
+    shown = viewer.findChildren(QLabel)[0].pixmap()
+    screen = _app_screen()
+    check("but never larger than the screen it has to fit on",
+          shown.width() <= int(screen.width() * 0.86)
+          and shown.height() <= int(screen.height() * 0.86),
+          f"{shown.width()}x{shown.height()} on {screen.width()}x{screen.height()}")
+    check("and it keeps the shape of the original",
+          abs(shown.width() / shown.height() - 1200 / 900) < 0.01,
+          f"{shown.width()}x{shown.height()}")
+
+    buttons = [b.text() for b in viewer.findChildren(QPushButton)]
+    check("saving is still offered — the picture is only in memory",
+          "Save…" in buttons, str(buttons))
+    saved = []
+    viewer.save_requested.connect(lambda: saved.append(True))
+    [b for b in viewer.findChildren(QPushButton) if b.text() == "Save…"][0].click()
+    check("and Save asks for it", saved == [True])
+
+    page7 = TeamPage(None, chat)
+    page7._channel = {"id": 1, "name": "General", "can_post": True}
+    asked_download = []
+    page7._download_file = lambda i, n: asked_download.append((i, n))
+    tp_mod._IMAGE_CACHE.pop(78, None)
+    page7._open_image(78, "missing.png")
+    check("a picture that has not arrived yet simply does not open",
+          asked_download == [], "it tried to open bytes it did not have")
+
+    print("\nWhen a picture cannot be fetched")
+    tp_mod._IMAGE_CACHE.pop(91, None)
+    tp_mod._IMAGE_FAILED.clear()
+    broken = {"seq": 90, "sender_id": "E001", "sender_name": "R", "body": "",
+              "created_at": datetime.now().isoformat(),
+              "attachments": [{"id": 91, "file_name": "gone.png", "size_bytes": 10}]}
+
+    page8 = TeamPage(None, chat)
+    page8._channel = {"id": 1, "name": "General", "can_post": True}
+    page8._messages = [dict(broken)]
+    asked = []
+    page8._run = lambda fn, ok, bad=None, *a, **k: asked.append((a, bad))
+    page8._render_feed()
+    check("a picture nobody has yet is asked for once", len(asked) == 1, str(len(asked)))
+
+    asked[0][1]("File is no longer on disk")     # the failure callback
+    page8._render_feed()
+    shown = [w.text() for w in page8.findChildren(tp_mod._ClickableImage)]
+    check("the failure is SHOWN, not hidden behind 'Loading…' for ever",
+          any("no longer on disk" in t for t in shown), str(shown))
+    check("and it stops asking — a rebuild used to re-request it every time",
+          len(asked) == 1, f"{len(asked)} requests")
+
+    page8._open_image(91, "gone.png")
+    page8._render_feed()
+    check("clicking a failed picture tries again", len(asked) == 2, str(len(asked)))
 
     print()
     if failures:

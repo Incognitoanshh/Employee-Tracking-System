@@ -35,6 +35,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import requests
+from client.core import http as _http
 from PySide6.QtCore import QObject, Signal
 
 from client.core.config import API_BASE_URL
@@ -72,6 +73,10 @@ class ChatManager(QObject):
     # Things that must be noticed rather than counted: announcements now,
     # mentions in Phase 2.
     notifications = Signal(list)
+    # Messages somebody has withdrawn, as a list of seqs. Separate from
+    # `messages` because these arrive outside the cursor — see the note on the
+    # server's getUpdates — and because they are removals, not arrivals.
+    deletions = Signal(list)
     # The outbox changed — something was queued, sent, or failed.
     outbox_changed = Signal()
     # Connected / disconnected, so the panel can say so instead of looking
@@ -259,7 +264,7 @@ class ChatManager(QObject):
                     if value:
                         payload[key] = value
 
-                response = requests.post(
+                response = _http.post(
                     f"{API_BASE_URL}/chat/channels/{row['channel_id']}/messages",
                     json=payload,
                     headers=self._headers(),
@@ -280,11 +285,28 @@ class ChatManager(QObject):
                 # 200 means the server recognised a resend — it already had
                 # this message. Either way it is delivered and must leave the
                 # queue, or it would be retried forever.
+                confirmed = {}
                 try:
-                    seq = int(response.json().get("message", {}).get("seq") or 0)
+                    confirmed = response.json().get("message") or {}
                 except Exception:
-                    seq = 0
+                    pass
+                seq = int(confirmed.get("seq") or 0)
                 self._mark_delivered(row["client_msg_id"], seq)
+
+                # Hand the confirmed message straight to the panel.
+                #
+                # BUG this fixes: marking it delivered takes it out of the
+                # pending queue, and the panel redraws — but the real message
+                # has not been polled yet, so it vanishes from the screen
+                # until the next poll comes round. On this connection that is
+                # several seconds of somebody's own message simply not being
+                # there, and it reappearing only when they leave the channel
+                # and come back.
+                #
+                # The poll will deliver it again; _on_messages ignores a seq
+                # it already holds.
+                if confirmed:
+                    self.messages.emit([confirmed])
                 sent = True
                 continue
 
@@ -357,7 +379,7 @@ class ChatManager(QObject):
     def _poll(self) -> None:
         since = self.cursor()
         try:
-            response = requests.get(
+            response = _http.get(
                 f"{API_BASE_URL}/chat/updates",
                 params={"since": since},
                 headers=self._headers(),
@@ -389,6 +411,7 @@ class ChatManager(QObject):
         cursor = int(payload.get("cursor") or 0)
         arrived = payload.get("messages") or []
         alerts = payload.get("notifications") or []
+        withdrawn = payload.get("deletions") or []
 
         # Only ever forwards. A reply that arrives late — which happens on a
         # lossy link — must not walk the cursor back and replay messages the
@@ -400,6 +423,8 @@ class ChatManager(QObject):
             self.messages.emit(arrived)
         if alerts:
             self.notifications.emit(alerts)
+        if withdrawn:
+            self.deletions.emit([int(seq) for seq in withdrawn])
 
     # ── one-off reads the panel needs ───────────────────────────────────
     #  Plain calls, made on a worker thread by the panel. They are here so
@@ -407,7 +432,7 @@ class ChatManager(QObject):
 
     @staticmethod
     def _get(path: str, params: dict | None = None, timeout: int = 15) -> dict:
-        response = requests.get(
+        response = _http.get(
             f"{API_BASE_URL}{path}",
             params=params or {},
             headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
@@ -441,7 +466,7 @@ class ChatManager(QObject):
 
     @classmethod
     def mark_read(cls, channel_id: int, seq: int) -> None:
-        requests.post(
+        _http.post(
             f"{API_BASE_URL}/chat/channels/{channel_id}/read",
             json={"seq": int(seq)},
             headers={"Authorization": f"Bearer {SessionManager.auth_token}",
@@ -451,7 +476,7 @@ class ChatManager(QObject):
 
     @classmethod
     def edit(cls, seq: int, body: str) -> dict:
-        response = requests.patch(
+        response = _http.patch(
             f"{API_BASE_URL}/chat/messages/{seq}",
             json={"body": body},
             headers={"Authorization": f"Bearer {SessionManager.auth_token}",
@@ -494,7 +519,7 @@ class ChatManager(QObject):
         with open(file_path, "rb") as handle:
             blob = CryptoEngine.encrypt_bytes(handle.read())
 
-        response = requests.post(
+        response = _http.post(
             f"{API_BASE_URL}/chat/channels/{channel_id}/attachments",
             files={"file": (name + ".enc", blob, "application/octet-stream")},
             data={"file_name": name, "mime_type": "application/octet-stream"},
@@ -511,9 +536,32 @@ class ChatManager(QObject):
         return payload["attachment"]
 
     @classmethod
+    def attachment_bytes(cls, attachment_id: int) -> bytes:
+        """Fetch a file and decrypt it in memory. Blocking.
+
+        Used to show images inside the conversation. Nothing is written to
+        disk: the server holds these encrypted precisely so a copy of every
+        picture anybody sent does not accumulate in plain sight, and a cache
+        folder full of decrypted ones would undo that.
+        """
+        response = _http.get(
+            f"{API_BASE_URL}/chat/attachments/{attachment_id}",
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+            timeout=120,
+        )
+        if response.status_code != 200:
+            message = f"HTTP {response.status_code}"
+            try:
+                message = response.json().get("message", message)
+            except Exception:
+                pass
+            raise RuntimeError(message)
+        return CryptoEngine.decrypt_bytes(response.content)
+
+    @classmethod
     def download_attachment(cls, attachment_id: int, dest_path: str) -> str:
         """Fetch a file and decrypt it to `dest_path`. Blocking."""
-        response = requests.get(
+        response = _http.get(
             f"{API_BASE_URL}/chat/attachments/{attachment_id}",
             headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
             timeout=120,
@@ -542,11 +590,32 @@ class ChatManager(QObject):
 
     @classmethod
     def set_pinned(cls, seq: int, pinned: bool) -> None:
-        response = requests.post(
+        response = _http.post(
             f"{API_BASE_URL}/chat/messages/{seq}/pin",
             json={"pinned": bool(pinned)},
             headers={"Authorization": f"Bearer {SessionManager.auth_token}",
                      "Content-Type": "application/json"},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            message = f"HTTP {response.status_code}"
+            try:
+                message = response.json().get("message", message)
+            except Exception:
+                pass
+            raise RuntimeError(message)
+
+    @classmethod
+    def delete_message(cls, seq: int) -> None:
+        """Withdraw one of your own messages.
+
+        The server keeps the row and the text — this takes it off screens, it
+        does not erase it from the record. Named `delete` because that is what
+        the person clicking it means.
+        """
+        response = _http.delete(
+            f"{API_BASE_URL}/chat/messages/{seq}",
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
             timeout=12,
         )
         if response.status_code != 200:
@@ -563,7 +632,7 @@ class ChatManager(QObject):
 
     @classmethod
     def mark_notifications_read(cls, ids: list | None = None) -> None:
-        requests.post(
+        _http.post(
             f"{API_BASE_URL}/chat/notifications/read",
             json={"ids": ids} if ids else {},
             headers={"Authorization": f"Bearer {SessionManager.auth_token}",
