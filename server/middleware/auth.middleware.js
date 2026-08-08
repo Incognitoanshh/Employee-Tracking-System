@@ -41,6 +41,27 @@ const verifyToken = async (req, res, next) => {
             [decoded.employee_id]
         );
 
+        // NO ROW AT ALL MEANS THE ACCOUNT IS GONE, and that must end the
+        // request here.
+        //
+        // BUG this fixes: the query starts FROM employees, so a deleted
+        // account returned nothing — which made `suspended` undefined and
+        // `hasSession` false, so BOTH checks below were skipped and the
+        // request went through on the strength of the JWT alone. A deleted
+        // employee kept full access until their token expired, up to
+        // twenty-four hours, and a deleted ADMIN stayed an admin, because
+        // the role is carried in the token rather than read from the row
+        // that no longer exists.
+        //
+        // Deleting somebody is the one action an administrator takes
+        // expecting it to be immediate.
+        if (state.rows.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: "This account no longer exists.",
+            });
+        }
+
         if (state.rows[0]?.suspended === true) {
             return res.status(403).json({
                 success: false,

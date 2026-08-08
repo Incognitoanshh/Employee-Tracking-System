@@ -1689,6 +1689,27 @@ exports.deleteEmployee = async (req, res) => {
             [employee_id]
         );
 
+        // Idle totals and the session row, which nothing else clears.
+        //
+        // Neither table has a foreign key to employees, so nothing sweeps
+        // them up on its own: they simply stayed, one row per person per day,
+        // for accounts that no longer exist. Not fatal, but it is tracking
+        // data about a former employee kept past the point of any use — the
+        // same retention problem the screenshot files above were fixed for.
+        //
+        // The session row is deleted outright rather than blanked. Blanking
+        // is right for a logout, where the account remains and the row still
+        // means something. Here there is no account left for it to belong to.
+        await client.query(
+            `DELETE FROM idle_daily WHERE employee_id = $1`,
+            [employee_id]
+        );
+
+        await client.query(
+            `DELETE FROM active_sessions WHERE employee_id = $1`,
+            [employee_id]
+        );
+
         await client.query(
             `DELETE FROM activity_logs
              WHERE employee_id = $1`,
