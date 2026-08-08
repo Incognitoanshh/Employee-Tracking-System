@@ -131,6 +131,22 @@ class SyncManager:
                 screenshot_id = screenshot["id"]
 
                 if not os.path.exists(file_path):
+                    # The file is gone and was never delivered. The row is
+                    # closed so this does not retry for ever — but it is SAID
+                    # OUT LOUD, which it was not before.
+                    #
+                    # Silently writing uploaded=1 made the record claim a
+                    # success the server never received. Antivirus quarantine,
+                    # a disk cleanup, or a half-written file all land here, and
+                    # the only symptom was fewer screenshots than expected with
+                    # nothing anywhere to explain it. log(), not
+                    # log_verbose(): this has to reach the audit log without
+                    # anybody having switched verbose logging on first.
+                    LoggerService.log(
+                        f"SCREENSHOT LOST : {screenshot_id} was never uploaded "
+                        f"and its file is gone from {file_path} — "
+                        f"nothing to send, giving up on it"
+                    )
                     SyncManager.mark_uploaded(screenshot_id)
                     continue
 
