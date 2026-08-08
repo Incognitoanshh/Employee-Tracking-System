@@ -84,18 +84,24 @@ async function main() {
         check("a second sign-in while the first is live is refused",
             res.status === 409, `status ${res.status}`);
         check("and says why, rather than 'invalid credentials'",
-            /already logged in/i.test(res.body.message || ""), res.body.message);
+            /already signed in/i.test(res.body.message || ""), res.body.message);
 
         res = await api("GET", "/dashboard/me", { token: first });
         check("the first machine keeps working", res.status === 200, `status ${res.status}`);
 
 
-        // ── the same machine coming back ────────────────────────────────
-        console.log("\nThe same machine, and a second one");
-        // The rule is "one machine at a time", not "one login until the token
-        // expires". Closing the app without signing out — a crash, a closed
-        // lid, quitting — leaves the session live, and the check used to see
-        // that as a second machine and lock somebody out of their own laptop.
+        // ── one login, whatever the machine ─────────────────────────────
+        console.log("\nOne login at a time");
+        //
+        // THE RULE CHANGED HERE, deliberately. It used to let the SAME device
+        // id take its own session back, which is right when a company hands
+        // out the laptops. These are personal machines: a reinstall, a new
+        // laptop or a wiped data directory gives a new device id, so somebody
+        // looked like a second person and was locked out of their own account.
+        // It happened on a real installed build.
+        //
+        // So the device is no longer consulted at all. What guards against the
+        // lockout instead is the heartbeat — see the stale case below.
         await psql(DB, `UPDATE active_sessions SET token = NULL WHERE employee_id = 'E001'`);
 
         const LAPTOP = "laptop-aaaa-1111";
@@ -104,40 +110,54 @@ async function main() {
         res = await login("emp1", "SuperSecret123", LAPTOP);
         check("signing in from a machine works", res.status === 200, `status ${res.status}`);
         const onLaptop = res.body.token;
-        check("and the machine is recorded",
-            psql(DB, `SELECT device_id FROM active_sessions WHERE employee_id='E001'`) === LAPTOP);
+        check("and the flag says so",
+            psql(DB, `SELECT is_logged_in FROM employees WHERE employee_id='E001'`) === "t",
+            "the flag and the session disagree — that is either a lockout or "
+            + "a double login waiting to happen");
 
         res = await login("emp1", "SuperSecret123", DESKTOP);
-        check("a SECOND machine is still refused — this is the whole point",
-            res.status === 409, `status ${res.status}`);
-        check("and the first machine keeps working",
-            (await api("GET", "/dashboard/me", { token: onLaptop })).status === 200);
+        check("a second machine is refused", res.status === 409, `status ${res.status}`);
 
-        // A JWT's `iat` has one-second resolution, so two tokens minted for
-        // the same payload inside the same second are byte-identical — and
-        // the checks below would compare a token against itself.
         await new Promise((r) => setTimeout(r, 1100));
         res = await login("emp1", "SuperSecret123", LAPTOP);
-        check("but the SAME machine can sign in again without logging out first",
-            res.status === 200, `status ${res.status}`);
-        const backOnLaptop = res.body.token;
-        check("and it gets a fresh token", backOnLaptop !== onLaptop);
-        check("while the old one is dead — one live session, still",
+        check("AND SO IS THE SAME MACHINE — signed in is signed in",
+            res.status === 409, `status ${res.status}`);
+        check("the live session is untouched by the attempt",
+            (await api("GET", "/dashboard/me", { token: onLaptop })).status === 200);
+
+        // ── a machine that died without signing out ─────────────────────
+        console.log("\nWhen the other machine crashed");
+        //
+        // Nothing calls logout on a crash, a flat battery or a killed
+        // process. Without this, the flag would lock that person out until an
+        // administrator intervened — a support call a week on personal
+        // machines, and exactly the bug the device id had been added to fix.
+        //
+        // A session that has not reported in for two minutes is not somebody
+        // working elsewhere. A live one stamps last_seen every few seconds, so
+        // this can never let two real machines in at once.
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() - INTERVAL '10 minutes'
+                   WHERE employee_id = 'E001'`);
+        res = await login("emp1", "SuperSecret123", DESKTOP);
+        check("a session gone quiet for ten minutes can be taken over",
+            res.status === 200, `status ${res.status}`,);
+        const onDesktop = res.body.token;
+        check("and the abandoned one stops working",
             (await api("GET", "/dashboard/me", { token: onLaptop })).status === 401);
 
-        res = await login("emp1", "SuperSecret123", DESKTOP);
-        check("the other machine is refused after that too",
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() - INTERVAL '30 seconds'
+                   WHERE employee_id = 'E001'`);
+        res = await login("emp1", "SuperSecret123", LAPTOP);
+        check("but thirty seconds of quiet is somebody working, not a crash",
             res.status === 409, `status ${res.status}`);
 
-        // A session row written before this existed has no device to match.
-        // Treated as a different machine, which is the safe direction.
-        psql(DB, `UPDATE active_sessions SET device_id = NULL WHERE employee_id='E001'`);
+        // ── signing out frees it at once ────────────────────────────────
+        await api("POST", "/auth/logout", { token: onDesktop });
+        check("signing out clears the flag",
+            psql(DB, `SELECT is_logged_in FROM employees WHERE employee_id='E001'`) === "f",
+            "the flag stayed set after a logout — the account is now stuck");
         res = await login("emp1", "SuperSecret123", LAPTOP);
-        check("a session from before this change is not matched to anything",
-            res.status === 409, `status ${res.status}`);
-        await api("POST", "/auth/logout", { token: backOnLaptop });
-        res = await login("emp1", "SuperSecret123", LAPTOP);
-        check("and one sign-out clears it for good",
+        check("and the account is free immediately, on any machine",
             res.status === 200, `status ${res.status}`);
         await api("POST", "/auth/logout", { token: res.body.token });
 
@@ -154,14 +174,20 @@ async function main() {
         // deliberate consequence of an absolute rule: nothing frees it
         // except logging out, an admin's Force logout, or the token
         // expiring on its own.
+        // The old rule was absolute: nothing but a sign-out, a force logout
+        // or the token expiring freed the account, so a machine closed hours
+        // ago held it. That locked people out of their own laptops after a
+        // crash, which on personal machines is a support call a week.
+        //
+        // Now a session that has stopped reporting is treated as gone. Ten
+        // hours of silence is not somebody working.
         psql(DB, `UPDATE active_sessions
                      SET last_seen = NOW() - INTERVAL '10 hours'
                    WHERE employee_id = 'E001'`);
         res = await login("emp1", "SuperSecret123");
-        check("a long-quiet session still blocks a second login",
-            res.status === 409, `status ${res.status}`);
-        check("and says already logged in",
-            /already logged in/i.test(res.body.message || ""), res.body.message);
+        check("a session silent for ten hours no longer holds the account",
+            res.status === 200, `status ${res.status}`);
+        await api("POST", "/auth/logout", { token: res.body.token });
 
         // ── an expired token does release the account ───────────────────
         //
@@ -289,6 +315,40 @@ async function main() {
         check("refreshing stamps last_seen, so a working app is not read as gone",
             psql(DB, `SELECT (last_seen > NOW() - INTERVAL '1 minute')::text
                         FROM active_sessions WHERE employee_id = 'E001'`) === "true");
+
+        // ── the flag never drifts from the session ──────────────────────
+        console.log("\nThe flag and the session agree, whatever ended it");
+        const sa = (await login("superadmin", "SuperSecret123", "owner-machine")).body.token;
+        // Seven places end a session: logout, a stale refresh, a password
+        // reset, a role change, suspension, force logout, and deleting an
+        // employee. Each has to clear both, so they all go through one helper.
+        for (const [what, act] of [
+            ["a force logout", async () => {
+                await login("emp1", "SuperSecret123", LAPTOP);
+                await api("POST", "/admin/force-logout",
+                    { token: sa, body: { employee_id: "E001" } });
+            }],
+            ["a password reset", async () => {
+                // No login first: the reset itself must clear the session of
+                // whoever was signed in, and one is left over from above.
+                await api("POST", "/admin/employees/E001/password", { token: sa });
+            }],
+            ["being suspended", async () => {
+                await api("POST", "/admin/employees/E001/suspend",
+                    { token: sa, body: { suspended: true } });
+            }],
+        ]) {
+            await act();
+            const flag = psql(DB,
+                `SELECT is_logged_in FROM employees WHERE employee_id='E001'`);
+            const token = psql(DB,
+                `SELECT COALESCE((token IS NOT NULL)::text, 'false') FROM active_sessions
+                  WHERE employee_id='E001'`);
+            check(`${what} clears both`, flag === "f" && token === "false",
+                `flag=${flag} token_present=${token}`);
+        }
+        psql(DB, `UPDATE employees SET suspended = FALSE WHERE employee_id='E001'`);
+
 
         server.close();
         await pool.end();

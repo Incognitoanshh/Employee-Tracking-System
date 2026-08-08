@@ -65,16 +65,47 @@ function visibleChannelSql(channelAlias = "c", employee = 1) {
     const c = channelAlias;
     const who = typeof employee === "number" ? `$${employee}` : employee;
     return `(
-        ${isSuperAdminSql(who)}
-        OR (
-        EXISTS (SELECT 1 FROM team_members tm
-                 WHERE tm.team_id = ${c}.team_id AND tm.employee_id = ${who})
-        AND (
-            ${teamWideSql(c)}
-            OR EXISTS (SELECT 1 FROM channel_members cm
-                        WHERE cm.channel_id = ${c}.id AND cm.employee_id = ${who})
-        ))
+        CASE WHEN ${c}.type = 'DIRECT' THEN
+            -- A DIRECT MESSAGE IS ITS TWO MEMBERS AND NOBODY ELSE.
+            --
+            -- Note what is missing: the super admin override above does not
+            -- reach here. That is deliberate and is the one exception to the
+            -- rule at the top of this file. A private conversation between two
+            -- people is not a company channel, and the owner of this system
+            -- chose that it should not be readable simply by virtue of rank.
+            --
+            -- It is not unreachable. The audited route in team.controller
+            -- still opens it, and that route demands a purpose and a reference
+            -- and writes both to a table that is never purged. Private by
+            -- default, reachable when there is a reason, and never without a
+            -- record.
+            EXISTS (SELECT 1 FROM channel_members cm
+                     WHERE cm.channel_id = ${c}.id AND cm.employee_id = ${who})
+        ELSE
+            ${isSuperAdminSql(who)}
+            OR (
+            EXISTS (SELECT 1 FROM team_members tm
+                     WHERE tm.team_id = ${c}.team_id AND tm.employee_id = ${who})
+            AND (
+                ${teamWideSql(c)}
+                OR EXISTS (SELECT 1 FROM channel_members cm
+                            WHERE cm.channel_id = ${c}.id AND cm.employee_id = ${who})
+            ))
+        END
     )`;
+}
+
+/**
+ * The canonical key for a pair, so that A→B and B→A are one conversation.
+ *
+ * Sorted, because the alternative is two channels for two people who each
+ * think they are talking to the other. Built here rather than in the
+ * controller so the ordering rule has one home.
+ */
+function directKey(a, b) {
+    const first = String(a);
+    const second = String(b);
+    return first < second ? `${first}:${second}` : `${second}:${first}`;
 }
 
 /**
@@ -124,10 +155,13 @@ function isTeamWide(channel) {
  */
 async function loadVisibleChannel(pool, employeeId, channelId) {
     const result = await pool.query(
+        // LEFT JOIN, because a direct message belongs to no team. An inner
+        // join here would make every DM invisible while looking like an
+        // access decision.
         `SELECT c.id, c.team_id, c.name, c.type, c.is_default, c.is_private,
-                t.name AS team_name, t.is_archived
+                t.name AS team_name, COALESCE(t.is_archived, FALSE) AS is_archived
            FROM channels c
-           JOIN teams t ON t.id = c.team_id
+           LEFT JOIN teams t ON t.id = c.team_id
           WHERE c.id = $2 AND ${visibleChannelSql("c", 1)}`,
         [employeeId, channelId]
     );
@@ -136,5 +170,5 @@ async function loadVisibleChannel(pool, employeeId, channelId) {
 
 module.exports = {
     visibleChannelSql, teamWideSql, isTeamWide, isSuperAdminSql,
-    loadVisibleChannel,
+    loadVisibleChannel, directKey,
 };

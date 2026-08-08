@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { endSession, markLoggedIn } = require("../utils/session");
 const { isOnlineSql } = require("../utils/presence");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 const {
@@ -448,10 +449,7 @@ exports.resetPassword = async (req, res) => {
         // open on the employee's machine keeps working on the old password,
         // so a reset issued because an account was compromised would not
         // actually end the intruder's access.
-        await pool.query(
-            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-            [employee_id]
-        );
+        await endSession(pool, employee_id);
 
         await pool.query(
             `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
@@ -919,10 +917,7 @@ exports.setSuspended = async (req, res) => {
             // End the session now. Without this a suspended employee keeps
             // working until their token expires — up to a day — which is the
             // gap that made force logout insufficient in the first place.
-            await pool.query(
-                `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-                [employee_id]
-            );
+            await endSession(pool, employee_id);
         }
 
         await pool.query(
@@ -1270,10 +1265,7 @@ exports.forceLogout = async (req, res) => {
         // window passed — and if that machine came back, locked out again.
         // Clearing the token frees the account immediately, which is what an
         // admin pressing Force logout actually wants.
-        await pool.query(
-            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-            [employee_id]
-        );
+        await endSession(pool, employee_id);
 
         return res.json({ success: true, message: `Force logout set for ${employee_id}` });
     } catch (err) {
@@ -1657,10 +1649,7 @@ exports.deleteEmployee = async (req, res) => {
         // (abhi bhi valid) JWT deleted employee ke liye kaam karta rehta
         // — apni natural 24h expiry tak. token=NULL karne se agli hi
         // request pe turant 401 milega.
-        await client.query(
-            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-            [employee_id]
-        );
+        await endSession(client, employee_id);
 
         await client.query(
             `DELETE FROM attendance
@@ -1906,10 +1895,7 @@ exports.changeRole = async (req, res) => {
         // Role badalne par uska current session turant revoke karo — warna
         // purana JWT (jisme purana role embedded hai) apni 24h expiry tak
         // purane privileges ke saath chalta rehta.
-        await pool.query(
-            `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-            [employee_id]
-        );
+        await endSession(pool, employee_id);
 
         return res.json({
             success: true,

@@ -23,7 +23,7 @@
  */
 
 const pool = require("../config/db");
-const { visibleChannelSql, isTeamWide, loadVisibleChannel } = require("../utils/chat_access");
+const { visibleChannelSql, isTeamWide, loadVisibleChannel, directKey } = require("../utils/chat_access");
 const { resolveMentions } = require("../utils/chat_mentions");
 const path = require("path");
 const fs = require("fs");
@@ -235,7 +235,7 @@ exports.getMyTeams = async (req, res) => {
                JOIN teams t ON t.id = c.team_id
                LEFT JOIN message_reads r
                       ON r.channel_id = c.id AND r.employee_id = $1
-              WHERE ${visibleChannelSql("c", 1)}
+              WHERE c.type <> 'DIRECT' AND ${visibleChannelSql("c", 1)}
               ORDER BY t.name, c.is_default DESC, c.name`,
             [me]
         );
@@ -412,13 +412,45 @@ exports.getMessages = async (req, res) => {
 
         const rows = result.rows.reverse();
         const shaped = await enrich(rows.map(toMessage), me);
+
+        // A DIRECT channel is stored under its pair key — "EM101:EM103" — so
+        // that the database can enforce one conversation per pair. That is an
+        // internal name and must never reach a screen. What the person wants
+        // to see above their conversation is who they are talking to.
+        let title = channel.name;
+        let withWhom = null;
+        if (channel.type === "DIRECT") {
+            const other = await pool.query(
+                `SELECT e.employee_id, e.username, e.designation,
+                        COALESCE(NULLIF(e.full_name, ''), e.username) AS name
+                   FROM channel_members cm
+                   JOIN employees e ON e.employee_id = cm.employee_id
+                  WHERE cm.channel_id = $1 AND cm.employee_id <> $2
+                  LIMIT 1`,
+                [channelId, me]);
+            if (other.rows.length) {
+                withWhom = other.rows[0];
+                title = other.rows[0].name;
+            }
+        }
+
         return res.json({
             success: true,
             channel: {
-                id: channel.id, name: channel.name, type: channel.type,
+                id: channel.id, name: title, type: channel.type,
                 team_id: channel.team_id, team_name: channel.team_name,
+                with: withWhom,
                 is_archived: channel.is_archived,
-                can_post: channel.type === "STANDARD" && !channel.is_archived,
+                // A DIRECT channel is always writable. It has no team, so it
+                // cannot be archived, and it is not an announcement.
+                //
+                // BUG this fixes: the rule was `type === "STANDARD"`, which is
+                // false for a direct message — so the composer disappeared and
+                // the panel said "this team is archived" about a conversation
+                // that belongs to no team. The feature looked delivered and
+                // could not be used.
+                can_post: channel.type === "DIRECT"
+                    || (channel.type === "STANDARD" && !channel.is_archived),
             },
             messages: shaped,
             has_more: result.rows.length === limit,
@@ -823,6 +855,208 @@ exports.deleteMessage = async (req, res) => {
     }
 };
 
+
+// ───────────────────────────────────────────────────────────────────────────
+//  Direct messages
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/chat/people?q=
+ *
+ * Who you can start a conversation with. Anybody may write to anybody — that
+ * is the owner's decision, and it is what an office expects.
+ *
+ * Matched on name, username and employee id together, because people look
+ * each other up by whichever they happen to know. Suspended accounts and
+ * yourself are left out: a conversation with either goes nowhere.
+ */
+exports.searchPeople = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const q = String(req.query.q || "").trim();
+    try {
+        const result = await pool.query(
+            `SELECT e.employee_id, e.username, e.designation, e.role,
+                    COALESCE(NULLIF(e.full_name, ''), e.username) AS name
+               FROM employees e
+              WHERE e.employee_id <> $1
+                AND e.suspended = FALSE
+                AND ($2 = '' OR e.employee_id ILIKE $3
+                     OR e.username ILIKE $3
+                     OR COALESCE(e.full_name, '') ILIKE $3
+                     OR COALESCE(e.designation, '') ILIKE $3)
+              ORDER BY name
+              LIMIT 50`,
+            [me, q, `%${q}%`]
+        );
+
+        const people = result.rows.map((row) => ({
+            employee_id: row.employee_id,
+            username: row.username,
+            name: row.name,
+            designation: row.designation,
+            role: row.role,
+        }));
+        return res.json({ success: true, people });
+    } catch (err) {
+        return serverError(res, req, err);
+    }
+};
+
+/**
+ * POST /api/chat/direct   body: { employee_id }
+ *
+ * Open the conversation with somebody, creating it the first time.
+ *
+ * FIND-OR-CREATE IN ONE STATEMENT. Two people opening a chat with each other
+ * at the same moment would otherwise make two channels, and each would then
+ * be typing into a room the other cannot see. The pair key plus ON CONFLICT
+ * lets the database settle it rather than a read-then-write here.
+ */
+exports.openDirect = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const them = String(req.body?.employee_id || "").trim();
+    if (!them) return fail(res, 400, "employee_id required");
+    if (them === me) return fail(res, 400, "You cannot open a chat with yourself.");
+
+    let client;
+    try {
+        const other = await pool.query(
+            `SELECT employee_id, username, suspended,
+                    COALESCE(NULLIF(full_name, ''), username) AS name
+               FROM employees WHERE employee_id = $1`, [them]);
+        if (other.rows.length === 0) return fail(res, 404, "No such person");
+        if (other.rows[0].suspended) {
+            return fail(res, 409, `${other.rows[0].name}'s account is suspended.`);
+        }
+
+        const key = directKey(me, them);
+
+        client = await pool.connect();
+        await client.query("BEGIN");
+
+        // ON CONFLICT DO NOTHING then SELECT, rather than an upsert that
+        // RETURNINGs: the conflicting row belongs to whoever won the race,
+        // and either way we want the one that is now in the table.
+        await client.query(
+            `INSERT INTO channels (team_id, name, type, is_default, is_private, dm_key, created_by)
+             VALUES (NULL, $1, 'DIRECT', FALSE, TRUE, $1, $2)
+             ON CONFLICT (dm_key) WHERE dm_key IS NOT NULL DO NOTHING`,
+            [key, me]
+        );
+        const found = await client.query(
+            `SELECT id FROM channels WHERE dm_key = $1`, [key]);
+        const channelId = found.rows[0].id;
+
+        // Both sides, every time. A membership row lost to a half-finished
+        // earlier attempt would leave one person unable to see their own
+        // conversation, which looks exactly like the message never arriving.
+        await client.query(
+            `INSERT INTO channel_members (channel_id, employee_id)
+             VALUES ($1, $2), ($1, $3)
+             ON CONFLICT DO NOTHING`,
+            [channelId, me, them]
+        );
+        await client.query("COMMIT");
+
+        return res.json({
+            success: true,
+            channel: {
+                id: channelId,
+                type: "DIRECT",
+                name: other.rows[0].name,
+                with: {
+                    employee_id: other.rows[0].employee_id,
+                    username: other.rows[0].username,
+                    name: other.rows[0].name,
+                },
+                can_post: true,
+            },
+        });
+    } catch (err) {
+        if (client) await client.query("ROLLBACK").catch(() => {});
+        return serverError(res, req, err);
+    } finally {
+        if (client) client.release();
+    }
+};
+
+/**
+ * GET /api/chat/directs
+ *
+ * Every conversation this person has, most recently spoken in first — the
+ * order anybody expects from a messaging application.
+ *
+ * Conversations with nothing in them are kept rather than hidden. Opening a
+ * chat and having it disappear because you have not typed yet is a bug from
+ * the person's point of view, however tidy it looks in the list.
+ */
+exports.getDirects = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    try {
+        const result = await pool.query(
+            `SELECT c.id AS channel_id,
+                    other.employee_id AS with_id,
+                    other.username     AS with_username,
+                    COALESCE(NULLIF(other.full_name, ''), other.username) AS with_name,
+                    other.designation  AS with_designation,
+                    other.suspended    AS with_suspended,
+                    COALESCE(r.last_read_seq, 0) AS last_read_seq,
+                    (SELECT COUNT(*) FROM messages m
+                      WHERE m.channel_id = c.id
+                        AND m.seq > COALESCE(r.last_read_seq, 0)
+                        AND m.deleted_at IS NULL
+                        AND m.sender_id IS DISTINCT FROM $1) AS unread,
+                    (SELECT MAX(m.seq) FROM messages m WHERE m.channel_id = c.id)
+                        AS last_seq,
+                    (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id)
+                        AS last_message_at,
+                    (SELECT m.body FROM messages m
+                      WHERE m.channel_id = c.id AND m.deleted_at IS NULL
+                      ORDER BY m.seq DESC LIMIT 1) AS last_body
+               FROM channels c
+               JOIN channel_members mine
+                      ON mine.channel_id = c.id AND mine.employee_id = $1
+               JOIN channel_members theirs
+                      ON theirs.channel_id = c.id AND theirs.employee_id <> $1
+               JOIN employees other ON other.employee_id = theirs.employee_id
+               LEFT JOIN message_reads r
+                      ON r.channel_id = c.id AND r.employee_id = $1
+              WHERE c.type = 'DIRECT'
+              ORDER BY last_message_at DESC NULLS LAST, with_name`,
+            [me]
+        );
+
+        return res.json({
+            success: true,
+            directs: result.rows.map((row) => ({
+                channel_id: row.channel_id,
+                with: {
+                    employee_id: row.with_id,
+                    username: row.with_username,
+                    name: row.with_name,
+                    designation: row.with_designation,
+                    suspended: row.with_suspended,
+                },
+                unread: Number(row.unread),
+                last_seq: row.last_seq === null ? 0 : Number(row.last_seq),
+                last_message_at: row.last_message_at,
+                // Trimmed here rather than in the panel: the sidebar shows one
+                // line, and sending a whole message to draw forty characters
+                // of it is the sort of thing that adds up over a poll.
+                preview: String(row.last_body || "").slice(0, 80),
+            })),
+        });
+    } catch (err) {
+        return serverError(res, req, err);
+    }
+};
+
 // ───────────────────────────────────────────────────────────────────────────
 //  Read state, search, presence
 // ───────────────────────────────────────────────────────────────────────────
@@ -907,7 +1141,10 @@ exports.search = async (req, res) => {
                                 'StartSel=<b>,StopSel=</b>,MaxWords=30,MinWords=10') AS excerpt
                FROM messages m
                JOIN channels c ON c.id = m.channel_id
-               JOIN teams t ON t.id = c.team_id
+               -- LEFT, because a direct message belongs to no team. An inner
+               -- join made every DM unsearchable — by the two people in it,
+               -- who are the only ones who can search it at all.
+               LEFT JOIN teams t ON t.id = c.team_id
               WHERE m.body_tsv @@ to_tsquery('simple', $2)
                 AND m.deleted_at IS NULL
                 AND ($3::INTEGER IS NULL OR m.channel_id = $3)
@@ -974,10 +1211,16 @@ exports.getChannelMembers = async (req, res) => {
                    FROM channel_members cm
                   WHERE cm.channel_id = $3
                  UNION
-                 -- Every super admin, in every channel, without being added.
-                 -- They are shown rather than hidden: somebody in a channel
-                 -- should be able to see that the owner is in it too.
-                 SELECT e.employee_id FROM employees e WHERE e.role = 'super_admin'
+                 -- Every super admin, in every TEAM channel, without being
+                 -- added. They are shown rather than hidden: somebody in a
+                 -- channel should be able to see that the owner is in it too.
+                 --
+                 -- NOT in a direct message. $4 is false there, so this arm
+                 -- contributes nobody. A private conversation between two
+                 -- people listing the owner as a third member would be the
+                 -- feature announcing that it is not private after all.
+                 SELECT e.employee_id FROM employees e
+                  WHERE e.role = 'super_admin' AND $4::BOOLEAN
              )
              SELECT e.employee_id,
                     COALESCE(NULLIF(e.full_name, ''), e.username) AS name,
@@ -999,7 +1242,8 @@ exports.getChannelMembers = async (req, res) => {
                JOIN employees e ON e.employee_id = au.employee_id
                LEFT JOIN active_sessions s ON s.employee_id = e.employee_id
               ORDER BY name`,
-            [channel.team_id, isTeamWide(channel), channelId]
+            [channel.team_id, isTeamWide(channel), channelId,
+             channel.type !== "DIRECT"]
         );
 
         const members = result.rows.map((row) => {

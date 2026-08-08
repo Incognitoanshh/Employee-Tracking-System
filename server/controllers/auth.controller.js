@@ -1,7 +1,17 @@
 const pool = require("../config/db");
+const { endSession, markLoggedIn } = require("../utils/session");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { validatePassword } = require("../utils/password_policy");
+
+/**
+ * How long a session may go unheard before a new login may take it over.
+ *
+ * The client polls every few seconds and stamps last_seen at most once a
+ * minute, backing off to two when the network is failing. Two minutes is
+ * therefore "this machine is gone", not "this machine is busy".
+ */
+const LOGIN_STALE_MINUTES = 2;
 
 exports.logout = async (req, res) => {
     const authHeader = req.headers["authorization"];
@@ -19,10 +29,7 @@ exports.logout = async (req, res) => {
             // row EXIST kare aur token mismatch ho. Row delete karne se check
             // hi skip ho jata (koi row hi nahi milta), purana token tab bhi
             // apni natural 24h expiry tak chalta rehta — security gap.
-            await pool.query(
-                `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-                [decoded.employee_id]
-            );
+            await endSession(pool, decoded.employee_id);
         } catch (dbError) {
             // DB issue — client-side session already clear ho chuki hogi,
             // logout request ko fail mat karo iske liye.
@@ -192,7 +199,10 @@ exports.login = async (req, res) => {
         // two cases the rule actually cares about: the same machine coming
         // back is fine, a second machine is not.
         const held = await pool.query(
-            `SELECT token, last_seen, device_id FROM active_sessions
+            `SELECT token, last_seen, device_id,
+                    (last_seen > NOW() - INTERVAL '${LOGIN_STALE_MINUTES} minutes')
+                        AS still_breathing
+               FROM active_sessions
               WHERE employee_id = $1 AND token IS NOT NULL`,
             [employee.employee_id]
         );
@@ -212,14 +222,27 @@ exports.login = async (req, res) => {
                 stillValid = false;
             }
 
-            // Same machine — take the session back rather than refusing it.
-            // A NULL stored device_id means the row predates this and cannot
-            // be matched, so it is treated as a different machine: the safe
-            // direction, cleared by one sign-out.
-            const sameMachine = Boolean(
-                thisDevice && held.rows[0].device_id && held.rows[0].device_id === thisDevice);
+            // ONE LOGIN AT A TIME, WHATEVER THE MACHINE.
+            //
+            // This used to let the same device id take its own session back.
+            // That is right when a company hands out the laptops; here people
+            // use their own, and a device id changes on a reinstall, a new
+            // machine or a wiped data directory — so somebody looked like a
+            // second person and was locked out of their own account.
+            //
+            // What replaces it is the heartbeat. A session that has not been
+            // heard from in LOGIN_STALE_MINUTES is not somebody working
+            // elsewhere; it is a machine that crashed, ran out of battery or
+            // was killed, and nothing calls logout for any of those. Without
+            // this, a bare flag would lock that person out until an
+            // administrator intervened — which on personal machines is a
+            // support call a week.
+            //
+            // Two machines at once stays impossible: a live one reports in
+            // every few seconds, so its session never goes stale.
+            const abandoned = held.rows[0].still_breathing === false;
 
-            if (stillValid && !sameMachine) {
+            if (stillValid && !abandoned) {
                 // Say when that machine was last heard from. "Already logged
                 // in" on its own leaves no way to tell somebody actually
                 // working from a laptop that was shut without logging out —
@@ -236,17 +259,14 @@ exports.login = async (req, res) => {
                 }
                 return res.status(409).json({
                     success: false,
-                    message: "This account is already logged in on another machine."
+                    message: "This account is already signed in."
                            + when
-                           + " Log out there first, or ask an admin to force logout.",
+                           + " Sign out there first, or ask an admin to force logout.",
                 });
             }
 
             // Expired: release it so the next step can take over.
-            await pool.query(
-                `UPDATE active_sessions SET token = NULL WHERE employee_id = $1`,
-                [employee.employee_id]
-            );
+            await endSession(pool, employee.employee_id);
         }
 
         // FIX: 24h token expiry
@@ -270,6 +290,8 @@ exports.login = async (req, res) => {
                  SET token = $2, login_time = NOW(), last_seen = NOW(), device_id = $3`,
             [employee.employee_id, token, thisDevice]
         );
+        // The flag, in step with the token it describes — see utils/session.
+        await markLoggedIn(pool, employee.employee_id);
 
         // Employee config + shift fetch
         const configResult = await pool.query(

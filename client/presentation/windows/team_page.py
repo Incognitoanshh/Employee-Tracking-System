@@ -647,6 +647,187 @@ def _within_edit_window(created_at) -> bool:
 EDIT_WINDOW_SECONDS = 5 * 60
 
 
+class _DirectRow(QPushButton):
+    """One conversation in the left-hand list.
+
+    Deliberately built like _ChannelRow rather than sharing it: a channel row
+    shows a # and a name, this shows a person and the last thing they said.
+    Forcing one widget to be both would mean a pile of branches inside it.
+    """
+
+    def __init__(self, direct: dict, parent=None):
+        super().__init__(parent)
+        self.channel_id = direct["channel_id"]
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(44)
+        self.setObjectName("directRow")
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 0, 10, 0)
+        row.setSpacing(8)
+
+        person = direct.get("with") or {}
+        initial = QLabel((person.get("name") or "?")[:1].upper())
+        initial.setFixedSize(24, 24)
+        initial.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        initial.setStyleSheet(
+            f"background:{C.PRIMARY};color:{C.ON_ACCENT};border-radius:12px;"
+            f"font-size:11px;font-weight:700;border:none;")
+        row.addWidget(initial)
+
+        column = QVBoxLayout()
+        column.setSpacing(0)
+        self._name = QLabel(person.get("name") or person.get("username") or "Unknown")
+        self._name.setStyleSheet(
+            f"color:{C.TEXT_MUTED};font-size:13px;border:none;background:transparent;")
+        self._preview = QLabel(str(direct.get("preview") or "No messages yet"))
+        self._preview.setStyleSheet(
+            f"color:{C.TEXT_DIM};font-size:10px;border:none;background:transparent;")
+        column.addWidget(self._name)
+        column.addWidget(self._preview)
+        row.addLayout(column, 1)
+
+        self._badge = QLabel("")
+        self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._badge.setFixedHeight(18)
+        self._badge.setMinimumWidth(18)
+        self._badge.hide()
+        row.addWidget(self._badge)
+
+        self._selected = False
+        self.setStyleSheet(f"""
+            QPushButton#directRow {{
+                background:transparent; border:none; border-radius:{R_SM}px;
+                text-align:left;
+            }}
+            QPushButton#directRow:hover {{ background:{C.CARD_HOVER}; }}
+            QPushButton#directRow:checked {{ background:{C.SELECTED_BG}; }}
+        """)
+        self.set_unread(int(direct.get("unread") or 0))
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        colour = C.SELECTED_TEXT if selected else C.TEXT_MUTED
+        dim = C.SELECTED_TEXT if selected else C.TEXT_DIM
+        self._name.setStyleSheet(
+            f"color:{colour};font-size:13px;border:none;background:transparent;")
+        self._preview.setStyleSheet(
+            f"color:{dim};font-size:10px;border:none;background:transparent;")
+
+    def set_unread(self, count: int) -> None:
+        if count > 0:
+            self._badge.setText(str(count if count < 100 else "99+"))
+            self._badge.setStyleSheet(
+                f"background:{C.PRIMARY};color:{C.ON_ACCENT};border-radius:9px;"
+                f"font-size:10px;font-weight:700;padding:0 5px;border:none;")
+            self._badge.show()
+        else:
+            self._badge.hide()
+
+
+class _PeoplePicker(QDialog):
+    """Search for somebody, pick them, start a conversation.
+
+    Everybody is listed before anything is typed. A search box that shows
+    nothing until you guess a name is unusable in a company where you may not
+    know how somebody spells theirs — and the whole point of this feature is
+    reaching a person you do not already share a team with.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.chosen: str | None = None
+        self._workers: list = []
+        self.setWindowTitle("Message somebody")
+        self.setMinimumSize(380, 440)
+        self.setStyleSheet(f"QDialog {{ background:{C.BG}; }}")
+
+        column = QVBoxLayout(self)
+        column.setContentsMargins(16, 16, 16, 16)
+        column.setSpacing(10)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search by name, username or role…")
+        self._search.setFixedHeight(36)
+        self._search.setStyleSheet(input_style())
+        self._search.textChanged.connect(self._typed)
+        column.addWidget(self._search)
+
+        self._list = QListWidget()
+        self._list.setStyleSheet(
+            f"QListWidget {{ background:{C.CARD};border:1px solid {C.BORDER};"
+            f"border-radius:{R_SM}px;color:{C.TEXT};font-size:13px;padding:4px; }}"
+            f"QListWidget::item {{ padding:8px 10px;border-radius:{R_SM}px; }}"
+            f"QListWidget::item:selected {{ background:{C.SELECTED_BG};"
+            f"color:{C.SELECTED_TEXT}; }}" + scrollbar(C.CARD))
+        self._list.itemDoubleClicked.connect(lambda _i: self._accept())
+        column.addWidget(self._list, 1)
+
+        self._status = QLabel("Loading…")
+        self._status.setStyleSheet(
+            f"color:{C.TEXT_DIM};font-size:11px;background:transparent;")
+        column.addWidget(self._status)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.setStyleSheet(button("ghost"))
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        start = QPushButton("Message")
+        start.setCursor(Qt.CursorShape.PointingHandCursor)
+        start.setStyleSheet(button("primary"))
+        start.clicked.connect(self._accept)
+        buttons.addWidget(start)
+        column.addLayout(buttons)
+
+        # Typing races the network on a link this slow, so the search is
+        # debounced rather than fired per keystroke.
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(250)
+        self._debounce.timeout.connect(self._search_now)
+
+        self._search_now()
+
+    def _typed(self, _text):
+        self._debounce.start()
+
+    def _search_now(self):
+        worker = _Worker(ChatManager.search_people, self._search.text().strip())
+        worker.done.connect(self._show)
+        worker.fail.connect(lambda error: self._status.setText(str(error)))
+        worker.finished.connect(lambda: self._workers.remove(worker)
+                                if worker in self._workers else None)
+        self._workers.append(worker)
+        worker.start()
+
+    def _show(self, payload):
+        people = payload.get("people") or []
+        self._list.clear()
+        for person in people:
+            label = person.get("name") or person.get("username")
+            extra = person.get("designation") or person.get("role") or ""
+            item = QListWidgetItem(f"{label}   ·   {person.get('username')}"
+                                   + (f"   ·   {extra}" if extra else ""))
+            item.setData(Qt.ItemDataRole.UserRole, person.get("employee_id"))
+            self._list.addItem(item)
+        self._status.setText(
+            "Nobody matches that." if not people else f"{len(people)} people")
+        if people:
+            self._list.setCurrentRow(0)
+
+    def _accept(self):
+        item = self._list.currentItem()
+        if item is None:
+            self._status.setText("Pick somebody first.")
+            return
+        self.chosen = item.data(Qt.ItemDataRole.UserRole)
+        self.accept()
+
+
 class _Composer(QTextEdit):
     """Enter sends, Shift+Enter starts a new line."""
     send = Signal()
@@ -738,7 +919,10 @@ class TeamPage(QWidget):
         self._workers: list[_Worker] = []
 
         self._teams: list[dict] = []
-        self._rows: dict[int, _ChannelRow] = {}
+        # One-to-one conversations, alongside the teams rather than inside
+        # them: a direct message belongs to no team.
+        self._directs: list[dict] = []
+        self._rows: dict = {}
         self._channel: dict | None = None
         # Which channel was ASKED for, set the moment it is clicked.
         # `_channel` only arrives with the history reply, so anything that
@@ -1032,6 +1216,10 @@ class TeamPage(QWidget):
 
     def refresh(self):
         self._run(ChatManager.fetch_teams, self._on_teams, self._on_teams_failed)
+        # Two requests, deliberately. Folding conversations into the teams
+        # reply would have meant the team list carrying rows it has no shape
+        # for, and every existing caller of it learning about direct messages.
+        self._run(ChatManager.fetch_directs, self._on_directs, None)
 
     def _on_teams_failed(self, _error: str):
         if not self._teams:
@@ -1049,6 +1237,30 @@ class TeamPage(QWidget):
             if first:
                 self.open_channel(first["id"])
 
+    def _on_directs(self, payload):
+        self._directs = payload.get("directs") or []
+        self._render_channels()
+
+    def _new_message(self):
+        """Search for somebody and open a conversation with them."""
+        dialog = _PeoplePicker(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.chosen:
+            return
+        self._run(ChatManager.open_direct,
+                  self._on_direct_opened,
+                  lambda error: QMessageBox.information(
+                      self, "Could not open chat", error),
+                  dialog.chosen)
+
+    def _on_direct_opened(self, payload):
+        channel = payload.get("channel") or {}
+        # Refresh the list first, so the conversation has a row to select —
+        # otherwise a brand new one opens with nothing highlighted on the left
+        # and looks like it did not open at all.
+        self._run(ChatManager.fetch_directs, self._on_directs, None)
+        if channel.get("id"):
+            self.open_channel(channel["id"])
+
     def _render_channels(self):
         while self._channel_list.count() > 1:
             item = self._channel_list.takeAt(0)
@@ -1056,7 +1268,11 @@ class TeamPage(QWidget):
                 item.widget().deleteLater()
         self._rows.clear()
 
+        index = self._render_directs(0)
+
         if not self._teams:
+            if index:
+                return
             empty = QLabel("You are not in any team yet.\nAn administrator adds you to one.")
             empty.setWordWrap(True)
             empty.setStyleSheet(
@@ -1065,7 +1281,6 @@ class TeamPage(QWidget):
             self._channel_list.insertWidget(0, empty)
             return
 
-        index = 0
         for team in self._teams:
             label = QLabel(team["name"].upper() +
                            ("  · archived" if team.get("is_archived") else ""))
@@ -1085,6 +1300,70 @@ class TeamPage(QWidget):
                 row.setChecked(selected)
                 row.set_selected(selected)
                 index += 1
+
+    def _render_directs(self, index: int) -> int:
+        """The conversations section, above the teams. Returns the next index.
+
+        Above rather than below because it is the part somebody opens the
+        panel for most often — a team channel is read, a message to one person
+        is answered.
+        """
+        # A FULL-WIDTH BUTTON THAT SAYS WHAT IT DOES.
+        #
+        # The first version of this was a 20-pixel "+" beside the heading. It
+        # was missed entirely — which is the whole feature missed, because
+        # finding somebody outside your team is the only way in. An affordance
+        # nobody sees is not an affordance.
+        new_chat = QPushButton("✉   Message somebody")
+        new_chat.setCursor(Qt.CursorShape.PointingHandCursor)
+        new_chat.setFixedHeight(34)
+        new_chat.setObjectName("newDm")
+        new_chat.setStyleSheet(
+            f"QPushButton#newDm {{ background:{C.PRIMARY};color:{C.ON_ACCENT};"
+            f"border:none;border-radius:{R_SM}px;font-size:12px;font-weight:700;"
+            f"text-align:center;padding:0 10px; }}"
+            f"QPushButton#newDm:hover {{ background:{C.PRIMARY_DIM}; }}")
+        new_chat.clicked.connect(self._new_message)
+
+        holder = QWidget()
+        holder.setObjectName("dmHeader")
+        holder.setStyleSheet("QWidget#dmHeader{background:transparent;}")
+        bar = QVBoxLayout(holder)
+        bar.setContentsMargins(8, 8, 8, 4)
+        bar.setSpacing(6)
+        bar.addWidget(new_chat)
+
+        title = QLabel("DIRECT MESSAGES")
+        title.setStyleSheet(
+            f"color:{C.TEXT_DIM};font-size:10px;font-weight:800;letter-spacing:1px;"
+            f"border:none;background:transparent;padding-left:2px;")
+        bar.addWidget(title)
+
+        self._channel_list.insertWidget(index, holder)
+        index += 1
+
+        for direct in self._directs:
+            row = _DirectRow(direct)
+            row.clicked.connect(
+                lambda _checked=False, cid=direct["channel_id"]: self.open_channel(cid))
+            self._channel_list.insertWidget(index, row)
+            self._rows[direct["channel_id"]] = row
+            selected = (self._channel is not None
+                        and self._channel["id"] == direct["channel_id"])
+            row.setChecked(selected)
+            row.set_selected(selected)
+            index += 1
+
+        if not self._directs:
+            hint = QLabel("Nobody yet — use the button above to write to\n"
+                          "anybody in the company, team or not.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(
+                f"color:{C.TEXT_DIM};font-size:11px;padding:2px 12px 8px;"
+                f"border:none;background:transparent;")
+            self._channel_list.insertWidget(index, hint)
+            index += 1
+        return index
 
     # ── one channel ─────────────────────────────────────────────────────
 

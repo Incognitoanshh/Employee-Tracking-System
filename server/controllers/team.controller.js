@@ -711,9 +711,19 @@ exports.viewChannel = async (req, res) => {
     }
 
     try {
+        // LEFT JOIN, so this reaches a direct message too.
+        //
+        // A DM has no team, and an inner join here made the audited route
+        // return "channel not found" for exactly the conversations it exists
+        // to reach. Private by default is not the same as unreachable: a
+        // complaint has to be answerable, with a purpose and a reference that
+        // are written to a table nothing purges.
         const channel = await pool.query(
-            `SELECT c.id, c.name, c.type, c.team_id, t.name AS team_name
-               FROM channels c JOIN teams t ON t.id = c.team_id WHERE c.id = $1`,
+            `SELECT c.id, c.name, c.type, c.team_id,
+                    COALESCE(t.name, 'Direct message') AS team_name
+               FROM channels c
+               LEFT JOIN teams t ON t.id = c.team_id
+              WHERE c.id = $1`,
             [channelId]);
         if (channel.rows.length === 0) return fail(res, 404, "Channel not found");
         const ch = channel.rows[0];

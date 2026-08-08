@@ -40,6 +40,12 @@ router.get("/updates", chatCtrl.getUpdates);
 // Search, before /channels/:id so that neither can shadow the other.
 router.get("/search", chatCtrl.search);
 
+// Direct messages. One person to one person, outside any team — and visible
+// to nobody else, including a super admin. See utils/chat_access.js.
+router.get("/people",  chatCtrl.searchPeople);
+router.get("/directs", chatCtrl.getDirects);
+router.post("/direct", chatCtrl.openDirect);
+
 // One channel.
 router.get("/channels/:id/messages",  chatCtrl.getMessages);
 router.post("/channels/:id/messages", chatCtrl.sendMessage);

@@ -40,6 +40,7 @@ from client.presentation.widgets.panel_widgets import (
     ActivityRow, Card, NavButton, PageHeader, StatCard,
 )
 from client.application.managers.session_manager import SessionManager
+from client.application.services import notifier
 from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.application.managers.idle_tracker import IdleTracker
@@ -1413,45 +1414,70 @@ class EmployeePanel(QWidget):
             nav.set_badge(total)
 
     def _on_chat_messages(self, arrived: list):
-        """A tray notification for anything that arrived while looking away.
+        """Announce what arrived, and say who it was from and where.
 
-        Only when the Team page is not the one on screen — notifying somebody
-        about a message they are already reading is how people learn to ignore
-        notifications.
+        The deciding is in application/services/notifier — what to show, what
+        to stay quiet about, and how it should be worded. Only the showing is
+        here, because that part is Qt and the other part is the part that makes
+        this either useful or the first thing everybody switches off.
         """
-        if not arrived or self._stack.currentWidget() is self.pages.get("team"):
+        if not arrived:
             return
-        others = [m for m in arrived if m.get("sender_id") != SessionManager.employee_id]
-        if not others:
-            return
-        latest = others[-1]
-        body = str(latest.get("body") or "")
-        self._notify(
-            f"{latest.get('sender_name', 'Someone')}"
-            + (f" and {len(others) - 1} more" if len(others) > 1 else ""),
-            body if len(body) <= 90 else body[:87] + "…",
-        )
-        self.pages["team"].refresh()
+
+        team_page = self.pages.get("team")
+        looking_at = getattr(team_page, "_channel_id", None) if team_page else None
+        # Focus, not just "the page is on screen". The same conversation left
+        # open behind a browser window is not being read.
+        on_top = self.isActiveWindow() and self._stack.currentWidget() is team_page
+
+        for item in notifier.collapse(notifier.for_messages(
+                arrived,
+                me=SessionManager.employee_id,
+                open_channel_id=looking_at,
+                window_active=on_top,
+                channel_names=self._channel_names(),
+                direct_channel_ids=self._direct_channel_ids())):
+            self._notify(item["title"], item["body"], kind=item["kind"])
+
+        if team_page:
+            team_page.refresh()
+
+    def _channel_names(self) -> dict:
+        """Channel id to what it should be called in a notification."""
+        names = {}
+        team_page = self.pages.get("team")
+        for team in getattr(team_page, "_teams", []) or []:
+            for channel in team.get("channels") or []:
+                names[channel["id"]] = f"#{channel['name']}"
+        for direct in getattr(team_page, "_directs", []) or []:
+            names[direct["channel_id"]] = (direct.get("with") or {}).get("name") or ""
+        return names
+
+    def _direct_channel_ids(self) -> set:
+        team_page = self.pages.get("team")
+        return {d["channel_id"] for d in getattr(team_page, "_directs", []) or []}
 
     def _on_chat_notifications(self, alerts: list):
-        """Announcements. Louder than an unread count, which is the point."""
-        for alert in alerts or []:
-            if alert.get("type") != "ANNOUNCEMENT":
-                continue
-            self._notify(
-                f"📢 {alert.get('team_name', '')} — {alert.get('channel_name', '')}".strip(" —"),
-                "A new announcement was posted.",
-            )
-            break
+        """Announcements for everybody; the rest only for administrators."""
+        for item in notifier.collapse(notifier.for_alerts(
+                alerts, role=getattr(SessionManager, "role", "employee"))):
+            self._notify(item["title"], item["body"], kind=item["kind"])
 
-    def _notify(self, title: str, body: str):
+    def _notify(self, title: str, body: str, kind: str = notifier.NORMAL):
         tray = getattr(self, "tray", None)
         if tray is None:
             return
         try:
-            from PySide6.QtWidgets import QSystemTrayIcon
+            from PySide6.QtWidgets import QSystemTrayIcon, QApplication
             tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 6000)
+            # A sound only for the ones addressed to this person. Beeping for
+            # every line in a busy channel is how somebody ends up muting the
+            # application, and then missing the message that was for them.
+            if kind == notifier.URGENT:
+                QApplication.beep()
         except Exception:
+            # A notification that cannot be shown must never take the panel
+            # down with it — this runs off a poll, on every arrival.
             pass
 
     # ── services ────────────────────────────────────────────────────────

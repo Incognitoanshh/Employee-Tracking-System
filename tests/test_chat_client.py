@@ -925,6 +925,75 @@ def main():
     page8._render_feed()
     check("clicking a failed picture tries again", len(asked) == 2, str(len(asked)))
 
+    print("\nDirect messages in the sidebar")
+    from client.presentation.windows.team_page import _DirectRow, _PeoplePicker
+
+    page9 = TeamPage(None, chat)
+    page9._on_teams({"teams": [{
+        "id": 1, "name": "Development", "is_archived": False, "unread": 0,
+        "channels": [{"id": 1, "name": "General", "type": "STANDARD",
+                      "is_default": True, "unread": 0}]}]})
+    page9._on_directs({"directs": [
+        {"channel_id": 50, "unread": 2, "preview": "kal ka report",
+         "with": {"employee_id": "EM103", "name": "Sneha Iyer", "username": "sneha"}},
+        {"channel_id": 51, "unread": 0, "preview": "",
+         "with": {"employee_id": "EM102", "name": "Amit Sharma", "username": "amit"}},
+    ]})
+
+    rows = page9.findChildren(_DirectRow)
+    check("every conversation gets a row", len(rows) == 2, str(len(rows)))
+    check("and they live alongside the team channels, not inside one",
+          50 in page9._rows and 1 in page9._rows, str(sorted(page9._rows)))
+
+    labels = [w.text() for w in rows[0].findChildren(QLabel)]
+    check("shown by the person's name, not a channel number",
+          any("Sneha Iyer" in t for t in labels), str(labels))
+    check("with the last line as a preview",
+          any("kal ka report" in t for t in labels), str(labels))
+    check("and an unread badge", any(t == "2" for t in labels), str(labels))
+
+    empty = [w.text() for w in rows[1].findChildren(QLabel)]
+    check("a conversation with nothing in it says so rather than looking broken",
+          any("No messages yet" in t for t in empty), str(empty))
+
+    page9._on_directs({"directs": []})
+    hints = [w.text() for w in page9.findChildren(QLabel)]
+    buttons = [b.text() for b in page9.findChildren(QPushButton)]
+    check("with none at all, there is still an obvious way to start one",
+          any("Message somebody" in b for b in buttons),
+          "the first version of this was a 20-pixel + that was missed entirely, "
+          "which is the whole feature missed")
+    check("and the empty space explains itself",
+          any("anybody in the company" in t for t in hints), str(hints)[:200])
+
+    print("\nPicking who to message")
+    picker = _PeoplePicker(None)
+    picker._show({"people": [
+        {"employee_id": "EM104", "name": "Vikram Rao", "username": "vikram",
+         "designation": "Field Executive"},
+        {"employee_id": "AD100", "name": "Priya Nair", "username": "manager",
+         "designation": "Operations Manager"},
+    ]})
+    check("it lists people", picker._list.count() == 2, str(picker._list.count()))
+    shown = picker._list.item(0).text()
+    check("by name AND username, because you may only know one",
+          "Vikram Rao" in shown and "vikram" in shown, shown)
+    check("with what they do, to tell two Rajeshes apart",
+          "Field Executive" in shown, shown)
+
+    picker._list.setCurrentRow(1)
+    picker._accept()
+    check("picking somebody returns their employee id, not their name",
+          picker.chosen == "AD100", str(picker.chosen))
+
+    picker2 = _PeoplePicker(None)
+    picker2._show({"people": []})
+    check("no match says so plainly",
+          "Nobody matches" in picker2._status.text(), picker2._status.text())
+    picker2._accept()
+    check("and pressing Message with nothing picked does not open a chat with nobody",
+          picker2.chosen is None, str(picker2.chosen))
+
     print()
     if failures:
         print(f"{failures} failure(s)")

@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from client.application.managers.session_manager import SessionManager
+from client.application.services import notifier
 from client.infrastructure.database.database import Database
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
@@ -5126,6 +5127,10 @@ class AdminConfigPanel(QMainWindow):
         # Polls whether or not the tab is open, so the sidebar count is right
         # before somebody goes looking for it.
         self.chat.messages.connect(self._on_chat_messages)
+        # Announcements reach everybody; the administrative alerts — an app
+        # that has stopped reporting, a shift nobody logged in for — reach the
+        # only people who can act on them.
+        self.chat.notifications.connect(self._on_chat_alerts)
         self.chat.start()
 
         self.scheduler = SchedulerService()
@@ -5360,26 +5365,55 @@ class AdminConfigPanel(QMainWindow):
                     pass
 
     def _on_chat_messages(self, arrived: list):
-        """Tell the admin about a message when they are looking elsewhere."""
-        if not arrived or self.stack.currentWidget() is getattr(self, "_mychat_tab", None):
+        """The same rules as the employee panel, from the same place.
+
+        An admin is somebody's colleague as well as an administrator, and a
+        message to them should read the same either side. Two copies of these
+        rules would have drifted the first time one was changed.
+        """
+        if not arrived:
             return
-        mine = SessionManager.employee_id
-        others = [m for m in arrived if m.get("sender_id") != mine]
-        if not others:
-            return
-        latest = others[-1]
-        body = str(latest.get("body") or "")
+
+        chat_tab = getattr(self, "_mychat_tab", None)
+        looking_at = getattr(chat_tab, "_channel_id", None) if chat_tab else None
+        on_top = self.isActiveWindow() and self.stack.currentWidget() is chat_tab
+
+        names = {}
+        directs = set()
+        for team in getattr(chat_tab, "_teams", []) or []:
+            for channel in team.get("channels") or []:
+                names[channel["id"]] = f"#{channel['name']}"
+        for direct in getattr(chat_tab, "_directs", []) or []:
+            names[direct["channel_id"]] = (direct.get("with") or {}).get("name") or ""
+            directs.add(direct["channel_id"])
+
+        for item in notifier.collapse(notifier.for_messages(
+                arrived,
+                me=SessionManager.employee_id,
+                open_channel_id=looking_at,
+                window_active=on_top,
+                channel_names=names,
+                direct_channel_ids=directs)):
+            self._notify_tray(item["title"], item["body"], item["kind"])
+
+    def _on_chat_alerts(self, alerts: list):
+        for item in notifier.collapse(notifier.for_alerts(
+                alerts, role=getattr(SessionManager, "role", "admin"))):
+            self._notify_tray(item["title"], item["body"], item["kind"])
+
+    def _notify_tray(self, title: str, body: str, kind: str = notifier.NORMAL):
         tray = getattr(self, "tray", None)
         if tray is None:
             return
         try:
-            from PySide6.QtWidgets import QSystemTrayIcon as _Tray
-            tray.showMessage(
-                f"{latest.get('sender_name', 'Someone')}"
-                + (f" and {len(others) - 1} more" if len(others) > 1 else ""),
-                body if len(body) <= 90 else body[:87] + "…",
-                _Tray.MessageIcon.Information, 6000)
+            from PySide6.QtWidgets import QSystemTrayIcon as _Tray, QApplication
+            tray.showMessage(title, body, _Tray.MessageIcon.Information, 6000)
+            # Sound only for what is addressed to this person — see notifier.
+            if kind == notifier.URGENT:
+                QApplication.beep()
         except Exception:
+            # This runs off a poll. A notification that cannot be shown must
+            # never take the panel down with it.
             pass
 
     def _stop_background_services(self):

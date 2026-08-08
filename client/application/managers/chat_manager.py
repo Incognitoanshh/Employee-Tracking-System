@@ -627,6 +627,40 @@ class ChatManager(QObject):
             raise RuntimeError(message)
 
     @classmethod
+    def search_people(cls, query: str) -> dict:
+        """Who this person can start a conversation with.
+
+        Anybody may write to anybody — the owner's decision, and what an
+        office expects. Suspended accounts and yourself are left out by the
+        server, so the panel never has to filter them.
+        """
+        return cls._get("/chat/people", {"q": query})
+
+    @classmethod
+    def open_direct(cls, employee_id: str) -> dict:
+        """Open the conversation with somebody, creating it the first time."""
+        response = _http.post(
+            f"{API_BASE_URL}/chat/direct",
+            json={"employee_id": employee_id},
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}",
+                     "Content-Type": "application/json"},
+            timeout=15,
+        )
+        if response.status_code != 200:
+            message = f"HTTP {response.status_code}"
+            try:
+                message = response.json().get("message", message)
+            except Exception:
+                pass
+            raise RuntimeError(message)
+        return response.json()
+
+    @classmethod
+    def fetch_directs(cls) -> dict:
+        """Every conversation this person has, newest first."""
+        return cls._get("/chat/directs")
+
+    @classmethod
     def fetch_pinned(cls, channel_id: int) -> dict:
         return cls._get(f"/chat/channels/{channel_id}/pinned")
 
