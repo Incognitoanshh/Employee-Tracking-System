@@ -208,6 +208,88 @@ async function main() {
         check("a different account signed in at the same time is untouched",
             res.status === 200, `status ${res.status}`);
 
+
+        // ── refresh must not undo a force logout ────────────────────────
+        //
+        // THE WORST BUG FOUND IN THIS PRODUCT SO FAR, and it was silent.
+        //
+        // Force logout sets the stored token to NULL. Refresh only checked
+        // that the presented JWT was cryptographically valid — which it still
+        // is, for the rest of its twenty-four hours — and wrote a fresh token
+        // straight back into the row. The client refreshes by itself, so an
+        // administrator forced a logout, saw it work, and the app let itself
+        // back in seconds later. Nothing anywhere said so.
+        console.log("\nRefresh, after somebody has been signed out");
+
+        psql(DB, `DELETE FROM active_sessions`);
+        res = await login("emp1", "SuperSecret123", "machine-A");
+        const live = res.body.token;
+        check("a live session refreshes normally",
+            (await api("POST", "/auth/refresh", { token: live })).status === 200);
+
+        // A second's wait, deliberately. JWT records issue time to the
+        // second, so a token re-signed inside the same second is byte for
+        // byte the old one — the refresh is real, the string just has not
+        // changed yet. Without this pause the check below would be testing
+        // the clock rather than the rule.
+        await new Promise((r) => setTimeout(r, 1100));
+        const refreshed = (await api("POST", "/auth/refresh", { token: live })).body.token;
+        check("a refresh really does issue a different token",
+            Boolean(refreshed) && refreshed !== live, "same string came back");
+        check("and the superseded one can no longer extend itself",
+            (await api("POST", "/auth/refresh", { token: live })).status === 403,
+            "an old token could still refresh — two live credentials for one session");
+
+        psql(DB, `UPDATE active_sessions SET token = NULL WHERE employee_id = 'E001'`);
+        res = await api("POST", "/auth/refresh", { token: refreshed });
+        check("after a force logout, refresh is REFUSED",
+            res.status === 403, `status ${res.status}`);
+        check("and hands back no token at all",
+            !res.body.token, JSON.stringify(res.body));
+        check("with a message that sends them to the login screen",
+            /log in again/i.test(res.body.message || ""), res.body.message);
+
+        console.log("\nRefresh, for an account with no session row");
+        //
+        // `UPDATE ... WHERE employee_id` matches nothing when the row is
+        // gone, so this used to hand back a working token recorded NOWHERE:
+        // that account then had no session at all — reading as offline in the
+        // panel while plainly working, with nothing left for the
+        // one-machine rule to compare against.
+        psql(DB, `DELETE FROM active_sessions`);
+        res = await login("emp1", "SuperSecret123", "machine-A");
+        const orphan = res.body.token;
+        psql(DB, `DELETE FROM active_sessions`);
+        res = await api("POST", "/auth/refresh", { token: orphan });
+        check("refresh with no session row is refused",
+            res.status === 403, `status ${res.status}`);
+        check("and does not create a session out of nowhere",
+            psql(DB, `SELECT COUNT(*) FROM active_sessions`) === "0",
+            psql(DB, `SELECT COUNT(*) FROM active_sessions`));
+
+        console.log("\nRefresh, for a suspended account");
+        psql(DB, `DELETE FROM active_sessions`);
+        res = await login("emp1", "SuperSecret123", "machine-A");
+        const beforeSuspend = res.body.token;
+        psql(DB, `UPDATE employees SET suspended = TRUE WHERE employee_id = 'E001'`);
+        res = await api("POST", "/auth/refresh", { token: beforeSuspend });
+        check("a suspended account is not handed a fresh credential",
+            res.status === 403, `status ${res.status}`);
+        check("and is told why", /suspended/i.test(res.body.message || ""), res.body.message);
+        psql(DB, `UPDATE employees SET suspended = FALSE WHERE employee_id = 'E001'`);
+
+        console.log("\nRefresh keeps the session looking alive");
+        // Presence asks when the session was last heard from. A refresh is
+        // the app saying it is running, so it has to count.
+        psql(DB, `DELETE FROM active_sessions`);
+        res = await login("emp1", "SuperSecret123", "machine-A");
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() - INTERVAL '30 minutes'
+                   WHERE employee_id = 'E001'`);
+        await api("POST", "/auth/refresh", { token: res.body.token });
+        check("refreshing stamps last_seen, so a working app is not read as gone",
+            psql(DB, `SELECT (last_seen > NOW() - INTERVAL '1 minute')::text
+                        FROM active_sessions WHERE employee_id = 'E001'`) === "true");
+
         server.close();
         await pool.end();
 

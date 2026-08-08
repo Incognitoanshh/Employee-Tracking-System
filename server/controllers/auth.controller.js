@@ -32,6 +32,35 @@ exports.logout = async (req, res) => {
     return res.json({ success: true, message: "Logged out" });
 };
 
+/**
+ * POST /api/auth/refresh
+ *
+ * Extend a session that is STILL A SESSION.
+ *
+ * THREE THINGS THIS USED TO GET WRONG, all of them silently.
+ *
+ * 1. FORCE LOGOUT DID NOT WORK. Signing somebody out sets their stored token
+ *    to NULL. This route only checked that the presented JWT was
+ *    cryptographically valid — which it still is, for the rest of its 24
+ *    hours — and then wrote a fresh token straight back into the row. The
+ *    client refreshes on its own, so an administrator would force a logout,
+ *    watch it take effect, and the app would let itself back in seconds
+ *    later. Measured end to end, not reasoned about.
+ *
+ * 2. A SUSPENDED ACCOUNT WAS STILL ISSUED TOKENS. The middleware blocks the
+ *    request afterwards, so nothing was reachable — but handing a live
+ *    credential to an account somebody has just disabled is not something to
+ *    leave to a check further down the line.
+ *
+ * 3. NO ROW MEANT NO SESSION, AND NO COMPLAINT. `UPDATE ... WHERE
+ *    employee_id` matches nothing when the row is gone, so the caller got a
+ *    working token that was recorded nowhere. That account then had no
+ *    session at all: it read as offline in the panel while plainly working,
+ *    and the single-machine rule had nothing left to compare against.
+ *
+ * So the presented token must now BE the session — matching the stored one
+ * exactly. Anything else ends here.
+ */
 exports.refresh = async (req, res) => {
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];
@@ -39,13 +68,42 @@ exports.refresh = async (req, res) => {
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        const held = await pool.query(
+            `SELECT s.token, e.suspended
+               FROM active_sessions s
+               JOIN employees e ON e.employee_id = s.employee_id
+              WHERE s.employee_id = $1`,
+            [decoded.employee_id]
+        );
+
+        // No row, no stored token, or a different one: this is not a live
+        // session, whatever the JWT still says about itself.
+        if (held.rows.length === 0 || !held.rows[0].token || held.rows[0].token !== token) {
+            return res.status(403).json({
+                success: false,
+                message: "Session ended. Please log in again.",
+            });
+        }
+        if (held.rows[0].suspended) {
+            return res.status(403).json({
+                success: false,
+                message: "This account is suspended.",
+            });
+        }
+
         const newToken = jwt.sign(
             { employee_id: decoded.employee_id, role: decoded.role },
             process.env.JWT_SECRET,
             { expiresIn: "24h" }
         );
+        // The row is known to exist, so this cannot silently match nothing.
+        // last_seen is stamped as well: a refresh is the app saying it is
+        // running, which is exactly what presence asks about.
         await pool.query(
-            `UPDATE active_sessions SET token = $1, login_time = NOW() WHERE employee_id = $2`,
+            `UPDATE active_sessions
+                SET token = $1, login_time = NOW(), last_seen = NOW()
+              WHERE employee_id = $2`,
             [newToken, decoded.employee_id]
         );
         return res.json({ success: true, token: newToken });

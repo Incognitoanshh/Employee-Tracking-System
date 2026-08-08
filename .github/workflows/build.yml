@@ -21,7 +21,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # THE GATE. Nothing is built until every test has passed.
+  #
+  # Without this the build was happy to produce an installer from code that
+  # broke checks already written for it — which is exactly how a broken force
+  # logout and a wrong Online dot both reached a downloadable Setup.exe.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   build-windows:
+    needs: tests
     runs-on: windows-latest
     defaults:
       run:
@@ -174,6 +183,7 @@ jobs:
           path: installer_out/Amaze-Connect-Setup.exe
 
   build-mac:
+    needs: tests
     runs-on: macos-latest
     steps:
       - name: Checkout Repository
