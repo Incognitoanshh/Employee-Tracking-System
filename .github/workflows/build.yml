@@ -1,9 +1,9 @@
 name: Build Cross-Platform Desktop Apps
 
-# Shown against each run in the Actions list. "test 1" because this build is
-# for trying the app, not for shipping: no tag is pushed, so the release job
-# below does not run and nothing is published.
-run-name: test 1
+# Shown against each run in the Actions list. "test 2" — the build that goes
+# out for the final round of testing before launch. Still no tag, so the
+# release job below does not run and nothing is published.
+run-name: test 2
 
 on:
   push:
@@ -179,7 +179,7 @@ jobs:
       - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
-          name: test-1-Windows-Installer
+          name: test-2-Windows-Installer
           path: installer_out/Amaze-Connect-Setup.exe
 
   build-mac:
@@ -236,7 +236,7 @@ jobs:
       - name: Upload Mac DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: test-1-Mac-DMG
+          name: test-2-Mac-DMG
           path: dmg_out/Amaze-Connect.dmg
 
   # ── the release ────────────────────────────────────────────────────────
@@ -270,9 +270,9 @@ jobs:
           # A file called "Setup.exe" on a release page tells nobody which
           # build it is. Somebody reporting a bug should be able to say so
           # from the filename alone.
-          cp "installers/test-1-Windows-Installer/Amaze-Connect-Setup.exe" \
+          cp "installers/test-2-Windows-Installer/Amaze-Connect-Setup.exe" \
              "release/Amaze-Connect-${VERSION}-Windows-Setup.exe"
-          cp "installers/test-1-Mac-DMG/Amaze-Connect.dmg" \
+          cp "installers/test-2-Mac-DMG/Amaze-Connect.dmg" \
              "release/Amaze-Connect-${VERSION}-macOS.dmg"
           ls -lh release
 
