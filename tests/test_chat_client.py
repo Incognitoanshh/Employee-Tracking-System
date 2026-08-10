@@ -994,6 +994,67 @@ def main():
     check("and pressing Message with nothing picked does not open a chat with nobody",
           picker2.chosen is None, str(picker2.chosen))
 
+    print("\nPasting into the message box")
+    # Copying a screenshot and pasting it into the conversation is how people
+    # send pictures in every messaging application they use. Here it did
+    # nothing at all: QTextEdit is a rich text widget, so it accepted the
+    # image into a document nobody ever reads, and the picture vanished with
+    # no error.
+    from PySide6.QtGui import QImage as _QImage, QColor as _QColor
+    from PySide6.QtCore import QMimeData as _QMime, QUrl as _QUrl
+    import tempfile as _tempfile
+
+    composer = tp_mod._Composer()
+    pasted_images, pasted_files = [], []
+    composer.image_pasted.connect(lambda i: pasted_images.append(i))
+    composer.file_pasted.connect(lambda p: pasted_files.append(p))
+
+    picture = _QImage(120, 80, _QImage.Format.Format_RGB32)
+    picture.fill(_QColor("#c0392b"))
+    data = _QMime()
+    data.setImageData(picture)
+    composer.insertFromMimeData(data)
+    check("an image on the clipboard becomes an attachment",
+          len(pasted_images) == 1, str(len(pasted_images)))
+    check("and does not land in the text box as invisible rich content",
+          composer.toPlainText() == "", repr(composer.toPlainText()))
+
+    # Copied in Finder or Explorer, the clipboard carries a path instead —
+    # which shape you get depends on where it was copied from, and nobody
+    # thinks about that while doing it.
+    handle = _tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    handle.close()
+    picture.save(handle.name, "PNG")
+    data = _QMime()
+    data.setUrls([_QUrl.fromLocalFile(handle.name)])
+    composer.insertFromMimeData(data)
+    check("so does an image file copied from the desktop",
+          len(pasted_files) == 1 and pasted_files[0].endswith(".png"),
+          str(pasted_files))
+
+    data = _QMime()
+    data.setUrls([_QUrl.fromLocalFile("/tmp/notes.txt")])
+    composer.insertFromMimeData(data)
+    check("but a non-image path is not mistaken for a picture",
+          len(pasted_files) == 1, str(pasted_files))
+
+    composer.clear()
+    data = _QMime()
+    data.setText("kal ka report bhej dena")
+    composer.insertFromMimeData(data)
+    check("plain text still pastes normally",
+          composer.toPlainText() == "kal ka report bhej dena",
+          repr(composer.toPlainText()))
+
+    composer.clear()
+    data = _QMime()
+    data.setHtml("<b>bold</b> line")
+    data.setText("bold line")
+    composer.insertFromMimeData(data)
+    check("and formatted text arrives as plain characters",
+          composer.toPlainText() == "bold line" and "<b>" not in composer.toHtml(),
+          "colours and fonts nobody else will ever see")
+
     print()
     if failures:
         print(f"{failures} failure(s)")

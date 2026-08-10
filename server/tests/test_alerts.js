@@ -72,9 +72,16 @@ async function main() {
             ('E004','vikram','${hash}','employee','Vikram Rao')`);
 
         // Everybody works 09:00 with ten minutes' grace, Sunday off.
-        psql(DB, `INSERT INTO employee_configs
-                     (employee_id, shift_start, shift_end, late_grace_minutes, weekly_offs)
-                  VALUES ('global','09:00','18:00',10,'7')`);
+        // employee_id NULL is how the global row is stored — see
+        // config.controller. Seeding a row literally named 'global' is what
+        // let a broken join pass for an afternoon.
+        // UPDATE, not INSERT. A migration already creates the one global row,
+        // and a unique constraint keeps it the only one — which is itself the
+        // proof that NULL is the convention.
+        psql(DB, `UPDATE employee_configs
+                     SET shift_start='09:00', shift_end='18:00',
+                         late_grace_minutes=10, weekly_offs='7'
+                   WHERE employee_id IS NULL`);
 
         Object.assign(process.env, {
             DB_HOST: process.env.PGHOST || "127.0.0.1",
@@ -154,6 +161,27 @@ async function main() {
         // be invisible for five and a half hours out of every twenty-four.
         psql(DB, `INSERT INTO idle_daily (employee_id, day, idle_seconds)
                   VALUES ('E001', DATE(NOW() AT TIME ZONE 'Asia/Kolkata'), 4 * 3600)`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        // ── a day off, whatever day it actually is ──────────────────────
+        //
+        // Making today a holiday tests the rule on every day of the week
+        // rather than one in seven. It caught a real bug the Sunday-only
+        // version could not: the controller passed the date to the rules as
+        // "Sun Aug 09" rather than "2026-08-09", so isNonWorkingDay parsed an
+        // Invalid Date and answered "working day" for every day of the year.
+        // Idle alerts fired on holidays and Sundays for as long as that stood.
+        psql(DB, `INSERT INTO holidays (holiday_date, name)
+                  VALUES (DATE(NOW() AT TIME ZONE 'Asia/Kolkata'), 'Test holiday')
+                  ON CONFLICT DO NOTHING`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        check("on a holiday, idle raises nothing",
+            !find(res.body.alerts, "E001", "HIGH_IDLE"),
+            JSON.stringify(find(res.body.alerts, "E001", "HIGH_IDLE")));
+        check("and nobody is chased for not logging in either",
+            !res.body.alerts.some((a) => a.type === "NO_LOGIN"),
+            JSON.stringify(res.body.alerts.map((a) => a.type)));
+        psql(DB, `DELETE FROM holidays`);
+
         res = await api("GET", "/admin/alerts", { token: admin });
         const idle = find(res.body.alerts, "E001", "HIGH_IDLE");
         const sunday = psql(DB,

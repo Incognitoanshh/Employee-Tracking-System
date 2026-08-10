@@ -255,6 +255,62 @@ async function main() {
         check("an ordinary admin cannot use that route at all",
             res.status === 403, `status ${res.status}`);
 
+
+        // ── everything a team channel does, a DM does too ────────────────
+        //
+        // A direct message is a channel, so every feature ought to work in
+        // one. "Ought to" is not a guarantee: several read paths joined teams
+        // inner, and a channel with no team simply vanished from them. Edit
+        // and delete both answered "message not found" about a message that
+        // was plainly there, which is the worst shape of bug — the feature
+        // looks delivered and fails only where nobody looked.
+        //
+        // So each one is exercised HERE, in a DM, rather than assumed from
+        // the team-channel tests passing.
+        console.log("\nEverything a team channel does");
+
+        res = await api("POST", `/chat/channels/${dm}/messages`,
+            { token: rajesh, body: { body: "typo herr" } });
+        const editable = res.body.message.seq;
+        res = await api("PATCH", `/chat/messages/${editable}`,
+            { token: rajesh, body: { body: "typo here" } });
+        check("editing works in a direct message",
+            res.status === 200, `status ${res.status} — it joined teams inner`);
+
+        res = await api("POST", `/chat/channels/${dm}/messages`,
+            { token: rajesh, body: { body: "take this back" } });
+        const doomed = res.body.message.seq;
+        res = await api("DELETE", `/chat/messages/${doomed}`, { token: rajesh });
+        check("so does deleting", res.status === 200, `status ${res.status}`);
+        res = await api("GET", `/chat/channels/${dm}/messages`, { token: amit });
+        check("and the tombstone reaches the other person",
+            (res.body.messages || []).some((m) => m.seq === doomed && m.deleted),
+            "the withdrawal did not arrive");
+
+        res = await api("POST", `/chat/messages/${editable}/pin`,
+            { token: amit, body: { pinned: true } });
+        check("pinning works", res.status === 200, `status ${res.status}`);
+        res = await api("GET", `/chat/channels/${dm}/pinned`, { token: rajesh });
+        check("and the pinned message is listed",
+            (res.body.messages || []).some((m) => m.seq === editable),
+            JSON.stringify((res.body.messages || []).map((m) => m.seq)));
+
+        res = await api("POST", `/chat/channels/${dm}/messages`,
+            { token: rajesh, body: { body: "@amit ye dekh lena" } });
+        check("naming somebody resolves, even outside a team",
+            res.body.mentioned === 1, JSON.stringify(res.body.mentioned));
+
+        res = await api("POST", `/chat/channels/${dm}/read`,
+            { token: amit, body: { seq: editable } });
+        check("marking read works", res.status === 200, `status ${res.status}`);
+
+        await api("POST", `/chat/channels/${dm}/messages`,
+            { token: rajesh, body: { body: "one unread line" } });
+        res = await api("GET", "/chat/directs", { token: amit });
+        const mine = (res.body.directs || []).find((d) => d.channel_id === dm);
+        check("and the unread count moves",
+            mine && Number(mine.unread) > 0, JSON.stringify(mine && mine.unread));
+
         // ── the conversation list ───────────────────────────────────────
         console.log("\nThe list of conversations");
         await api("POST", "/chat/direct", { token: rajesh, body: { employee_id: "E003" } });
@@ -268,9 +324,15 @@ async function main() {
             res.body.directs.some((d) => d.with.employee_id === "E003"),
             "opening a chat and watching it vanish is a bug from where the "
             + "person is sitting");
+        // Against what the database actually holds, not a line typed here —
+        // any check added above changes which message is last, and an
+        // expectation frozen in the test then fails for the wrong reason.
+        const lastLine = psql(DB, `SELECT body FROM messages
+                                    WHERE channel_id = ${dm} AND deleted_at IS NULL
+                                    ORDER BY seq DESC LIMIT 1`);
         check("with a preview of the last line",
-            res.body.directs[0].preview.includes("ho gaya"),
-            res.body.directs[0].preview);
+            res.body.directs[0].preview === lastLine.slice(0, 80),
+            `preview "${res.body.directs[0].preview}" vs last "${lastLine}"`);
         check("and an unread count",
             typeof res.body.directs[0].unread === "number");
 

@@ -2,6 +2,7 @@ import requests
 from client.core import http as _http
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
+from client.services.logger_service import LoggerService
 
 
 class AuthService:
@@ -27,6 +28,41 @@ class AuthService:
                 "success": False,
                 "message": str(error)
             }
+
+    @staticmethod
+    def sign_out_on_server() -> bool:
+        """Tell the server this session is over. Best effort, never raises.
+
+        THE BUG THIS FIXES: nothing called it. /auth/logout was reached only
+        from the tray's Exit, so the Logout button in either panel cleared the
+        session locally and left it open on the server. That was survivable
+        while the same device could reclaim its own session — and stopped
+        being survivable the moment one login at a time became strict, because
+        signing out and straight back in was then refused for two minutes.
+
+        Failure is not fatal and must not block the sign-out: if the network
+        is down, the session goes stale on its own within a couple of minutes,
+        which is the same safety valve a crash relies on.
+        """
+        token = getattr(SessionManager, "auth_token", None)
+        if not token:
+            return False
+        try:
+            response = _http.post(
+                f"{API_BASE_URL}/auth/logout",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=8,
+            )
+            return response.status_code == 200
+        except Exception as error:
+            try:
+                LoggerService.log(
+                    f"LOGOUT: server not told — {error}. The session will "
+                    f"expire on its own."
+                )
+            except Exception:
+                pass
+            return False
 
     @staticmethod
     def change_password(current_password: str, new_password: str) -> dict:

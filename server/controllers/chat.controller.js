@@ -693,12 +693,15 @@ exports.editMessage = async (req, res) => {
         // state that may have moved on; the ones that decide whether the
         // write happens are made here.
         const found = await client.query(
+            // LEFT JOIN, and COALESCE. A direct message belongs to no team,
+            // so an inner join dropped the row entirely and editing one came
+            // back "message not found" — the message was right there.
             `SELECT m.seq, m.channel_id, m.sender_id, m.body, m.edit_count, m.created_at,
-                    t.is_archived,
+                    COALESCE(t.is_archived, FALSE) AS is_archived,
                     (NOW() - m.created_at) > INTERVAL '${EDIT_WINDOW_MINUTES} minutes' AS too_old
                FROM messages m
                JOIN channels c ON c.id = m.channel_id
-               JOIN teams t ON t.id = c.team_id
+               LEFT JOIN teams t ON t.id = c.team_id
               WHERE m.seq = $1 AND m.deleted_at IS NULL
               FOR UPDATE OF m`,
             [seq]
@@ -805,10 +808,13 @@ exports.deleteMessage = async (req, res) => {
         client = await pool.connect();
         await client.query("BEGIN");
         const found = await client.query(
-            `SELECT m.seq, m.sender_id, m.deleted_at, t.is_archived
+            // LEFT JOIN — same reason as editMessage. A conversation with no
+            // team is not an archived one; it has nothing to be archived by.
+            `SELECT m.seq, m.sender_id, m.deleted_at,
+                    COALESCE(t.is_archived, FALSE) AS is_archived
                FROM messages m
                JOIN channels c ON c.id = m.channel_id
-               JOIN teams t ON t.id = c.team_id
+               LEFT JOIN teams t ON t.id = c.team_id
               WHERE m.seq = $1
               FOR UPDATE OF m`,
             [seq]

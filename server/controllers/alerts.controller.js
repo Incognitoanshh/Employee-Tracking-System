@@ -55,7 +55,24 @@ exports.getAlerts = async (req, res) => {
                     COALESCE(c.weekly_offs, g.weekly_offs)             AS weekly_offs
                FROM employees e
                LEFT JOIN employee_configs c ON c.employee_id = e.employee_id
-               LEFT JOIN employee_configs g ON g.employee_id = 'global'
+               -- employee_id IS NULL, not 'global'.
+               --
+               -- BUG this fixes: this file invented its own convention. The
+               -- global configuration row is stored with a NULL employee_id
+               -- everywhere else — config.controller, attendance.controller,
+               -- auth.controller all read it that way — so this join matched
+               -- nothing in production.
+               --
+               -- The effect was quiet and complete: with no global shift,
+               -- "has not logged in" could never fire for anybody without a
+               -- per-employee config, and with no global weekly offs, idle
+               -- alerts fired on Sundays and holidays. Both are the exact
+               -- failures the rules were written to avoid.
+               --
+               -- The test agreed with the code because I wrote both from the
+               -- same wrong assumption — it seeded a row called 'global'. It
+               -- now seeds what production actually has.
+               LEFT JOIN employee_configs g ON g.employee_id IS NULL
               WHERE e.role = 'employee'
               ORDER BY e.employee_id`
         );
@@ -135,10 +152,23 @@ exports.getAlerts = async (req, res) => {
             `SELECT TO_CHAR(holiday_date, 'YYYY-MM-DD') AS day FROM holidays`);
         const holidays = new Set(days.rows.map((r) => r.day));
 
+        // FORMATTED IN SQL, as text.
+        //
+        // BUG this fixes: this asked for a DATE and did
+        // String(row.today).slice(0, 10). The driver hands a DATE over as a
+        // JavaScript Date, so that produced "Sun Aug 09" — not an ISO date.
+        // isNonWorkingDay parses `${isoDate}T00:00:00Z`, which was then
+        // Invalid Date, so getUTCDay() was NaN and the weekly-off test
+        // silently answered "no" for every day of the year.
+        //
+        // The effect: idle alerts fired on Sundays and holidays, and "has not
+        // logged in" would have chased people on their day off. Both are the
+        // exact failures the rules were written to avoid, and the unit tests
+        // could not see it because they pass an ISO string in directly.
         const clock = await pool.query(
-            `SELECT ${istToday()} AS today,
+            `SELECT TO_CHAR(NOW() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS today,
                     TO_CHAR(NOW() AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS now_ist`);
-        const isoDate = String(clock.rows[0].today).slice(0, 10);
+        const isoDate = String(clock.rows[0].today);
         const [hh, mm] = String(clock.rows[0].now_ist).split(":").map(Number);
         const nowMinutes = hh * 60 + mm;
 

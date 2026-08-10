@@ -152,6 +152,125 @@ def main():
     check("a mention is not announced twice — the message itself already did",
           out == [], str(out))
 
+    print("\nFrom an arriving message to the tray")
+    # The decisions above are only half of it. This is the wiring: a message
+    # arriving on the poll has to reach showMessage with the right words, and
+    # the sound has to fire for what is addressed to this person and not for
+    # everything else. Both panels are driven, because a rule that only one of
+    # them applies is a rule half the company does not get.
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _os.environ.setdefault("SCREENSHOT_ENCRYPTION_KEY",
+                           "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+
+    from client.presentation.windows import employee_panel as ep
+    from client.presentation.windows import admin_config_panel as acp
+
+    class _FakeTray:
+        def __init__(self):
+            self.shown = []
+
+        def showMessage(self, title, body, icon=None, msecs=None):
+            self.shown.append((title, body))
+
+    beeps = []
+
+    for label, panel_module, method, page_attr in (
+            ("employee panel", ep, "_on_chat_messages", "pages"),
+            ("admin panel", acp, "_on_chat_messages", None)):
+        cls = (panel_module.EmployeePanel if page_attr
+               else panel_module.AdminConfigPanel)
+        panel = cls.__new__(cls)          # no window, no network, no login
+        tray = _FakeTray()
+        panel.tray = tray
+
+        # The smallest surface each method actually reads.
+        class _Chat:
+            _channel_id = 999
+            _teams = [{"channels": [{"id": 10, "name": "General"}]}]
+            _directs = [{"channel_id": 50,
+                         "with": {"employee_id": "E002", "name": "Sneha Iyer"}}]
+
+            def refresh(self):
+                pass
+
+        chat_page = _Chat()
+        if page_attr:
+            panel.pages = {"team": chat_page}
+            panel._stack = type("S", (), {"currentWidget": lambda self: None})()
+        else:
+            panel._mychat_tab = chat_page
+            panel.stack = type("S", (), {"currentWidget": lambda self: None})()
+        panel.isActiveWindow = lambda: False
+
+        real_beep = panel_module.SessionManager
+        panel_module.SessionManager.employee_id = ME
+
+        import PySide6.QtWidgets as _qt
+        real_qapp_beep = _qt.QApplication.beep
+        _qt.QApplication.beep = staticmethod(lambda: beeps.append(label))
+        try:
+            getattr(panel, method)([
+                message(channel_id=50, sender_name="Sneha Iyer",
+                        body="bhai ek kaam tha"),
+                message(channel_id=10, sender_name="Amit Sharma"),
+            ])
+        finally:
+            _qt.QApplication.beep = real_qapp_beep
+
+        titles = [t for t, _b in tray.shown]
+        check(f"{label}: the tray is actually told", len(tray.shown) == 2,
+              f"{len(tray.shown)} shown — the wiring is there but silent")
+        check(f"{label}: a direct message reads as personal",
+              any("Sneha Iyer messaged you" == t for t in titles), str(titles))
+        check(f"{label}: a channel message names the channel",
+              any("Amit Sharma in #General" == t for t in titles), str(titles))
+        check(f"{label}: the words come through too",
+              any("bhai ek kaam tha" in b for _t, b in tray.shown),
+              str(tray.shown))
+
+    # The owner's decision: everything makes a sound, group messages and
+    # administrative alerts included — not only what names you. Two messages
+    # were delivered to each panel, so two sounds each.
+    check("a sound fires for EVERY notification, on both panels",
+          beeps.count("employee panel") == 2 and beeps.count("admin panel") == 2,
+          f"{beeps} — expected two each, one per message shown")
+
+    print("\nAdministrative alerts make a sound too")
+    panel = ep.EmployeePanel.__new__(ep.EmployeePanel)
+    tray = _FakeTray()
+    panel.tray = tray
+    ep.SessionManager.role = "admin"
+    import PySide6.QtWidgets as _qt
+    alert_beeps = []
+    real_beep = _qt.QApplication.beep
+    _qt.QApplication.beep = staticmethod(lambda: alert_beeps.append(1))
+    try:
+        panel._on_chat_notifications([
+            {"type": "NOT_REPORTING", "title": "No data for 3 d",
+             "detail": "The app has sent nothing."}])
+    finally:
+        _qt.QApplication.beep = real_beep
+        ep.SessionManager.role = "employee"
+    check("an admin alert reaches the tray", len(tray.shown) == 1, str(tray.shown))
+    check("and makes a sound", len(alert_beeps) == 1, str(alert_beeps))
+
+    print("\nWhen there is no tray")
+    # On a machine with no system tray — some Linux desktops — showMessage is
+    # unreachable. That must not take the panel down; this runs off the poll,
+    # on every arrival.
+    panel = ep.EmployeePanel.__new__(ep.EmployeePanel)
+    panel.tray = None
+    crashed = False
+    try:
+        panel._notify("Title", "Body")
+    except Exception:
+        crashed = True
+    check("nothing raises", not crashed,
+          "an unshowable notification would crash the panel on every message")
+
     print()
     if failures:
         print(f"{failures} failure(s)")

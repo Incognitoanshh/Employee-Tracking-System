@@ -27,7 +27,7 @@ from datetime import datetime
 from time import monotonic
 
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
-from PySide6.QtGui import QAction, QCursor, QKeyEvent, QPixmap
+from PySide6.QtGui import QAction, QCursor, QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
@@ -837,6 +837,10 @@ class _Composer(QTextEdit):
     mention_typed = Signal(str)
     navigate = Signal(int)     # -1 / +1 while the member list is open
     accept_mention = Signal()
+    # A picture pasted straight into the box — the clipboard carries either
+    # the image itself or a path to one, depending on where it came from.
+    image_pasted = Signal(object)   # QImage
+    file_pasted = Signal(str)       # a path on this machine
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -877,6 +881,38 @@ class _Composer(QTextEdit):
         cursor = self.textCursor()
         cursor.setPosition(at + len(handle) + 2)
         self.setTextCursor(cursor)
+
+    def insertFromMimeData(self, source) -> None:
+        """Paste. A picture becomes an attachment; anything else is text.
+
+        WHAT WAS MISSING: pasting an image did nothing at all. QTextEdit
+        happily accepts one — it is a rich text widget — and drops it into a
+        document nobody ever reads, so the picture vanished with no error.
+        Copying a screenshot and pasting it into the conversation is how
+        people send pictures in every messaging application they use, and it
+        silently failed here.
+
+        Two shapes arrive on a clipboard: the image itself (a screenshot, or
+        a copy out of a browser) and a file URL (copied in Finder or
+        Explorer). Both are handled, because which one you get depends on
+        where it was copied from and nobody thinks about that.
+        """
+        if source.hasImage():
+            image = source.imageData()
+            if image is not None and not QImage(image).isNull():
+                self.image_pasted.emit(QImage(image))
+                return
+
+        for url in (source.urls() if source.hasUrls() else []):
+            local = url.toLocalFile()
+            if local and local.lower().endswith(IMAGE_SUFFIXES):
+                self.file_pasted.emit(local)
+                return
+
+        # Plain text, deliberately. Pasting formatted text into a box whose
+        # contents are sent as plain characters would show colours and fonts
+        # that nobody else will ever see.
+        self.insertPlainText(source.text())
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
@@ -1150,6 +1186,8 @@ class TeamPage(QWidget):
         self._composer.mention_typed.connect(self._on_mention_typed)
         self._composer.navigate.connect(self._navigate_mentions)
         self._composer.accept_mention.connect(self._accept_mention)
+        self._composer.image_pasted.connect(self._paste_image)
+        self._composer.file_pasted.connect(self._paste_file)
         send_btn = QPushButton("Send")
         send_btn.setStyleSheet(button("primary"))
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1923,6 +1961,42 @@ class TeamPage(QWidget):
         any_file.triggered.connect(lambda: self._attach_file(images_only=False))
         menu.addAction(any_file)
         return menu
+
+    def _paste_image(self, image):
+        """A picture pasted into the box. Save it, then send it as a file.
+
+        Written to a temporary file because the upload path takes a path —
+        the same one the paperclip uses, so encryption, progress and the
+        local cache all behave identically. The file is JPEG at the same
+        quality a capture uses: a pasted screenshot is often several
+        megabytes of PNG, and on this link that is a visible wait.
+        """
+        if not self._channel:
+            return
+        try:
+            import tempfile
+            handle = tempfile.NamedTemporaryFile(
+                prefix="pasted-", suffix=".jpg", delete=False)
+            handle.close()
+            if not image.save(handle.name, "JPEG", 85):
+                raise RuntimeError("the pasted image could not be saved")
+        except Exception as error:
+            QMessageBox.information(
+                self, "Could not paste", f"That picture could not be used — {error}")
+            return
+        self._send_pasted(handle.name, "Pasting picture…")
+
+    def _paste_file(self, path: str):
+        """A picture copied in Finder or Explorer, arriving as a path."""
+        if not self._channel:
+            return
+        self._send_pasted(path, f"Pasting {path.split('/')[-1]}…")
+
+    def _send_pasted(self, path: str, note: str):
+        self._staged_note(note)
+        self._last_upload_path = path
+        self._run(ChatManager.upload_attachment, self._on_uploaded,
+                  self._on_upload_failed, self._channel["id"], path)
 
     def _attach_file(self, images_only: bool = False):
         if not self._channel:

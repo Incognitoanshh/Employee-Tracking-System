@@ -5408,9 +5408,14 @@ class AdminConfigPanel(QMainWindow):
         try:
             from PySide6.QtWidgets import QSystemTrayIcon as _Tray, QApplication
             tray.showMessage(title, body, _Tray.MessageIcon.Information, 6000)
-            # Sound only for what is addressed to this person — see notifier.
-            if kind == notifier.URGENT:
-                QApplication.beep()
+            # A SOUND ON EVERY NOTIFICATION, by the owner's decision — group
+            # messages and administrative alerts included, not only what is
+            # addressed to this person by name.
+            #
+            # `kind` still separates them for the wording, and the collapse in
+            # notifier keeps a batch to four, so coming back from an outage is
+            # four sounds rather than forty.
+            QApplication.beep()
         except Exception:
             # This runs off a poll. A notification that cannot be shown must
             # never take the panel down with it.
@@ -5497,6 +5502,12 @@ class AdminConfigPanel(QMainWindow):
             return
 
         self._logging_out = True
+
+        # The server first, while the token still works — see the note in
+        # employee_panel.logout. Not when the server ended it itself.
+        if not reason:
+            from client.application.services.auth_service import AuthService
+            AuthService.sign_out_on_server()
 
         self._stop_background_services()
 

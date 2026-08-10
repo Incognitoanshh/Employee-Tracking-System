@@ -41,6 +41,7 @@ from client.presentation.widgets.panel_widgets import (
 )
 from client.application.managers.session_manager import SessionManager
 from client.application.services import notifier
+from client.application.services.auth_service import AuthService
 from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.application.managers.idle_tracker import IdleTracker
@@ -1470,11 +1471,14 @@ class EmployeePanel(QWidget):
         try:
             from PySide6.QtWidgets import QSystemTrayIcon, QApplication
             tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 6000)
-            # A sound only for the ones addressed to this person. Beeping for
-            # every line in a busy channel is how somebody ends up muting the
-            # application, and then missing the message that was for them.
-            if kind == notifier.URGENT:
-                QApplication.beep()
+            # A SOUND ON EVERY NOTIFICATION, by the owner's decision — group
+            # messages and administrative alerts included, not only what is
+            # addressed to this person by name.
+            #
+            # `kind` still separates them for the wording, and the collapse in
+            # notifier keeps a batch to four, so coming back from an outage is
+            # four sounds rather than forty.
+            QApplication.beep()
         except Exception:
             # A notification that cannot be shown must never take the panel
             # down with it — this runs off a poll, on every arrival.
@@ -1786,6 +1790,18 @@ class EmployeePanel(QWidget):
                 QMessageBox.warning(self, "Signed out", reason)
             except Exception:
                 pass
+        # TELL THE SERVER FIRST, while the token is still valid.
+        #
+        # Nothing did. /auth/logout was reached only from the tray's Exit, so
+        # this button cleared the session locally and left it open on the
+        # server — and once one login at a time became strict, signing out and
+        # straight back in was refused for two minutes.
+        #
+        # Skipped when the server is the one that ended it: force logout and
+        # suspension have already cleared the row, and the token is dead.
+        if not reason:
+            AuthService.sign_out_on_server()
+
         # LOGOUT clear_session() se PEHLE log hota hai — warna employee_id
         # None ho jaata hai aur LoggerService chup-chaap drop kar deta hai.
         try:

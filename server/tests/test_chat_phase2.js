@@ -454,8 +454,16 @@ async function main() {
         // Files and quotes: the two ways a deleted message keeps speaking.
         const upload = await uploadFile(e1, general, "secret.txt", "confidential");
         res = await api("POST", `/chat/channels/${general}/messages`, {
-            token: e1, body: { body: "file attached", attachments: [upload.body.attachment.id] } });
+            token: e1, body: { body: "file attached",
+                               attachment_ids: [upload.body.attachment.id] } });
         const withFile = res.body.message.seq;
+        // Proving the attachment is actually ON the message before deleting
+        // it. The field is attachment_ids; this said `attachments`, which the
+        // server ignores — so the check below passed because there was never
+        // an attachment to strip, not because deletion stripped one.
+        check("the file really is attached before the message is deleted",
+            (res.body.message.attachments || []).length === 1,
+            JSON.stringify(res.body.message.attachments));
         await api("DELETE", `/chat/messages/${withFile}`, { token: e1 });
         res = await api("GET", `/chat/channels/${general}/messages`, { token: e2 });
         const stripped = res.body.messages.find((m) => m.seq === withFile);

@@ -76,3 +76,7 @@ test-1-Windows-Installer/
 test-1-Mac-DMG/
 *.dmg
 *Setup.exe
+
+# Local repository backups. `git bundle` output is the whole history again —
+# committing one doubles the repository every time.
+*.bundle
