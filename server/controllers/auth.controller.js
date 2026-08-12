@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const crypto = require("crypto");
 const { endSession, markLoggedIn } = require("../utils/session");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
@@ -99,8 +100,19 @@ exports.refresh = async (req, res) => {
             });
         }
 
+        // `jti` — a nonce, so no two tokens are ever byte-identical.
+        //
+        // JWT stamps `iat` in whole seconds, so a token minted in the same
+        // second as the last one for the same person came out as exactly the
+        // same string. Harmless in itself — it IS that person's token — but
+        // "one login at a time" is enforced by comparing the presented token
+        // against the stored one, and a session that cannot be told apart
+        // from the one it replaced cannot be reasoned about. It also made a
+        // check fail once in every few CI runs, which is worse: a gate nobody
+        // trusts is a gate that gets ignored.
         const newToken = jwt.sign(
-            { employee_id: decoded.employee_id, role: decoded.role },
+            { employee_id: decoded.employee_id, role: decoded.role,
+              jti: crypto.randomUUID() },
             process.env.JWT_SECRET,
             { expiresIn: "24h" }
         );
@@ -271,7 +283,8 @@ exports.login = async (req, res) => {
 
         // FIX: 24h token expiry
         const token = jwt.sign(
-            { employee_id: employee.employee_id, role: employee.role },
+            { employee_id: employee.employee_id, role: employee.role,
+              jti: crypto.randomUUID() },
             process.env.JWT_SECRET,
             { expiresIn: "24h" }
         );
@@ -416,7 +429,8 @@ exports.changePassword = async (req, res) => {
         );
 
         const token = jwt.sign(
-            { employee_id: employee.employee_id, role: employee.role },
+            { employee_id: employee.employee_id, role: employee.role,
+              jti: crypto.randomUUID() },
             process.env.JWT_SECRET,
             { expiresIn: "24h" }
         );

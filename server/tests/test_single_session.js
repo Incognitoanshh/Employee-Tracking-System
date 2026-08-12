@@ -250,16 +250,19 @@ async function main() {
         psql(DB, `DELETE FROM active_sessions`);
         res = await login("emp1", "SuperSecret123", "machine-A");
         const live = res.body.token;
-        check("a live session refreshes normally",
-            (await api("POST", "/auth/refresh", { token: live })).status === 200);
-
-        // A second's wait, deliberately. JWT records issue time to the
-        // second, so a token re-signed inside the same second is byte for
-        // byte the old one — the refresh is real, the string just has not
-        // changed yet. Without this pause the check below would be testing
-        // the clock rather than the rule.
-        await new Promise((r) => setTimeout(r, 1100));
-        const refreshed = (await api("POST", "/auth/refresh", { token: live })).body.token;
+        // Chained, the way a real client does it: each refresh is made with
+        // the token the last one handed back.
+        //
+        // This used to refresh twice from the SAME token and pass only by
+        // accident. JWT stamps issue time in whole seconds, so both mints
+        // came out byte for byte identical — which meant the stored token
+        // still equalled the original, and presenting it again was accepted.
+        // The moment tokens carried a nonce and became genuinely distinct,
+        // the second call was correctly refused and the check failed. The
+        // rule was right all along; the test was leaning on a collision.
+        const firstRefresh = await api("POST", "/auth/refresh", { token: live });
+        check("a live session refreshes normally", firstRefresh.status === 200);
+        const refreshed = firstRefresh.body.token;
         check("a refresh really does issue a different token",
             Boolean(refreshed) && refreshed !== live, "same string came back");
         check("and the superseded one can no longer extend itself",
