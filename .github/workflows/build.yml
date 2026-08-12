@@ -1,9 +1,10 @@
 name: Build Cross-Platform Desktop Apps
 
-# Shown against each run in the Actions list. "test 2" — the build that goes
-# out for the final round of testing before launch. Still no tag, so the
-# release job below does not run and nothing is published.
-run-name: test 2
+# Shown against each run in the Actions list. "test 3" — the round after the
+# forced-logout, macOS notification and Screen Recording fixes found during
+# live testing of test 2. Still no tag, so the release job below does not run
+# and nothing is published.
+run-name: test 3
 
 on:
   push:
