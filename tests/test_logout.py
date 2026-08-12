@@ -161,6 +161,10 @@ def main():
                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
+    # The poll reads its cursor out of the local database, which on a machine
+    # that has never run the app does not exist yet.
+    from client.infrastructure.database.database import Database
+    Database.initialize()
     from client.application.managers import chat_manager as cm
 
     for status in (401, 403):

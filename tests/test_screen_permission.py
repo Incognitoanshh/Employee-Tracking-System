@@ -96,6 +96,10 @@ def main():
     from client.application.managers.screenshot_manager import ScreenshotManager
     from client.application.managers.session_manager import SessionManager
     from client.services import screen_permission as sp2
+    # capture_screenshot reads the daily limit from the local database, which
+    # a machine that has never run the app does not have.
+    from client.infrastructure.database.database import Database
+    Database.initialize()
 
     SessionManager.role = "employee"
     SessionManager.employee_id = "TEST_PERM"
