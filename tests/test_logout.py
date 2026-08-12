@@ -222,6 +222,51 @@ def main():
     check("a server fault does NOT sign anybody out", ended == [], str(ended))
     check("and leaves the poll running", not chat._stop.is_set())
 
+    print("\nWhen signing out goes wrong")
+    # A ONE-WAY LATCH IS A DEAD BUTTON. Both panels guard against being
+    # signed out twice — two watchers can notice the same forced logout a
+    # second apart. But the flag was never let go of, so anything raising
+    # part-way through left Logout doing nothing at all, with no way back but
+    # restarting the app. Reported from a real machine: "logout ni ho raha,
+    # click kar raha hoon".
+    from client.presentation.windows import employee_panel as ep2
+    from client.presentation.windows import admin_config_panel as acp2
+
+    for label, module, cls_name, flag in (
+            ("employee panel", ep2, "EmployeePanel", "_signing_out"),
+            ("admin panel", acp2, "AdminConfigPanel", "_logging_out")):
+        cls = getattr(module, cls_name)
+        panel = cls.__new__(cls)
+        setattr(panel, flag, False)
+        boom = []
+
+        def explode(reason=""):
+            boom.append(1)
+            raise RuntimeError("the network went away mid-logout")
+
+        panel._do_logout = explode
+        real_log = module.LoggerService.log
+        said = []
+        module.LoggerService.log = lambda m, *a, **k: said.append(str(m))
+        try:
+            try:
+                panel.logout()
+            except RuntimeError:
+                pass
+            check(f"{label}: a failed sign-out is written down",
+                  any("LOGOUT FAILED" in m for m in said), str(said)[:120])
+            check(f"{label}: and the button still works afterwards",
+                  getattr(panel, flag) is False,
+                  "the flag stayed set — Logout is dead until the app restarts")
+            try:
+                panel.logout()
+            except RuntimeError:
+                pass
+            check(f"{label}: the second click actually tries again",
+                  len(boom) == 2, f"{len(boom)} attempt(s)")
+        finally:
+            module.LoggerService.log = real_log
+
     print("\nBoth panels use it")
     # One helper, called from both, because a third sign-out path added later
     # would otherwise repeat the same omission.

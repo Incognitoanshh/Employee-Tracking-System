@@ -1777,9 +1777,25 @@ class EmployeePanel(QWidget):
         """
         # Both the chat poll and the config sync can notice the same forced
         # logout within a second of each other. One sign-out, one message box.
+        #
+        # AND IT LETS GO IF THE SIGN-OUT DOES NOT FINISH — otherwise anything
+        # raising below leaves the flag set and every later click of Logout
+        # returns at this line, a button that does nothing until the app is
+        # restarted.
         if getattr(self, "_signing_out", False):
             return
         self._signing_out = True
+        try:
+            self._do_logout(reason)
+        except Exception as error:
+            self._signing_out = False
+            try:
+                LoggerService.log(f"LOGOUT FAILED : {error}")
+            except Exception:
+                pass
+            raise
+
+    def _do_logout(self, reason: str = ""):
 
         if reason:
             try:

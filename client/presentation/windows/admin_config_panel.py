@@ -41,6 +41,14 @@ from PySide6.QtWidgets import (
 )
 
 from client.application.managers.session_manager import SessionManager
+# NEVER IMPORTED, AND NOBODY COULD TELL.
+#
+# logout() has called LoggerService.log("LOGOUT") for a long time, wrapped in
+# `except Exception: pass` — so every call raised NameError and was swallowed.
+# The comment above that line says it was added because an admin signing out
+# never reached the Audit Logs; the line went in, the import did not, and the
+# gap it was written to close stayed open.
+from client.services.logger_service import LoggerService
 from client.application.services import notifier
 from client.infrastructure.database.database import Database
 from client.application.schedulers.scheduler_service import SchedulerService
@@ -5517,9 +5525,26 @@ class AdminConfigPanel(QMainWindow):
         # The guard comes FIRST. Two watchers can notice the same forced
         # logout a second apart, and the message box was outside it — so the
         # second one put a dialog on screen after the panel had already gone.
+        #
+        # AND IT LETS GO IF THE SIGN-OUT DOES NOT FINISH. It is a one-way
+        # latch otherwise: anything raising between here and the login window
+        # leaves it set, and every later click of Logout returns at this line
+        # — a button that does nothing, with no way back but restarting the
+        # app. Reported from a real machine.
         if self._logging_out:
             return
         self._logging_out = True
+        try:
+            self._do_logout(reason)
+        except Exception as error:
+            self._logging_out = False
+            try:
+                LoggerService.log(f"LOGOUT FAILED : {error}")
+            except Exception:
+                pass
+            raise
+
+    def _do_logout(self, reason: str = ""):
 
         if reason:
             try:
