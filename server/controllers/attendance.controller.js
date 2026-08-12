@@ -213,10 +213,51 @@ exports.loginAttendance = async (req, res) => {
         try {
             await client.query("BEGIN");
             await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [employee_id]);
+            // CLOSED AT THE LAST EVIDENCE, NOT AT THIS MOMENT.
+            //
+            // This used to stamp NOW(), which meant the gap between somebody
+            // closing their app and next signing in was recorded as time
+            // worked. A row in the customer's own list read 94:38:22 for
+            // exactly that reason — four days, from one login to the next.
+            // Even within a single day it was wrong: close the app at ten,
+            // sign in at six, and eight hours went on the timesheet.
+            //
+            // The honest end of an unclosed shift is the last moment there is
+            // any sign of the person: their session heartbeat, an activity
+            // line, or a screenshot. With none of those it closes at the
+            // login itself, recording nothing rather than a fiction.
             await client.query(
-                `UPDATE attendance SET logout_time = (NOW() AT TIME ZONE 'UTC'),
-                        total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
-                  WHERE employee_id = $1 AND logout_time IS NULL`,
+                `UPDATE attendance a
+                    SET logout_time = ev.ended,
+                        total_hours = ev.ended - a.login_time
+                   FROM (
+                     -- NOT the session heartbeat, here.
+                     --
+                     -- By the time this runs, /auth/login has already stamped
+                     -- active_sessions.last_seen with the current moment — so
+                     -- treating it as evidence would put the end of the OLD
+                     -- shift at the start of the new one, which is the very
+                     -- thing being fixed. Measured: it recorded eight hours
+                     -- for one hour of work. Only what the person actually
+                     -- did counts here; the sweep in utils/attendance_cleanup
+                     -- may use the heartbeat, because nothing has refreshed it
+                     -- there.
+                     SELECT a2.id,
+                            GREATEST(
+                                a2.login_time,
+                                COALESCE((SELECT MAX(al.created_at) FROM activity_logs al
+                                           WHERE al.employee_id = a2.employee_id
+                                             AND al.created_at >= a2.login_time),
+                                         a2.login_time),
+                                COALESCE((SELECT MAX(sc.created_at) FROM screenshots sc
+                                           WHERE sc.employee_id = a2.employee_id
+                                             AND sc.created_at >= a2.login_time),
+                                         a2.login_time)
+                            ) AS ended
+                       FROM attendance a2
+                      WHERE a2.employee_id = $1 AND a2.logout_time IS NULL
+                   ) ev
+                  WHERE a.id = ev.id`,
                 [employee_id]
             );
             // login_time is stamped by the server in UTC. The client used to

@@ -227,6 +227,30 @@ setInterval(() => {
     console.log(`[ALIVE] ${new Date().toISOString()}`);
 }, 10000).unref();
 
+// SHIFTS NOBODY CLOSED.
+//
+// Closing the app without signing out leaves the attendance row open, and it
+// used to stay open until that person's next login — which then recorded
+// everything in between as one shift. A real one in this database read
+// 94 hours 38 minutes. See utils/attendance_cleanup for what is written
+// instead and for the two conditions that stop it touching anybody who is
+// actually working.
+//
+// Ten minutes is often enough: the rows it closes are already more than a
+// full shift old, so nothing is gained by looking more frequently, and the
+// query is a single UPDATE. Unref'd, like the heartbeat above, so it can
+// never be the reason a test process refuses to exit.
+const { closeAbandonedShifts } = require("./utils/attendance_cleanup");
+setInterval(() => {
+    closeAbandonedShifts(pool)
+        .then((closed) => {
+            if (closed) {
+                console.log(`[ATTENDANCE] closed ${closed} abandoned shift(s)`);
+            }
+        })
+        .catch((error) => console.error("[ATTENDANCE] cleanup failed:", error.message));
+}, 10 * 60 * 1000).unref();
+
 // Exported so tests can start the real app against a scratch database and
 // shut it down again. Nothing here runs differently when the server is
 // started normally with `node server.js`.

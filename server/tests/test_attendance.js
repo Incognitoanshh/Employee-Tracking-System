@@ -163,6 +163,83 @@ async function main() {
                 .find((r) => r.employee_id === "E001") || {}).status === "online",
             "Offline beside a Last Seen of 'just now' is what this looked like");
 
+        console.log("\nSigning in again after the app was closed at lunchtime");
+        // The other half of the same bug, and the one that bites every day
+        // rather than every few days: close the app at ten, sign in at six,
+        // and the row in between used to be stamped with the moment of the
+        // new login — eight hours on the timesheet for one hour of work.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM active_sessions WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '8 hours')`);
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','KEYBOARD',
+                          (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 hours')`);
+        const again = await login("rajesh", "rajesh-laptop");
+        await api("POST", "/attendance/login", { token: again, body: {} });
+        const lunch = Number(psql(DB,
+            `SELECT round(EXTRACT(EPOCH FROM total_hours)/3600)
+               FROM attendance
+              WHERE employee_id = 'E001' AND logout_time IS NOT NULL
+              ORDER BY id DESC LIMIT 1`));
+        check("the closed shift records the hour actually worked, not the eight since",
+            lunch === 1,
+            `${lunch} hours recorded — 8 is the whole gap, which nobody worked`);
+
+        console.log("\nA shift nobody ever closed");
+        // THE 94-HOUR SHIFT. Closing the app without signing out leaves the
+        // row open, and it used to stay open until that person's next login —
+        // which then recorded everything in between as one shift. A real row
+        // in the customer's database read 94:38:22 for exactly this reason,
+        // and it goes into the timesheet.
+        //
+        // It also made two screens disagree: Attendance said ACTIVE, because
+        // the rule there is "no logout_time", while the employee list said
+        // Offline, because presence treats a row older than a full shift as
+        // abandoned.
+        const { closeAbandonedShifts } = require(
+            path.join(root, "server", "utils", "attendance_cleanup"));
+
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM active_sessions WHERE employee_id = 'E001'`);
+        // Signed in two days ago, last heard from two hours after that.
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 days')`);
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','KEYBOARD',
+                          (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 days' + INTERVAL '2 hours')`);
+
+        let closed = await closeAbandonedShifts(pool);
+        check("the abandoned shift is closed", closed === 1, `${closed} closed`);
+        const hours = Number(psql(DB,
+            `SELECT round(EXTRACT(EPOCH FROM total_hours)/3600)
+               FROM attendance WHERE employee_id = 'E001'`));
+        check("at the last moment there was evidence of them, not at 'now'",
+            hours === 2,
+            `${hours} hours recorded — 48 would mean it counted the days nobody worked`);
+
+        // Somebody still at work must never be signed out by this, however
+        // long their shift has run.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '20 hours')`);
+        psql(DB, `INSERT INTO active_sessions (employee_id, token, login_time, last_seen)
+                  VALUES ('E001','live-token', NOW(), NOW())`);
+        closed = await closeAbandonedShifts(pool);
+        check("a long shift with a LIVE session is left alone", closed === 0,
+            `${closed} closed — an employee at work was signed out`);
+
+        // And a shift that simply started this morning is nobody's business.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM active_sessions WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '3 hours')`);
+        closed = await closeAbandonedShifts(pool);
+        check("and a shift from this morning is untouched", closed === 0,
+            `${closed} closed`);
+
         console.log("\nWhen the write itself fails");
         // THE BROKEN CATCH. employee_id is VARCHAR(50); 300 characters cannot
         // be stored, so the insert fails and the error path runs — which is
