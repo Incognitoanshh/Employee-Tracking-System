@@ -1,10 +1,10 @@
 name: Build Cross-Platform Desktop Apps
 
-# Shown against each run in the Actions list. "test 3" — the round after the
-# forced-logout, macOS notification and Screen Recording fixes found during
-# live testing of test 2. Still no tag, so the release job below does not run
+# Shown against each run in the Actions list. "test 4" — the round that fixes
+# attendance never being recorded after the first login, which made working
+# employees read as Offline. Still no tag, so the release job below does not run
 # and nothing is published.
-run-name: test 3
+run-name: test 4
 
 on:
   push:
@@ -180,7 +180,7 @@ jobs:
       - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
-          name: test-3-Windows-Installer
+          name: test-4-Windows-Installer
           path: installer_out/Amaze-Connect-Setup.exe
 
   build-mac:
@@ -237,7 +237,7 @@ jobs:
       - name: Upload Mac DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: test-3-Mac-DMG
+          name: test-4-Mac-DMG
           path: dmg_out/Amaze-Connect.dmg
 
   # ── the release ────────────────────────────────────────────────────────
@@ -271,9 +271,9 @@ jobs:
           # A file called "Setup.exe" on a release page tells nobody which
           # build it is. Somebody reporting a bug should be able to say so
           # from the filename alone.
-          cp "installers/test-3-Windows-Installer/Amaze-Connect-Setup.exe" \
+          cp "installers/test-4-Windows-Installer/Amaze-Connect-Setup.exe" \
              "release/Amaze-Connect-${VERSION}-Windows-Setup.exe"
-          cp "installers/test-3-Mac-DMG/Amaze-Connect.dmg" \
+          cp "installers/test-4-Mac-DMG/Amaze-Connect.dmg" \
              "release/Amaze-Connect-${VERSION}-macOS.dmg"
           ls -lh release
 

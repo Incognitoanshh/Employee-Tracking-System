@@ -77,11 +77,19 @@ def for_messages(messages, *, me, open_channel_id=None, window_active=False,
             continue                                  # a withdrawal is not news
         channel_id = message.get("channel_id")
 
-        # The one you are looking at, with the window in front of you.
-        # `window_active` is required: the same conversation left open behind
-        # a browser is not being read.
-        if window_active and channel_id == open_channel_id:
-            continue
+        # EVERY message is announced, including the conversation open in
+        # front of you. That is the owner's decision, asked for in those
+        # words — "khuli chat pe bhi notification aana chahiye" — after
+        # messages arrived in an open chat with nothing to show for it.
+        #
+        # The rule used to be the opposite, on the reasoning that notifying
+        # about a message you are watching arrive is noise. It is not worth
+        # the doubt it creates: somebody who is told nothing cannot tell a
+        # working notification from a broken one.
+        #
+        # `open_channel_id` and `window_active` are still taken, and still
+        # passed by both panels, because the difference is real and the next
+        # person to want it back should not have to re-thread it.
 
         who = str(message.get("sender_name") or "Somebody").strip()
         where = str(names.get(channel_id) or "").strip()

@@ -9,25 +9,6 @@ from client.core.config import API_BASE_URL
 class ShiftManager:
 
     @staticmethod
-    def _has_open_server_session(employee_id, auth_token):
-        """Ask the server whether an open session already exists."""
-        try:
-            response = _http.get(
-                f"{API_BASE_URL}/attendance/all",
-                headers={"Authorization": f"Bearer {auth_token}"},
-                params={"employee_id": employee_id},
-                timeout=10
-            )
-            data = response.json()
-            if data.get("success") and data.get("data"):
-                for record in data["data"]:
-                    if not record.get("logout_time"):
-                        return True  # Already active session hai
-        except Exception:
-            pass
-        return False
-
-    @staticmethod
     def start_shift():
         """Local write plus server sync — unchanged for existing callers."""
         login_time = ShiftManager.start_shift_local()
@@ -83,9 +64,21 @@ class ShiftManager:
         if not employee_id or not login_time:
             return
 
-        # Skip if the server already has an open session for this employee
-        if ShiftManager._has_open_server_session(employee_id, auth_token):
-            return
+        # ALWAYS POST. There used to be a check here that skipped this
+        # whenever the server already had an open attendance row — and that
+        # is exactly the state a crash, a force quit or a flat battery leaves
+        # behind, because nothing closed the old row.
+        #
+        # What it cost, seen on a real installation: a row opened on 8 August
+        # was still open on 12 August, and every login in between was skipped
+        # because of it. Presence treats an attendance row older than sixteen
+        # hours as abandoned rather than open, so the employee list showed
+        # "Offline" beside a Last Seen of "Just now" — signed in, working, and
+        # counted as away, with the dashboard reporting nobody online.
+        #
+        # The server's /attendance/login already closes any open row before it
+        # opens a new one; it is written to be called on every login. This
+        # check did nothing but stop that from ever happening a second time.
 
         try:
             _http.post(

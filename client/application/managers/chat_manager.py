@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Callable, Optional
@@ -55,6 +56,11 @@ INTERVAL_BACKGROUND = 60
 # their laptop after a long outage should not wait ten minutes for their first
 # poll to come round again.
 MAX_BACKOFF = 120
+
+# Administrative alerts are about hours and days, not seconds, and the query
+# behind them is the expensive one. Five minutes is as timely as this needs
+# to be.
+ALERT_POLL_SECONDS = 300
 
 CURSOR_KEY = "chat_cursor"
 MAX_BODY = 2000
@@ -102,6 +108,11 @@ class ChatManager(QObject):
         # and every one of those is itself uploaded — the flood that filled
         # the production audit log.
         self._session_over = False
+        # Administrative alerts are worked out fresh by the server on demand;
+        # they are not rows anybody inserts, so they never travelled on this
+        # poll. See _poll_alerts.
+        self._alerts_checked_at = 0.0
+        self._alerts_seen: set[str] = set()
         self._lock = threading.Lock()
 
     # ── lifecycle ───────────────────────────────────────────────────────
@@ -218,6 +229,7 @@ class ChatManager(QObject):
             try:
                 self._flush_outbox()
                 self._poll()
+                self._poll_alerts()
             except Exception as error:                  # never kill the thread
                 LoggerService.log_verbose(f"ChatManager: unexpected error — {error}")
 
@@ -232,6 +244,62 @@ class ChatManager(QObject):
             if not self._app_focused:
                 return INTERVAL_BACKGROUND
             return INTERVAL_ACTIVE_CHAT if self._active_channel else INTERVAL_APP_OPEN
+
+    def _poll_alerts(self) -> None:
+        """Administrative alerts, for the people they are addressed to.
+
+        THE GAP THIS CLOSES. "admin or super admin ko alert ka bhi message
+        aaye" was built at both ends and joined at neither: the panel knows
+        how to announce an alert, and the server knows how to work one out —
+        but nothing carried them between the two. /admin/alerts computes them
+        fresh on every request and writes nothing down, and the poll only ever
+        carried rows from the notifications table. So the Alerts page could
+        show three things needing attention while the desktop stayed silent,
+        which is how it was found.
+
+        Asked on a slow clock of its own. Alerts are about hours and days —
+        an app that has not reported since Tuesday, a shift nobody logged in
+        for — so five minutes is as good as five seconds, and the query is
+        expensive enough that asking it every few seconds for every admin
+        would be a poor trade.
+
+        Each alert is announced ONCE. They are recomputed every time and stay
+        true until somebody acts, so without a memory of what has been said
+        the same three would pop up all day and be turned off by lunchtime.
+        """
+        role = getattr(SessionManager, "role", "")
+        if role not in ("admin", "super_admin"):
+            return
+        now = time.time()
+        if now - self._alerts_checked_at < ALERT_POLL_SECONDS:
+            return
+        self._alerts_checked_at = now
+
+        try:
+            response = _http.get(f"{API_BASE_URL}/admin/alerts",
+                                 headers=self._headers(), timeout=15)
+            if response.status_code != 200:
+                return
+            alerts = response.json().get("alerts") or []
+        except Exception:
+            return          # a missed alert check is not worth a log line
+
+        fresh = []
+        for alert in alerts:
+            # Identity, not equality: "No data for 3 d" becomes "4 d"
+            # tomorrow, and that is the same problem, not a new one.
+            key = f"{alert.get('employee_id')}:{alert.get('type')}"
+            if key in self._alerts_seen:
+                continue
+            self._alerts_seen.add(key)
+            fresh.append(alert)
+
+        # What has stopped being true can be announced again if it returns.
+        self._alerts_seen &= {
+            f"{a.get('employee_id')}:{a.get('type')}" for a in alerts}
+
+        if fresh:
+            self.notifications.emit(fresh)
 
     def _headers(self) -> dict:
         return {

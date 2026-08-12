@@ -84,16 +84,17 @@ def main():
     out = shown([message(deleted=True, body="")])
     check("somebody withdrawing one", out == [], str(out))
 
+    print("\nWhat DOES interrupt, by the owner's decision")
+    # This was the other way round until somebody sat with a chat open,
+    # watched messages arrive and got nothing — and could not tell a working
+    # notification from a broken one. Asked for directly: every message is
+    # announced, the open conversation included.
     out = shown([message()], open_channel_id=10, window_active=True)
-    check("the conversation you are looking at, with the window in front",
-          out == [],
-          "notifying about a message you are watching arrive is how people "
-          "learn to switch the whole thing off")
+    check("even the conversation you are looking at", len(out) == 1, str(out))
 
     out = shown([message()], open_channel_id=10, window_active=False)
-    check("BUT the same conversation behind another window still counts",
-          len(out) == 1,
-          "an open page you cannot see is not being read")
+    check("and the same conversation behind another window",
+          len(out) == 1, str(out))
 
     out = shown([message(channel_id=11)], open_channel_id=10, window_active=True)
     check("and a different channel always counts", len(out) == 1, str(out))

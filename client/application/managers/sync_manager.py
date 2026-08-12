@@ -307,9 +307,30 @@ class SyncManager:
 
         for log in pending_logs[:max_retries]:
             try:
+                activity = str(log["activity"] or "")
+
+                # A QUEUE FULL OF ITS OWN FAILURES, left by an older build.
+                #
+                # Before this loop stopped writing through LoggerService, every
+                # failed send created a row saying so — and that row went into
+                # the same queue. A machine that spent a while with a dead
+                # session collected hundreds of them. They are diagnostics
+                # about the queue, not anything an employee did, and uploading
+                # them now puts "retry_logs failed — HTTP 401" into the
+                # company's audit log a row at a time, which is exactly what it
+                # looks like on the Audit Logs page: a flood with today's
+                # timestamps and an old message inside.
+                #
+                # Dropped here rather than sent. Nothing is lost that anybody
+                # would ever want to read, and a machine upgrading with a
+                # backlog no longer empties it into the record.
+                if activity.startswith("SyncManager: retry_logs failed"):
+                    SyncManager.mark_log_uploaded(log["id"])
+                    continue
+
                 payload = {
                     "employee_id": log["employee_id"],
-                    "activity": log["activity"],
+                    "activity": activity,
                 }
 
                 response = _http.post(

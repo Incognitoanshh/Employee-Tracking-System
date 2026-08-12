@@ -242,6 +242,106 @@ def main():
               cfg.get("screenshots_per_day") == 20,
               json.dumps(cfg)[:200])
 
+        print("\nA login always records attendance")
+        # REPORTED LIVE: an employee signed in and working showed "Offline"
+        # beside a Last Seen of "Just now", and the dashboard said nobody was
+        # online.
+        #
+        # The client used to ask the server whether an attendance row was
+        # already open and skip recording if one was — and an open row is
+        # exactly what a crash or a force quit leaves behind. On the real
+        # installation a row opened on 8 August was still open on the 12th,
+        # and every login in between had been skipped because of it. Presence
+        # treats a row older than sixteen hours as abandoned rather than open,
+        # so the person read as away while plainly at work.
+        #
+        # The server closes any open row before opening a new one; it is
+        # written to be called on every login.
+        from client.application.managers.shift_manager import ShiftManager
+        SessionManager.employee_id = "E001"
+        SessionManager.auth_token = emp["token"]
+        SessionManager.role = "employee"
+
+        psql(db_name, "DELETE FROM attendance WHERE employee_id = 'E001'")
+        psql(db_name,
+             "INSERT INTO attendance (employee_id, login_time) VALUES "
+             "('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '4 days')")
+
+        ShiftManager.start_shift_remote("2026-08-12 09:33:00")
+
+        rows = psql(db_name,
+                    "SELECT count(*) FROM attendance WHERE employee_id='E001' "
+                    "AND logout_time IS NULL AND login_time > "
+                    "(NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour'").stdout.strip()
+        check("a fresh row is written even though an old one was left open",
+              rows == "1",
+              f"{rows} recent open rows — the login was skipped, which is the "
+              f"bug that made a working employee read as Offline")
+        stale = psql(db_name,
+                     "SELECT count(*) FROM attendance WHERE employee_id='E001' "
+                     "AND logout_time IS NULL AND login_time < "
+                     "(NOW() AT TIME ZONE 'UTC') - INTERVAL '1 day'").stdout.strip()
+        check("and the abandoned one is closed on the way",
+              stale == "0", f"{stale} four-day-old rows still open")
+
+        listed = requests.get(f"{base}/admin/employees", headers=admin_h,
+                              timeout=10).json()
+        me = {e["employee_id"]: e for e in (listed.get("data") or [])}.get("E001", {})
+        check("so the employee list finally says Online",
+              me.get("status") == "online", str(me)[:200])
+
+        print("\nAdministrative alerts reach the desktop")
+        # THE GAP THIS CLOSES, found live: the Alerts page listed three things
+        # needing attention and no notification ever appeared. /admin/alerts
+        # computes them fresh and writes nothing down, so they were never in
+        # the notifications table the poll reads — the feature was built at
+        # both ends and joined at neither.
+        from client.application.managers import chat_manager as cm
+        SessionManager.role = "admin"
+        SessionManager.auth_token = admin["token"]
+
+        # Somebody the app was never installed for — the plainest of the
+        # three rules, and one an administrator genuinely needs telling about.
+        psql(db_name,
+             "INSERT INTO employees (employee_id, username, password, role, "
+             f"full_name) VALUES ('E404','never','{pw}','employee','Never Started')")
+
+        raw = requests.get(f"{base}/admin/alerts", headers=admin_h, timeout=15).json()
+        print(f"    (server says: enabled={raw.get('enabled')}, "
+              f"total={raw.get('total')})")
+        chat = cm.ChatManager()
+        announced = []
+        chat.notifications.connect(lambda items: announced.extend(items))
+        chat._poll_alerts()
+        check("an admin's client is told what needs attention",
+              len(announced) >= 1,
+              "nothing came through — the Alerts page can show three things "
+              "while the desktop stays silent")
+        if announced:
+            check("with the words the page shows",
+                  bool(announced[0].get("title")), str(announced[0])[:200])
+            from client.application.services import notifier
+            shown = notifier.for_alerts(announced, role="admin")
+            check("and the panel would put it on screen", len(shown) >= 1,
+                  str(shown)[:200])
+
+        before = len(announced)
+        chat._alerts_checked_at = 0          # as the next five minutes would
+        chat._poll_alerts()
+        check("the SAME alert is not announced again five minutes later",
+              len(announced) == before,
+              "these stay true until somebody acts, so repeating them is how "
+              "notifications get switched off")
+
+        SessionManager.role = "employee"
+        chat2 = cm.ChatManager()
+        employee_saw = []
+        chat2.notifications.connect(lambda items: employee_saw.extend(items))
+        chat2._poll_alerts()
+        check("an employee's client never even asks for them",
+              employee_saw == [],
+              "'EM103 has stopped reporting' is not an employee's business")
+
     finally:
         if server:
             server.terminate()
