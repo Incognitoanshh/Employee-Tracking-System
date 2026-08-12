@@ -4702,8 +4702,13 @@ class _Sidebar(QFrame):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: list[QPushButton] = []
+        # Kept by key as well as by position, so the unread count can find
+        # its own button without counting menu entries.
+        self._nav_by_key: dict = {}
+        self._nav_base_text: dict = {}
         for i, page in enumerate(PAGES):
-            btn = QPushButton(f"{page['icon']}    {page['title']}")
+            label = f"{page['icon']}    {page['title']}"
+            btn = QPushButton(label)
             btn.setProperty("variant", "navitem")
             btn.setCheckable(True)
             btn.setFixedHeight(42)
@@ -4711,9 +4716,22 @@ class _Sidebar(QFrame):
             self._group.addButton(btn, i)
             nav_lay.addWidget(btn)
             self._buttons.append(btn)
+            self._nav_by_key[page["key"]] = btn
+            self._nav_base_text[page["key"]] = label
 
         self._buttons[0].setChecked(True)
         self._group.idClicked.connect(self.pageChanged.emit)
+
+        # An unread count on the menu itself.
+        #
+        # Reported after a message arrived and nobody knew: the count was only
+        # ever drawn on the channel row INSIDE My Chat, so it could only be
+        # seen by somebody already looking at the page they would have needed
+        # the count to tell them to open.
+        #
+        # The number goes into the button's own text rather than a badge
+        # floating over it — a separate widget positioned on top of a button
+        # drifts when the sidebar is resized, and this cannot.
 
         nav_lay.addStretch()
         root.addWidget(nav_wrap, 1)
@@ -4769,6 +4787,21 @@ class _Sidebar(QFrame):
         f_lay.addWidget(self.logout_btn)
 
         root.addWidget(footer)
+
+
+    def set_unread(self, key: str, count: int) -> None:
+        """Put an unread count on a menu entry, or take it off at zero.
+
+        Capped at 99+, because the number stops being useful long before it
+        stops fitting.
+        """
+        button = getattr(self, "_nav_by_key", {}).get(key)
+        if button is None:
+            return
+        base = self._nav_base_text.get(key, button.text())
+        count = max(0, int(count or 0))
+        button.setText(base if count == 0
+                       else f"{base}   ({count if count < 100 else '99+'})")
 
 
 class _TopHeader(QFrame):
@@ -5006,6 +5039,10 @@ class AdminConfigPanel(QMainWindow):
         self._teams_tab       = _TeamsTab()
         from client.presentation.windows.team_page import TeamPage
         self._mychat_tab      = TeamPage(self, self.chat)
+        # The count reaches the sidebar, so an unread message is visible from
+        # any page — not only from inside the one it arrived in.
+        self._mychat_tab.unread_changed.connect(
+            lambda total: self.sidebar.set_unread("mychat", total))
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
 
