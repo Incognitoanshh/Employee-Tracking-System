@@ -81,6 +81,8 @@ MOMENTS = [
 def collect() -> dict:
     """Run the real scheduler for every combination and return its plan."""
     os.environ["ETS_DATA_DIR"] = tempfile.mkdtemp()
+    # And nowhere near a real server — the client's default is production.
+    os.environ.setdefault("API_BASE_URL", "http://127.0.0.1:9/api")
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

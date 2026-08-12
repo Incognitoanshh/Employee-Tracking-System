@@ -12,8 +12,22 @@ Run:  python3 tests/test_notifications.py
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# ISOLATED FROM ANYTHING REAL, BEFORE ANY CLIENT MODULE IS IMPORTED.
+#
+# Without these two the client's own config falls back to its defaults: the
+# installed app's data directory, and the PRODUCTION server. Running this file
+# on a machine that has the app installed then wrote into the real local
+# database and uploaded to the real server — rows under a made-up employee id
+# turned up in the company's audit log, which is exactly what happened.
+#
+# setdefault, so a harness that points these somewhere on purpose still wins.
+os.environ.setdefault("ETS_DATA_DIR", tempfile.mkdtemp(prefix="ets_test_"))
+os.environ.setdefault("API_BASE_URL", "http://127.0.0.1:9/api")
 
 failures = 0
 
