@@ -170,3 +170,71 @@ def collapse(items, limit=3):
         "channel_id": None,
     })
     return head
+
+
+def deliver(tray, title, body):
+    """Actually put it on the screen, on whichever desktop this is.
+
+    Reported from a real machine: notifications appeared on Windows and never
+    on macOS. Nothing was wrong with the deciding above — the delivery was.
+
+    `QSystemTrayIcon.showMessage` is a request to the platform's notification
+    service, and macOS grants it only to a signed, bundled application the
+    user has allowed in Notification Center. Ours is neither, so the call
+    returns cleanly and NOTHING APPEARS — no exception, no warning. The most
+    expensive kind of failure, because everything looks like it worked.
+
+    macOS has a second door that does not care about any of that:
+    `display notification` through osascript. A subprocess per notification
+    costs a few tens of milliseconds, which is irrelevant at the rate people
+    receive messages, and `collapse` above already caps a burst at four.
+
+    The tray is still asked on every platform — it is what works on Windows
+    and Linux, and on macOS it is a no-op rather than a duplicate. The sound
+    follows the same split: AppleScript plays its own, so beeping as well
+    would be two sounds for one message.
+
+    Returns True when something was shown.
+    """
+    import sys
+
+    mac = sys.platform == "darwin"
+    shown = False
+
+    if tray is not None:
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon, QApplication
+            tray.showMessage(title, body,
+                             QSystemTrayIcon.MessageIcon.Information, 6000)
+            shown = not mac
+            if not mac:
+                # A SOUND ON EVERY NOTIFICATION, by the owner's decision —
+                # group messages and administrative alerts included, not only
+                # what is addressed to this person by name.
+                QApplication.beep()
+        except Exception:
+            # A notification that cannot be shown must never take the panel
+            # down with it — this runs off a poll, on every arrival.
+            pass
+
+    if mac:
+        try:
+            import subprocess
+            script = (
+                f"display notification {_applescript_string(body)} "
+                f"with title {_applescript_string(title)} "
+                f'sound name "Ping"'
+            )
+            subprocess.run(["osascript", "-e", script],
+                           capture_output=True, timeout=10)
+            shown = True
+        except Exception:
+            pass
+
+    return shown
+
+
+def _applescript_string(text):
+    """A literal AppleScript string, safely."""
+    text = str(text or "").replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + text.replace("\n", " ") + '"'

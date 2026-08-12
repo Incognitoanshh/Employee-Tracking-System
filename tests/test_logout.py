@@ -104,6 +104,106 @@ def main():
         auth_service.LoggerService.log = real_log
         SessionManager.auth_token = None
 
+    print("\nWhen the server ends the session")
+    # THE ONE REPORTED FROM A REAL MACHINE. An administrator forced a logout;
+    # the server cleared the token exactly as it should, so every request came
+    # back 401 — and the client did nothing with it. The panel stayed open
+    # saying "ONLINE · Tracking Active" for an account that had been signed
+    # out, and the retry loops kept firing at a dead session, writing a log
+    # line per failure. Force logout looked broken. It was not; the client had
+    # simply never been taught to notice.
+    from client.application.managers import config_sync_manager as csm
+
+    class _Reply:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = str(self._payload)
+
+        def json(self):
+            return self._payload
+
+    for status, payload, should_sign_out, label in [
+        (401, {"message": "Session expired"}, True, "a 401"),
+        (403, {"suspended": True, "message": "You are suspended."}, True,
+         "a suspension"),
+        (500, {"message": "Internal server error"}, False,
+         "a server fault — that is not a sign-out"),
+        (503, {}, False, "a server restarting"),
+    ]:
+        signed_out = []
+        sync = csm.ConfigSyncManager(
+            employee_id="E001", device_id="d", auth_token="t",
+            on_new_config=lambda *a, **k: None,
+            on_force_logout=lambda *a, **k: signed_out.append(True),
+            sync_interval=999)
+        real = csm._http.post
+        csm._http.post = lambda *a, **k: _Reply(status, payload)
+        try:
+            sync._do_sync()
+        except Exception:
+            pass
+        finally:
+            csm._http.post = real
+        check(f"{label} → {'signs out' if should_sign_out else 'keeps working'}",
+              bool(signed_out) == should_sign_out,
+              f"status {status} did the opposite")
+
+    print("\nAnd the chat poll notices first")
+    # The config sync runs on a long interval; the chat poll runs every few
+    # seconds, so it is what actually sees a forced logout. Reported live:
+    # "employee panel khula h login window ni aaya aur ye chat manager wala
+    # continuesly aarha h" — one "poll HTTP 401" line per attempt, each one
+    # itself uploaded, for as long as the app was left open.
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _os.environ.setdefault("SCREENSHOT_ENCRYPTION_KEY",
+                           "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from client.application.managers import chat_manager as cm
+
+    for status in (401, 403):
+        chat = cm.ChatManager()
+        ended = []
+        chat.session_ended.connect(lambda why: ended.append(why))
+        written = []
+        real_write = cm.LoggerService.log
+        cm.LoggerService.log = lambda m, *a, **k: written.append(str(m))
+        real_get = cm._http.get
+        cm._http.get = lambda *a, **k: _Reply(status, {"message": "Session"})
+        try:
+            for _ in range(5):        # five polls, as a left-open app would
+                chat._poll()
+        finally:
+            cm._http.get = real_get
+            cm.LoggerService.log = real_write
+
+        check(f"HTTP {status} on the poll → the panel is told to sign out",
+              len(ended) == 1, f"{len(ended)} — expected exactly one")
+        # "ChatManager: stopped" is in there too and belongs there — it is
+        # written once, on the way down. What must not repeat is the failure.
+        ended_lines = [m for m in written if "SESSION ENDED" in m]
+        check(f"HTTP {status} is written down ONCE, not once per poll",
+              len(ended_lines) == 1 and not any("poll HTTP" in m
+                                                for m in written),
+              f"{written} — every one of these is itself uploaded, which is "
+              f"what flooded the audit log")
+        check(f"HTTP {status} stops the loop — this token is dead",
+              chat._stop.is_set(), "it would keep asking a dead session")
+
+    chat = cm.ChatManager()
+    ended = []
+    chat.session_ended.connect(lambda why: ended.append(why))
+    real_get = cm._http.get
+    cm._http.get = lambda *a, **k: _Reply(503, {})
+    try:
+        chat._poll()
+    finally:
+        cm._http.get = real_get
+    check("a server fault does NOT sign anybody out", ended == [], str(ended))
+    check("and leaves the poll running", not chat._stop.is_set())
+
     print("\nBoth panels use it")
     # One helper, called from both, because a third sign-out path added later
     # would otherwise repeat the same omission.

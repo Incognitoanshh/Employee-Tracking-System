@@ -58,6 +58,18 @@ const MAX_SHIFT_HOURS = 16;
  */
 function isOnlineSql(alias = "e") {
     return `(
+        CASE WHEN ${alias}.role IN ('admin', 'super_admin') THEN
+            -- AN ADMINISTRATOR HAS NO SHIFT, so there is no attendance row to
+            -- look for and never will be — they are not a tracked employee.
+            -- Requiring one made an admin read "Offline" while they were
+            -- plainly using the panel, with "Last seen: just now" beside it,
+            -- which is two statements that cannot both be true. Reported from
+            -- a real installed build.
+            --
+            -- For them the honest question is the other one: are they signed
+            -- in right now.
+            ${liveSessionSql(alias)}
+        ELSE
         EXISTS (
             SELECT 1 FROM attendance att
              WHERE att.employee_id = ${alias}.employee_id
@@ -68,7 +80,20 @@ function isOnlineSql(alias = "e") {
                AND att.login_time > (NOW() AT TIME ZONE 'UTC')
                                     - INTERVAL '${MAX_SHIFT_HOURS} hours'
         )
-        AND EXISTS (
+        AND ${liveSessionSql(alias)}
+        END
+    )`;
+}
+
+/**
+ * Has this person's app been heard from recently?
+ *
+ * Split out because it is now asked on its own for administrators and as half
+ * the answer for everybody else — and one definition of "the app is running"
+ * is better than two that can drift.
+ */
+function liveSessionSql(alias) {
+    return `EXISTS (
             SELECT 1 FROM active_sessions ses
              WHERE ses.employee_id = ${alias}.employee_id
                AND ses.token IS NOT NULL
@@ -87,8 +112,7 @@ function isOnlineSql(alias = "e") {
                -- session. Exactly the trap utils/ist_sql.js was written for.
                AND ses.last_seen > NOW()
                                    - INTERVAL '${HEARTBEAT_GRACE_MINUTES} minutes'
-        )
-    )`;
+        )`;
 }
 
 module.exports = { isOnlineSql, HEARTBEAT_GRACE_MINUTES, MAX_SHIFT_HOURS };

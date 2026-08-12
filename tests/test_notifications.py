@@ -234,9 +234,63 @@ def main():
     # The owner's decision: everything makes a sound, group messages and
     # administrative alerts included — not only what names you. Two messages
     # were delivered to each panel, so two sounds each.
-    check("a sound fires for EVERY notification, on both panels",
-          beeps.count("employee panel") == 2 and beeps.count("admin panel") == 2,
-          f"{beeps} — expected two each, one per message shown")
+    #
+    # On macOS the sound comes from AppleScript instead (below), so beeping
+    # here as well would be two sounds for one message.
+    if sys.platform != "darwin":
+        check("a sound fires for EVERY notification, on both panels",
+              beeps.count("employee panel") == 2
+              and beeps.count("admin panel") == 2,
+              f"{beeps} — expected two each, one per message shown")
+
+    print("\nOn macOS, where the tray is silently ignored")
+    # REPORTED FROM A REAL MACHINE: "windows pe notification aa rha hai but
+    # mac pe ni". Qt's showMessage needs a signed, permitted bundle on macOS;
+    # ours is neither, so it returns cleanly and nothing appears. This drives
+    # the delivery as macOS to prove the second door is taken.
+    import subprocess as _sp
+    real_platform = sys.platform
+    real_run = _sp.run
+    ran, kwargs = [], []
+    sys.platform = "darwin"
+
+    def _fake_run(cmd, **kw):
+        ran.append(cmd)
+        kwargs.append(kw)
+        return type("R", (), {"returncode": 0})()
+
+    _sp.run = _fake_run
+    try:
+        tray = _FakeTray()
+        ok = notifier.deliver(tray, 'Sneha "S" Iyer messaged you',
+                              'line one\nline "two"')
+    finally:
+        sys.platform = real_platform
+        _sp.run = real_run
+
+    check("something is actually shown", ok is True, str(ok))
+    check("through osascript, not the tray",
+          bool(ran) and ran[0][0] == "osascript", str(ran))
+    script = ran[0][-1] if ran else ""
+    check("as a notification, with the title and the words",
+          "display notification" in script
+          and "messaged you" in script and "line one" in script, script)
+    check("carrying a sound of its own", 'sound name "Ping"' in script, script)
+    check("and quotes in somebody's message do not break the script",
+          script.count('\\"') == 4 and script.count("\n") == 0, script)
+    check("with a timeout — a stuck osascript must not stall the poll",
+          bool(kwargs) and kwargs[0].get("timeout"), str(kwargs))
+
+    print("\nAnd with no tray at all on macOS")
+    sys.platform = "darwin"
+    _sp.run = _fake_run
+    try:
+        ok = notifier.deliver(None, "Title", "Body")
+    finally:
+        sys.platform = real_platform
+        _sp.run = real_run
+    check("it still gets through — macOS never needed the tray", ok is True,
+          str(ok))
 
     print("\nAdministrative alerts make a sound too")
     panel = ep.EmployeePanel.__new__(ep.EmployeePanel)
@@ -244,18 +298,25 @@ def main():
     panel.tray = tray
     ep.SessionManager.role = "admin"
     import PySide6.QtWidgets as _qt
-    alert_beeps = []
+    alert_sounds = []
     real_beep = _qt.QApplication.beep
-    _qt.QApplication.beep = staticmethod(lambda: alert_beeps.append(1))
+    _qt.QApplication.beep = staticmethod(lambda: alert_sounds.append("beep"))
+    real_run2 = _sp.run
+    _sp.run = lambda cmd, **kw: alert_sounds.append("osascript") or type(
+        "R", (), {"returncode": 0})()
     try:
         panel._on_chat_notifications([
             {"type": "NOT_REPORTING", "title": "No data for 3 d",
              "detail": "The app has sent nothing."}])
     finally:
         _qt.QApplication.beep = real_beep
+        _sp.run = real_run2
         ep.SessionManager.role = "employee"
     check("an admin alert reaches the tray", len(tray.shown) == 1, str(tray.shown))
-    check("and makes a sound", len(alert_beeps) == 1, str(alert_beeps))
+    # Whichever way this desktop makes a noise — AppleScript on macOS, Qt
+    # elsewhere — exactly one sound for one alert.
+    check("and makes a sound, on this platform's own path",
+          len(alert_sounds) == 1, str(alert_sounds))
 
     print("\nWhen there is no tray")
     # On a machine with no system tray — some Linux desktops — showMessage is

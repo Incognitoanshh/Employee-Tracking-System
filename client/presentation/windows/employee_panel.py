@@ -1465,24 +1465,10 @@ class EmployeePanel(QWidget):
             self._notify(item["title"], item["body"], kind=item["kind"])
 
     def _notify(self, title: str, body: str, kind: str = notifier.NORMAL):
-        tray = getattr(self, "tray", None)
-        if tray is None:
-            return
-        try:
-            from PySide6.QtWidgets import QSystemTrayIcon, QApplication
-            tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 6000)
-            # A SOUND ON EVERY NOTIFICATION, by the owner's decision — group
-            # messages and administrative alerts included, not only what is
-            # addressed to this person by name.
-            #
-            # `kind` still separates them for the wording, and the collapse in
-            # notifier keeps a batch to four, so coming back from an outage is
-            # four sounds rather than forty.
-            QApplication.beep()
-        except Exception:
-            # A notification that cannot be shown must never take the panel
-            # down with it — this runs off a poll, on every arrival.
-            pass
+        # One delivery path for both panels, in notifier, because the reason
+        # macOS showed nothing is a platform detail that has no business
+        # being duplicated in two windows.
+        notifier.deliver(getattr(self, "tray", None), title, body)
 
     # ── services ────────────────────────────────────────────────────────
     def _load_session_start(self):
@@ -1520,6 +1506,11 @@ class EmployeePanel(QWidget):
         # already looking at the thing it is meant to draw them to.
         self.chat.messages.connect(self._on_chat_messages)
         self.chat.notifications.connect(self._on_chat_notifications)
+        # The chat poll runs every few seconds — far sooner than the config
+        # sync — so it is the first thing to learn that a forced logout has
+        # happened. Reported live: the panel stayed open and "ONLINE" after an
+        # administrator ended the session.
+        self.chat.session_ended.connect(self.logout)
         self.chat.start()
 
     def _start_timers(self):
@@ -1785,6 +1776,12 @@ class EmployeePanel(QWidget):
         Without showing it the app just returns to the login screen for no
         stated cause, which reads as a crash and gets reported as one.
         """
+        # Both the chat poll and the config sync can notice the same forced
+        # logout within a second of each other. One sign-out, one message box.
+        if getattr(self, "_signing_out", False):
+            return
+        self._signing_out = True
+
         if reason:
             try:
                 QMessageBox.warning(self, "Signed out", reason)

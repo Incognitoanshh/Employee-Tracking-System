@@ -322,11 +322,32 @@ class SyncManager:
                 if 200 <= response.status_code < 300:
                     SyncManager.mark_log_uploaded(log["id"])
                 else:
-                    LoggerService.log(
+                    # TO A FILE, NOT THROUGH LoggerService.log — and this is the
+                    # whole point.
+                    #
+                    # LoggerService.log writes a row into pending_logs, the very
+                    # queue this loop is draining. So a failure to send a log
+                    # created another log to send, which failed, which created
+                    # another. Twenty failures a pass meant twenty new rows a
+                    # pass: the queue grew instead of draining, and when the
+                    # session finally worked the whole pile landed in the
+                    # company's audit log. Seen in production — 861 rows of
+                    # "retry_logs failed", climbing every second.
+                    #
+                    # A 401 here is the ordinary case, not an emergency: the
+                    # session ended and the client has not signed in again yet.
+                    LoggerService._fallback_critical_log(
                         f"SyncManager: retry_logs failed for log {log['id']} — "
                         f"HTTP {response.status_code} {response.text[:200]}"
                     )
+                    # Nothing else in this pass will fare any better against
+                    # the same dead session, so stop rather than burning
+                    # nineteen more requests on it.
+                    if response.status_code in (401, 403):
+                        return
 
             except Exception as error:
-                LoggerService.log(f"SyncManager: retry_logs error — {error}")
+                LoggerService._fallback_critical_log(
+                    f"SyncManager: retry_logs error — {error}")
+                return
 

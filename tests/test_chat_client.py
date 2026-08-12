@@ -277,6 +277,11 @@ def main():
     # An announcement channel must be read-only in the interface, not just at
     # the server — a composer that accepts text and then fails is worse than
     # no composer.
+    # As the real flow does it: the channel is opened first, which is what
+    # tells the page which reply it is waiting for. A history reply for any
+    # other channel is now dropped, so that a slow reply for the conversation
+    # you just left cannot paint itself over the one you are in.
+    page._channel_id = 2
     page._on_history({
         "channel": {"id": 2, "name": "Company Updates", "type": "ANNOUNCEMENT",
                     "team_name": "Development", "is_archived": False,
@@ -287,6 +292,7 @@ def main():
     check("and explains why instead of just being empty",
           "administrators" in page._read_only.text().lower(), page._read_only.text())
 
+    page._channel_id = 1
     page._on_history({
         "channel": {"id": 1, "name": "General", "type": "STANDARD",
                     "team_name": "Development", "is_archived": True,
@@ -570,6 +576,7 @@ def main():
                       "is_default": False, "is_private": False, "unread": 0,
                       "last_seq": 3, "last_read_seq": 3}]}]})
     page3.open_channel(7)
+    page3._channel_id = 7
     page3._on_history({
         "channel": {"id": 7, "name": "Backend", "type": "STANDARD",
                     "team_name": "Development", "is_archived": False,

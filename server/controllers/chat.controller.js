@@ -307,8 +307,31 @@ exports.getUpdates = async (req, res) => {
         const cursor = Number(head.rows[0].head);
 
         if (since === 0) {
+            // A client with no cursor — a fresh install, or a machine that has
+            // just signed in — is told where the conversation has got to
+            // rather than being replayed every message ever sent. The history
+            // it needs comes from opening a channel.
+            //
+            // BUT NOT ITS NOTIFICATIONS. Those were dropped here too, so a
+            // mention or an administrative alert raised before the first poll
+            // was never announced: the cursor jumped past it and the unread
+            // rows sat in the table unseen. They are a short list, they are
+            // already capped, and they are exactly what somebody signing in
+            // wants to be told about.
+            const first = await pool.query(
+                `SELECT n.id, n.type, n.message_seq, n.channel_id, n.created_at,
+                        c.name AS channel_name, t.name AS team_name
+                   FROM notifications n
+                   LEFT JOIN channels c ON c.id = n.channel_id
+                   LEFT JOIN teams t ON t.id = c.team_id
+                  WHERE n.employee_id = $1 AND NOT n.is_read
+                  ORDER BY n.created_at DESC
+                  LIMIT 50`,
+                [me]
+            );
             return res.json({
-                success: true, cursor, messages: [], notifications: [], deletions: [] });
+                success: true, cursor, messages: [],
+                notifications: first.rows, deletions: [] });
         }
 
         const messages = await pool.query(

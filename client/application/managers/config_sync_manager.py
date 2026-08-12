@@ -114,6 +114,28 @@ class ConfigSyncManager:
                             )
                         return None
 
+                # 401 MEANS THE SESSION IS OVER. Sign out, do not carry on.
+                #
+                # BUG this fixes, seen on a real machine: an administrator
+                # forced a logout, the server cleared the token exactly as it
+                # should, and every request from then on came back 401 — and
+                # the client did nothing with that. The panel stayed open
+                # saying "ONLINE · Tracking Active" for an account that had
+                # been signed out, and the retry loops kept firing at a dead
+                # session, writing a log line for each failure. From the
+                # outside it looked as though force logout had not worked at
+                # all; it had, and only the client had not noticed.
+                #
+                # A dropped network gives an exception rather than a 401, so
+                # acting on this cannot sign somebody out over a blip.
+                if response.status_code == 401:
+                    LoggerService.log("SESSION ENDED : signed out by the server")
+                    if self._on_force_logout:
+                        self._on_force_logout(
+                            "Your session was ended. Please sign in again."
+                        )
+                    return None
+
                 LoggerService.log_verbose(
                     f"ConfigSyncManager: HTTP {response.status_code} — {response.text[:200]}"
                 )

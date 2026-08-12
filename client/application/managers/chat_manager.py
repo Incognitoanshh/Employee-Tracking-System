@@ -83,6 +83,12 @@ class ChatManager(QObject):
     # broken while the network is down.
     online_changed = Signal(bool)
 
+    #: The server no longer accepts this session — an administrator forced a
+    #: logout, or the account was suspended or taken over on another machine.
+    #: Carries the words to show the person. Nothing else in the client can
+    #: notice this as early as the chat poll, which runs every few seconds.
+    session_ended = Signal(str)
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._stop = threading.Event()
@@ -92,6 +98,10 @@ class ChatManager(QObject):
         self._app_focused = True
         self._online = True
         self._failures = 0
+        # Said once. Without it a dead session writes a log line per poll,
+        # and every one of those is itself uploaded — the flood that filled
+        # the production audit log.
+        self._session_over = False
         self._lock = threading.Lock()
 
     # ── lifecycle ───────────────────────────────────────────────────────
@@ -377,6 +387,9 @@ class ChatManager(QObject):
         SettingsService.save_setting(CURSOR_KEY, str(int(value)))
 
     def _poll(self) -> None:
+        if self._session_over:
+            # Nothing this token asks for will ever be answered again.
+            return
         since = self.cursor()
         try:
             response = _http.get(
@@ -392,6 +405,27 @@ class ChatManager(QObject):
         except Exception as error:
             self._failures += 1
             LoggerService.log_verbose(f"ChatManager: poll failed — {error}")
+            return
+
+        if response.status_code in (401, 403):
+            # THE SESSION IS GONE, not a bad connection. Reported from a real
+            # machine: an administrator forced a logout, the panel stayed open
+            # saying ONLINE · Tracking Active, and this loop went on asking a
+            # dead session every minute — one "poll HTTP 401" line per attempt,
+            # for as long as the app was left running.
+            #
+            # Once, then stop asking, and tell the panel so it can return the
+            # person to the login screen. The loop is torn down rather than
+            # backed off: there is nothing this token can ever be right for
+            # again.
+            self._mark_online(False)
+            if not self._session_over:
+                self._session_over = True
+                LoggerService.log("SESSION ENDED : the server no longer "
+                                  "accepts this session")
+                self.session_ended.emit(
+                    "Your session was ended. Please sign in again.")
+            self.stop()
             return
 
         if response.status_code != 200:

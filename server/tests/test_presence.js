@@ -86,7 +86,8 @@ async function main() {
             ('SA001','superadmin','${hash}','super_admin','Owner'),
             ('E001','rajesh','${hash}','employee','Rajesh Kumar'),
             ('E002','amit','${hash}','employee','Amit Sharma'),
-            ('E003','sneha','${hash}','employee','Sneha Iyer')`);
+            ('E003','sneha','${hash}','employee','Sneha Iyer'),
+            ('A001','admin1','${hash}','admin','Priya Nair')`);
 
         Object.assign(process.env, {
             DB_HOST: process.env.PGHOST || "127.0.0.1",
@@ -164,6 +165,27 @@ async function main() {
         check("clocked out is offline, whatever is sitting in the tray",
             (await statusOf(sa, "E002")) === "offline", await statusOf(sa, "E002"));
 
+        console.log("\nAn administrator, who has no shift at all");
+        // Reported from a real installed build: an admin using the panel read
+        // "Offline" with "Last seen: just now" beside it. Both cannot be true.
+        // They never clock in — they are not a tracked employee — so requiring
+        // an attendance row made the answer permanently wrong. For them the
+        // honest question is whether they are signed in.
+        const adminToken = await login("admin1", "admin-desk");
+        await api("GET", "/chat/me/teams", { token: adminToken });
+        check("an admin using the panel reads as online",
+            (await statusOf(sa, "A001")) === "online",
+            `${await statusOf(sa, "A001")} — an admin has no shift to open, so `
+            + `requiring one says Offline for ever`);
+
+        psql(DB, `DELETE FROM active_sessions WHERE employee_id = 'A001'`);
+        check("and offline once they sign out",
+            (await statusOf(sa, "A001")) === "offline", await statusOf(sa, "A001"));
+
+        check("an EMPLOYEE still needs an open shift, not just a session",
+            (await statusOf(sa, "E003")) === "offline",
+            "signing in is not the same as being at work");
+
         console.log("\nSomebody who has never started");
         check("is offline, not missing", (await statusOf(sa, "E003")) === "offline",
             await statusOf(sa, "E003"));
@@ -180,8 +202,13 @@ async function main() {
             openShift(id);
             await api("GET", "/chat/me/teams", { token });
         }
+        // EMPLOYEES on both sides. The dashboard counts only employees on
+        // purpose — an administrator is not part of "how many of the workforce
+        // are working" — so comparing it against every row in the list was
+        // comparing two different questions, and started failing the moment
+        // administrators could read as online at all.
         const listed = (await api("GET", "/admin/employees", { token: sa }))
-            .body.data.filter((r) => r.status === "online").length;
+            .body.data.filter((r) => r.status === "online" && r.role === "employee").length;
         check("the list and the count are the same number",
             listed === (await onlineCount(sa)),
             `list says ${listed}, dashboard says ${await onlineCount(sa)}`);

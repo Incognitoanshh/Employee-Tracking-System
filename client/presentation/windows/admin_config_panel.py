@@ -5131,6 +5131,9 @@ class AdminConfigPanel(QMainWindow):
         # that has stopped reporting, a shift nobody logged in for — reach the
         # only people who can act on them.
         self.chat.notifications.connect(self._on_chat_alerts)
+        # Same as the employee panel: the chat poll is the first thing to
+        # notice that this session has been ended server-side.
+        self.chat.session_ended.connect(self.logout)
         self.chat.start()
 
         self.scheduler = SchedulerService()
@@ -5402,24 +5405,9 @@ class AdminConfigPanel(QMainWindow):
             self._notify_tray(item["title"], item["body"], item["kind"])
 
     def _notify_tray(self, title: str, body: str, kind: str = notifier.NORMAL):
-        tray = getattr(self, "tray", None)
-        if tray is None:
-            return
-        try:
-            from PySide6.QtWidgets import QSystemTrayIcon as _Tray, QApplication
-            tray.showMessage(title, body, _Tray.MessageIcon.Information, 6000)
-            # A SOUND ON EVERY NOTIFICATION, by the owner's decision — group
-            # messages and administrative alerts included, not only what is
-            # addressed to this person by name.
-            #
-            # `kind` still separates them for the wording, and the collapse in
-            # notifier keeps a batch to four, so coming back from an outage is
-            # four sounds rather than forty.
-            QApplication.beep()
-        except Exception:
-            # This runs off a poll. A notification that cannot be shown must
-            # never take the panel down with it.
-            pass
+        # Same delivery path as the employee panel — see notifier.deliver for
+        # why macOS needs a second door.
+        notifier.deliver(getattr(self, "tray", None), title, body)
 
     def _stop_background_services(self):
         """Sirf timers/threads/workers rokta hai — session ko touch nahi
@@ -5489,6 +5477,13 @@ class AdminConfigPanel(QMainWindow):
         Without showing it the app just returns to the login screen for no
         stated cause, which reads as a crash and gets reported as one.
         """
+        # The guard comes FIRST. Two watchers can notice the same forced
+        # logout a second apart, and the message box was outside it — so the
+        # second one put a dialog on screen after the panel had already gone.
+        if self._logging_out:
+            return
+        self._logging_out = True
+
         if reason:
             try:
                 QMessageBox.warning(self, "Signed out", reason)
@@ -5498,10 +5493,6 @@ class AdminConfigPanel(QMainWindow):
         from client.application.managers.shift_manager import ShiftManager
         from client.application.managers.session_log_manager import SessionLogManager
         from client.presentation.windows.login_window import LoginWindow
-        if self._logging_out:
-            return
-
-        self._logging_out = True
 
         # The server first, while the token still works — see the note in
         # employee_panel.logout. Not when the server ended it itself.

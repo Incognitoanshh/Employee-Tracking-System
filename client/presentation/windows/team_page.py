@@ -1270,7 +1270,11 @@ class TeamPage(QWidget):
         total = sum(int(t.get("unread") or 0) for t in self._teams)
         self.unread_changed.emit(total)
 
-        if self._channel is None:
+        if self._channel_id is None:
+            # `_channel` is only set when the history reply lands, so testing
+            # it here re-opened the same channel on every thirty-second
+            # refresh while the first reply was still in flight — two
+            # histories racing, and the older one able to win.
             first = next((c for t in self._teams for c in t["channels"]), None)
             if first:
                 self.open_channel(first["id"])
@@ -1441,8 +1445,22 @@ class TeamPage(QWidget):
 
     def _on_history(self, payload):
         channel = payload.get("channel") or {}
+        # A reply for a channel nobody is looking at any more — two opens in
+        # quick succession, and the slower reply arriving second — must not
+        # paint the previous conversation over the current one.
+        if channel.get("id") and self._channel_id and \
+                channel["id"] != self._channel_id:
+            return
         self._channel = channel
-        self._messages = payload.get("messages") or []
+        history = payload.get("messages") or []
+        # Anything that arrived on the poll while this request was in flight
+        # is newer than the reply and is not in it. Dropping it looked like a
+        # message that was sent and then vanished until the next one came.
+        newest = history[-1]["seq"] if history else 0
+        later = [m for m in self._messages
+                 if m.get("channel_id") == channel.get("id")
+                 and (m.get("seq") or 0) > (newest or 0)]
+        self._messages = history + later
         self._oldest_seq = self._messages[0]["seq"] if self._messages else None
 
         self._title.setText(channel.get("name", "—"))
@@ -1719,7 +1737,11 @@ class TeamPage(QWidget):
         touched = False
         for message in arrived:
             channel_id = message.get("channel_id")
-            if self._channel and channel_id == self._channel["id"] and not self._searching:
+            # `_channel_id` is set the moment the channel is opened;
+            # `_channel` only when its history comes back. A message landing
+            # in that gap used to be filed as unread for the very channel
+            # being looked at.
+            if channel_id == self._channel_id and not self._searching:
                 if not any(m.get("seq") == message.get("seq") for m in self._messages):
                     self._messages.append(message)
                     touched = True
@@ -2241,8 +2263,22 @@ class TeamPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self._channel:
-            self._chat.set_active_channel(self._channel["id"])
-            self._member_timer.start()
         self._teams_timer.start()
         self.refresh()
+
+        # AND RE-READ THE OPEN CONVERSATION. Reported live: "abhi empty tha
+        # load ni hua jab tak general pe dobaara ni click kiya".
+        #
+        # hideEvent stops the poll for this channel, so anything said while
+        # the page was on another tab never reached `_on_messages` — and
+        # coming back only refreshed the LIST of channels, never the messages
+        # in the one already open. The feed showed whatever it had when the
+        # page was last visible, which after a first visit that failed is
+        # nothing at all. Clicking the channel again called open_channel,
+        # which is the only thing that fetches history — so it looked as
+        # though the click was what was missing.
+        #
+        # One request on becoming visible. `open_channel` also restores the
+        # poll and the member timer, which is what the old two lines did.
+        if self._channel_id:
+            self.open_channel(self._channel_id)

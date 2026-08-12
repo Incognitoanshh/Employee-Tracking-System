@@ -160,6 +160,45 @@ def main():
             "SELECT COUNT(*) c FROM pending_logs WHERE uploaded=0").fetchone()["c"]
     check("an activity line survives a failed send", still == 1, str(still))
 
+    print("\nA failing log must not create another log")
+    # THE FEEDBACK LOOP, seen in production. LoggerService.log writes into
+    # pending_logs — the very queue retry_logs is draining. So a failure to
+    # send a log wrote another log to send, which failed, which wrote another.
+    # Twenty failures a pass meant twenty new rows a pass: the queue grew
+    # instead of draining, and 900 rows of "retry_logs failed" landed in the
+    # company's audit log, climbing every second.
+    with Database.get_connection() as conn:
+        conn.execute("DELETE FROM pending_logs")
+    for i in range(5):
+        with Database.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO pending_logs (employee_id, activity, timestamp, uploaded)"
+                " VALUES ('E001', ?, '2026-08-11 10:00:00', 0)", (f"REAL ACTIVITY {i}",))
+
+    def pending_log_count():
+        with Database.get_connection() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) c FROM pending_logs WHERE uploaded=0").fetchone()["c"]
+
+    before = pending_log_count()
+    SyncManager.retry_logs()
+    after = pending_log_count()
+    check("a failed send does not add to the queue it is draining",
+          after <= before,
+          f"{before} became {after} — every failure wrote another log to fail")
+
+    for _ in range(3):
+        SyncManager.retry_logs()
+    check("and it still does not after several passes",
+          pending_log_count() <= before,
+          f"{pending_log_count()} pending after four passes, started at {before}")
+
+    check("nothing about the failure reached the uploadable queue",
+          not any("retry_logs failed" in (r["activity"] or "")
+                  for r in Database.connect().execute(
+                      "SELECT activity FROM pending_logs").fetchall()),
+          "the failure message is queued for upload — that is the loop")
+
     print("\nIdle totals")
     with Database.get_connection() as conn:
         tables = [r["name"] for r in conn.execute(

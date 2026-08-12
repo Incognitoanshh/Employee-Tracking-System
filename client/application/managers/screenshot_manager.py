@@ -176,6 +176,18 @@ class ScreenshotManager:
             )
             return None
 
+        # macOS WITHOUT SCREEN RECORDING does not fail — it hands back the
+        # desktop picture with every window missing, which uploads and stores
+        # exactly like a real capture. Tracking then looks alive and shows
+        # nothing but wallpaper. Say so instead, in a line an administrator
+        # can find, and take nothing.
+        from client.services.screen_permission import has_screen_access
+        if not has_screen_access():
+            LoggerService.log(
+                "SCREENSHOT SKIPPED : Screen Recording permission not granted "
+                "— allow it in System Settings and restart the app")
+            return None
+
         # HARD CAP — the guarantee that the daily number is never exceeded.
         #
         # It lives here, not in the scheduler, because every capture path

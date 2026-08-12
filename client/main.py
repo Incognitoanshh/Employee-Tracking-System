@@ -108,6 +108,12 @@ def main():
 
     _warm_native_modules()
 
+    # AT LAUNCH, in front of whoever just opened the app — not at the first
+    # scheduled capture, hours later, with nobody watching. See
+    # services/screen_permission for what the old timing actually cost.
+    from client.services.screen_permission import ensure_at_startup
+    ensure_at_startup()
+
     auto_login_result = AutoLoginManager.try_auto_login()
 
     if auto_login_result:
