@@ -38,7 +38,12 @@ if [ ! -f "$APP_DIR/.env" ]; then
 fi
 set -a; . "$APP_DIR/.env"; set +a
 : "${DB_NAME:?DB_NAME missing from .env}"
-UPLOAD_DIR="$APP_DIR/uploads/screenshots"
+# The .env is sourced just above, and it is what the server itself reads to
+# decide where captures are written. Hardcoding a path here OVERRODE it: on a
+# deployment whose UPLOAD_DIR points elsewhere, the database rows went and
+# every .enc file stayed on disk — unreadable for ever, because the rows that
+# named them had been truncated, and still taking up the space.
+UPLOAD_DIR="${UPLOAD_DIR:-$APP_DIR/uploads/screenshots}"
 BACKUP_DIR="$HOME/ets-backups"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE="$BACKUP_DIR/ets-before-reset-$STAMP.sql.gz"
