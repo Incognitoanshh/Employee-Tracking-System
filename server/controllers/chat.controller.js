@@ -507,7 +507,17 @@ exports.sendMessage = async (req, res) => {
     const channelId = Number.parseInt(req.params.id, 10);
     if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
 
-    const body = String(req.body?.body ?? "").trim();
+    // Control characters are stripped, NOT rejected.
+    //
+    // PostgreSQL text cannot hold a NUL byte at all — it answers with an
+    // error, which this handler turned into "Internal server error". Somebody
+    // pasting from a terminal, a PDF or a badly encoded file could therefore
+    // make the send fail with no explanation and no way to tell what was
+    // wrong with their message. Newlines and tabs are kept, because those are
+    // things people mean to type.
+    const body = String(req.body?.body ?? "")
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+        .trim();
     const clientMsgId = req.body?.client_msg_id || null;
     const replyTo = req.body?.reply_to ? Number(req.body.reply_to) : null;
     const attachmentIds = Array.isArray(req.body?.attachment_ids)

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QThread, Signal
 import tempfile
-import requests
+
 from client.core import http as _http
 from client.presentation.windows.base_window import BaseWindow
 from client.core.config import API_BASE_URL

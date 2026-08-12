@@ -75,47 +75,42 @@ def request_screen_access() -> bool:
         return True
 
 
+ASKED_KEY = "screen_recording_asked"
+
+
 def ensure_at_startup(parent=None) -> bool:
     """Called once, from main(), before any window.
 
-    Returns True when captures will work. When they will not, it says so in
-    plain words and opens the right pane of System Settings — being told
-    "screenshots are not being taken" now is worth far more than finding out
-    at the end of a shift.
+    ASKS THE SYSTEM ONCE, AND SHOWS NOTHING OF ITS OWN.
+
+    The first version put an explanatory dialog on screen at every launch
+    while the permission was missing — on top of macOS's own prompt, which
+    was already there. Told plainly: "jab bhi on kru to ye ni aana chahiye,
+    bas download krne ke bd ek baar app jo permission mangti hai wo hona
+    chahiye." A dialog on every start is what people learn to click away, and
+    then they click away the one that mattered.
+
+    So: on the first launch after installing, the macOS prompt appears — the
+    real one, with Allow and Deny. After that this is silent, whatever the
+    answer was. A missing permission is still written to the log, and the
+    capture path says exactly why it took nothing, which is where somebody
+    looking into an empty day will actually look.
+
+    Returns True when captures will work.
     """
     if not is_macos() or has_screen_access():
         return True
 
-    granted = request_screen_access()
-    if granted and has_screen_access():
-        return True
+    from client.services.settings_service import SettingsService
+
+    already_asked = str(SettingsService.get_setting(ASKED_KEY) or "") == "1"
+    if not already_asked:
+        SettingsService.save_setting(ASKED_KEY, "1")
+        request_screen_access()          # the system's own prompt, once
+        if has_screen_access():
+            return True
 
     LoggerService.log(
         "SCREEN RECORDING : permission not granted — captures will be blank "
-        "until it is allowed and the app is restarted")
-
-    try:
-        from PySide6.QtWidgets import QMessageBox
-
-        box = QMessageBox(parent)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Screen Recording permission needed")
-        box.setText("Amaze Connect cannot record the screen yet.")
-        box.setInformativeText(
-            "Open System Settings → Privacy & Security → Screen Recording, "
-            "switch on Amaze Connect, then quit and open the app again.\n\n"
-            "Until that is done, screenshots will be empty.")
-        open_settings = box.addButton("Open System Settings",
-                                      QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is open_settings:
-            import subprocess
-            subprocess.Popen([
-                "open",
-                "x-apple.systempreferences:com.apple.preference.security"
-                "?Privacy_ScreenCapture"])
-    except Exception:
-        pass
-
+        "until it is allowed in System Settings and the app is restarted")
     return False

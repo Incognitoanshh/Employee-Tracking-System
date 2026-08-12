@@ -1,6 +1,6 @@
 from datetime import datetime
 import os
-import requests
+
 from client.core import http as _http
 
 from client.application.managers.session_manager import SessionManager

@@ -1,4 +1,4 @@
-import os
+
 from datetime import datetime, timezone, timedelta
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot

@@ -1,5 +1,5 @@
 from datetime import datetime
-import requests
+
 from client.core import http as _http
 from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager

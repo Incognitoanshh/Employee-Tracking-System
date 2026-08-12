@@ -1062,6 +1062,26 @@ def main():
           composer.toPlainText() == "bold line" and "<b>" not in composer.toHtml(),
           "colours and fonts nobody else will ever see")
 
+    print("\nA message is shown as text, not as markup")
+    # Anybody here can write to anybody, and a QLabel left on AutoText decides
+    # for itself whether what it was handed is HTML. Measured before this was
+    # set: <b> came out bold and a span came out forty pixels tall. A message
+    # could then style itself into looking like something the application
+    # said, or hide its own words with a transparent colour — in a record the
+    # company keeps.
+    from PySide6.QtWidgets import QLabel
+    from PySide6.QtCore import Qt as _Qt
+    evil = '<b>BOLD</b> <span style="color:transparent">hidden</span>'
+    from client.presentation.windows.team_page import _Bubble
+    row = _Bubble({"seq": 1, "sender_id": "E002", "sender_name": "Amit",
+                   "body": evil, "created_at": "2026-08-12 10:00:00",
+                   "attachments": []}, mine=False)
+    labels = row.findChildren(QLabel)
+    shown = [l for l in labels if evil in l.text()]
+    check("the message body is put on screen as plain text",
+          shown and all(l.textFormat() == _Qt.TextFormat.PlainText for l in shown),
+          f"{[str(l.textFormat()) for l in shown]} — AutoText renders the markup")
+
     print()
     if failures:
         print(f"{failures} failure(s)")

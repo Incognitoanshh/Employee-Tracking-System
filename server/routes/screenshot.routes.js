@@ -63,4 +63,27 @@ router.post("/upload",         upload.single("screenshot"), screenshotController
 router.get("/all",             screenshotController.getScreenshots);
 router.get("/download/:id",    screenshotController.downloadScreenshot);
 
+// Multer rejects an over-sized file BEFORE any handler runs, and the
+// rejection travels as an error — which fell through to the generic handler
+// and came back as a 500. A capture on a very large or multi-monitor screen
+// is an ordinary thing to run into, and "Internal server error" tells the
+// client nothing, so it retried the same file forever.
+//
+// The chat attachment route already did this; the screenshot route did not.
+router.use((error, req, res, next) => {
+    if (error && error.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({
+            success: false,
+            error: "Screenshot too large — 10 MB is the limit",
+        });
+    }
+    if (error) {
+        return res.status(400).json({
+            success: false,
+            error: error.message || "Upload rejected",
+        });
+    }
+    return next();
+});
+
 module.exports = router;

@@ -20,7 +20,6 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone, timedelta
 
-import requests
 from client.core import http as _http
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QDate
 from PySide6.QtGui import QCursor, QColor

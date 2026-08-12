@@ -95,9 +95,20 @@ exports.downloadScreenshot = async (req, res) => {
         const requestingEmployee = req.employee.employee_id;
         const role = req.employee.role;
 
+        // The id column is an integer. Anything else — a UUID from a stale
+        // link, a truncated URL, somebody poking at the API — reached
+        // Postgres as text and came back as "invalid input syntax for type
+        // integer", which this handler turned into a 500. A 500 says the
+        // server is broken; it was not, the request was. It also puts a
+        // stack trace in the log for something entirely ordinary.
+        const screenshotId = Number.parseInt(id, 10);
+        if (!Number.isInteger(screenshotId) || screenshotId < 1) {
+            return res.status(404).json({ success: false, error: "Screenshot not found" });
+        }
+
         const result = await pool.query(
             `SELECT employee_id, file_name, created_at FROM screenshots WHERE id = $1`,
-            [id]
+            [screenshotId]
         );
 
         if (result.rows.length === 0) {

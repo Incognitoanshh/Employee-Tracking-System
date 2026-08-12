@@ -38,11 +38,16 @@ from __future__ import annotations
 #  here than their dark-theme counterparts — a #22c55e green that reads well
 #  on near-black is nearly invisible on white.
 
+# TEXT_DIM is measured, not chosen by eye. It carries timestamps, hints and
+# "idle for 23 minutes" — the small print somebody actually has to read. The
+# old values sat at 2.87:1 to 3.55:1 against the surfaces they are drawn on,
+# under the 4.5:1 that ordinary body text needs to be legible. These clear it
+# on every surface in their own palette. If you change them, measure again.
 _DARK = {
     "BG": "#0a0e1a", "SIDEBAR": "#0d1220", "CARD": "#111827",
     "CARD_HOVER": "#161f33", "ELEVATED": "#1a2337",
     "BORDER": "#1e2a42", "BORDER_SOFT": "#172033",
-    "TEXT": "#e8edf7", "TEXT_MUTED": "#8b9bb4", "TEXT_DIM": "#5a6b85",
+    "TEXT": "#e8edf7", "TEXT_MUTED": "#8b9bb4", "TEXT_DIM": "#8089a9",
     "PRIMARY": "#3b82f6", "PRIMARY_DIM": "#1d4ed8",
     "GREEN": "#22c55e", "GREEN_BG": "#0d2a1a",
     "BLUE": "#38bdf8", "BLUE_BG": "#0c2537",
@@ -73,7 +78,7 @@ _LIGHT = {
     "BG": "#e7edf5", "SIDEBAR": "#f4f7fb", "CARD": "#ffffff",
     "CARD_HOVER": "#eaf0f8", "ELEVATED": "#e2e9f3",
     "BORDER": "#c8d4e4", "BORDER_SOFT": "#dde5ef",
-    "TEXT": "#0f172a", "TEXT_MUTED": "#475569", "TEXT_DIM": "#7b8aa1",
+    "TEXT": "#0f172a", "TEXT_MUTED": "#475569", "TEXT_DIM": "#5a6980",
     "PRIMARY": "#2563eb", "PRIMARY_DIM": "#1d4ed8",
     "GREEN": "#15803d", "GREEN_BG": "#dcfce7",
     "BLUE": "#0369a1", "BLUE_BG": "#e0f2fe",

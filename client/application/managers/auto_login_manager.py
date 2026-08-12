@@ -1,4 +1,4 @@
-import requests
+
 from client.core import http as _http
 
 from client.core.config import API_BASE_URL

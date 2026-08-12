@@ -196,26 +196,50 @@ exports.loginAttendance = async (req, res) => {
         // se compute karo (NULL chhodne ki jagah) — self-consistent rehta
         // hai (isi row ke apne dono timestamps se), display pe "—" ki jagah
         // ek meaningful (best-effort) duration dikhega.
-        await pool.query(
-            `UPDATE attendance SET logout_time = (NOW() AT TIME ZONE 'UTC'), total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
-             WHERE employee_id = $1 AND logout_time IS NULL`,
-            [employee_id]
-        );
+        // CLOSE AND OPEN AS ONE, UNDER A LOCK.
+        //
+        // These were two separate statements, and two logins arriving at the
+        // same moment interleaved: both closed the old row, then both
+        // inserted. Measured with six simultaneous calls — two rows left
+        // open, and an attendance row that never ends is a shift that never
+        // ends. It reaches the timesheet, the attendance report and presence.
+        //
+        // It is not a far-fetched race: the panel starts a shift on login and
+        // the auto-login path does the same, so a relaunch during a flaky
+        // connection is enough. The advisory lock is per employee, so two
+        // different people never wait for each other.
+        const client = await pool.connect();
+        let insertedId;
+        try {
+            await client.query("BEGIN");
+            await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [employee_id]);
+            await client.query(
+                `UPDATE attendance SET logout_time = (NOW() AT TIME ZONE 'UTC'),
+                        total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
+                  WHERE employee_id = $1 AND logout_time IS NULL`,
+                [employee_id]
+            );
+            // login_time is stamped by the server in UTC. The client used to
+            // send an IST string, which Postgres stored without a zone.
+            const result = await client.query(
+                `INSERT INTO attendance (employee_id, login_time)
+                 VALUES ($1, (NOW() AT TIME ZONE 'UTC')) RETURNING id`,
+                [employee_id]
+            );
+            insertedId = result.rows[0].id;
+            await client.query("COMMIT");
+        } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+        } finally {
+            client.release();
+        }
 
-        // BUG FIX: login_time ko UTC mein store karo
-        // Client IST string bhejta tha jaise "2026-06-28 15:30:00"
-        // PostgreSQL bina timezone ke store karta tha — inconsistent tha
-        // Ab hum seedha NOW() use karte hain jo UTC mein hai
-        const result = await pool.query(
-            `INSERT INTO attendance (employee_id, login_time) VALUES ($1, (NOW() AT TIME ZONE 'UTC')) RETURNING id`,
-            [employee_id]
-        );
-
-        res.json({ success: true, id: result.rows[0].id });
+        res.json({ success: true, id: insertedId });
 
     } catch (error) {
         console.error("[500]", req.method, req.originalUrl, error.message);
-        Noneres.status(500).json({ success: false, message: "Internal server error" });
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
 
@@ -260,6 +284,6 @@ exports.logoutAttendance = async (req, res) => {
 
     } catch (error) {
         console.error("[500]", req.method, req.originalUrl, error.message);
-        Noneres.status(500).json({ success: false, message: "Internal server error" });
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

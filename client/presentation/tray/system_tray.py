@@ -11,7 +11,6 @@ Bugs fixed:
 
 from __future__ import annotations
 
-import requests
 from client.core import http as _http
 from PySide6.QtCore    import QTimer
 from PySide6.QtGui     import QAction, QColor, QIcon, QPixmap

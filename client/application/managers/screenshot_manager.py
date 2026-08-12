@@ -4,8 +4,9 @@ import random
 from datetime import datetime, timedelta, timezone
 import uuid
 
+import sys
 import pyautogui
-import requests
+
 from client.core import http as _http
 from PIL import Image
 
@@ -37,6 +38,100 @@ from client.core.config.settings import Settings
 # across whatever remains of the monitoring window, and capture_screenshot()
 # refuses once the day's budget is spent — so the number can be reached
 # late, but never exceeded, no matter how the schedule is regenerated.
+
+
+def _screen_count() -> int:
+    """How many displays are attached, cheaply and without needing a window."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            return max(1, int(ctypes.windll.user32.GetSystemMetrics(80)))  # SM_CMONITORS
+        if sys.platform == "darwin":
+            from PySide6.QtGui import QGuiApplication
+            app = QGuiApplication.instance()
+            if app is not None:
+                return max(1, len(app.screens()))
+            # No Qt application yet — ask the window server directly.
+            import subprocess as _sp
+            out = _sp.run(["system_profiler", "SPDisplaysDataType"],
+                          capture_output=True, text=True, timeout=10).stdout
+            found = out.count("Resolution:")
+            return max(1, found)
+    except Exception:
+        pass
+    return 1
+
+
+def _grab_every_screen():
+    """Every attached display, not just the main one.
+
+    WHAT THIS FIXES. `pyautogui.screenshot()` captures ONE display on both
+    platforms, and it is not obvious from the call:
+
+      * Windows — pyscreeze calls `ImageGrab.grab(all_screens=False)`, which
+        is the primary monitor only.
+      * macOS  — Pillow shells out to `screencapture -x <one file>`, which
+        writes the main display.
+
+    So an employee with two monitors was monitored on one of them, and the
+    other half of their working day simply did not exist. Nothing failed and
+    nothing was logged; the screenshots looked perfectly normal.
+
+    ONE MONITOR TAKES THE ORDINARY PATH. That is the overwhelming majority of
+    machines, it is the path that has always worked, and it is the one the
+    pipeline test replaces to feed in a known image — a capture routine that
+    cannot be given a fake screen cannot be tested end to end.
+
+    Falls back to the same ordinary path if anything below fails: half a
+    screenshot is worth more than none.
+    """
+    if _screen_count() <= 1:
+        return pyautogui.screenshot()
+
+    try:
+        if sys.platform == "win32":
+            from PIL import ImageGrab
+            return ImageGrab.grab(all_screens=True)
+
+        if sys.platform == "darwin":
+            import subprocess as _sp
+            import tempfile as _tf
+
+            shots = []
+            for display in range(1, 5):          # more than anybody plugs in
+                path = _tf.mktemp(suffix=".png")
+                done = _sp.run(["screencapture", "-x", "-D", str(display), path],
+                               capture_output=True, timeout=20)
+                if done.returncode != 0 or not os.path.exists(path):
+                    break
+                try:
+                    img = Image.open(path)
+                    img.load()
+                    shots.append(img)
+                finally:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+            if len(shots) == 1:
+                return shots[0]
+            if len(shots) > 1:
+                # Side by side, in the order the displays report — one wide
+                # image of the whole desk, which the resize below handles.
+                width = sum(i.width for i in shots)
+                height = max(i.height for i in shots)
+                canvas = Image.new("RGB", (width, height), (0, 0, 0))
+                x = 0
+                for img in shots:
+                    canvas.paste(img.convert("RGB"), (x, 0))
+                    x += img.width
+                return canvas
+    except Exception as error:
+        LoggerService.log_verbose(
+            f"ScreenshotManager: multi-screen capture failed, falling back — {error}")
+
+    return pyautogui.screenshot()
+
 
 class ScreenshotManager:
     STORAGE_PATH = os.path.join(STORAGE_DIR, "screenshots")
@@ -237,7 +332,7 @@ class ScreenshotManager:
             #  Preview window QPixmap se load karta hai jo format khud
             #  detect kar leta hai, to decrypt/display bina badle chalta hai.
             # ───────────────────────────────────────────────────────────
-            screenshot = pyautogui.screenshot()
+            screenshot = _grab_every_screen()
 
             max_width = int(os.getenv("SCREENSHOT_MAX_WIDTH", "1920"))
             quality   = int(os.getenv("SCREENSHOT_JPEG_QUALITY", "75"))

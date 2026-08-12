@@ -49,6 +49,11 @@ def main():
     from client.security.crypto_engine import CryptoEngine
     from client.services.logger_service import LoggerService
 
+    # KEPT, because one section below needs the real one back. Replacing
+    # LoggerService.log for the whole file is what made the flood checks
+    # vacuous: the feedback loop being tested runs THROUGH that method, so
+    # with it replaced the loop cannot happen whatever the code does.
+    real_logger_log = LoggerService.log
     logged = []
     LoggerService.log = lambda m, *a, **k: logged.append(str(m))
     LoggerService.log_verbose = lambda m, *a, **k: logged.append(str(m))
@@ -198,6 +203,97 @@ def main():
                   for r in Database.connect().execute(
                       "SELECT activity FROM pending_logs").fetchall()),
           "the failure message is queued for upload — that is the loop")
+
+    print("\nAnd the same when the SERVER answers, rather than refusing to talk")
+    # THE ONE THAT ACTUALLY HAPPENED, and the one the checks above do not
+    # reach. Everything so far points at a dead port, so the send fails with
+    # a ConnectionError. Production failed differently: the server answered,
+    # with 401, because an administrator had ended the session. That is a
+    # different branch of the same method — and it was the branch that wrote
+    # a log line per failure into the queue it was draining.
+    #
+    # Measured before this was written: the old code passed every check above
+    # and still flooded the company's audit log with 1,262 rows in minutes.
+    import client.application.managers.sync_manager as sync_mod
+
+    class _Accepted:
+        status_code = 200
+        text = '{"success":true}'
+
+        def json(self):
+            return {"success": True}
+
+    class _Refused:
+        status_code = 401
+        text = '{"success":false,"message":"Session expired. Logged in from another device."}'
+
+        def json(self):
+            return {"success": False, "message": "Session expired"}
+
+    with Database.get_connection() as conn:
+        conn.execute("DELETE FROM pending_logs")
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO pending_logs (employee_id, activity, timestamp, uploaded)"
+                " VALUES ('E001', ?, '2026-08-11 10:00:00', 0)", (f"REAL ACTIVITY {i}",))
+
+    before = pending_log_count()
+    real_post = sync_mod._http.post
+    sync_mod._http.post = lambda *a, **k: _Refused()
+    # THE REAL LoggerService.log FOR THIS SECTION. The loop being checked is
+    # "a failure writes a log, and writing a log queues a row" — it runs
+    # through this exact method, so a stub in its place proves nothing.
+    stubbed_log = LoggerService.log
+    LoggerService.log = real_logger_log
+    try:
+        for _ in range(4):
+            SyncManager.retry_logs()
+    finally:
+        sync_mod._http.post = real_post
+        LoggerService.log = stubbed_log
+
+    after = pending_log_count()
+    check("a 401 does not grow the queue either", after <= before,
+          f"{before} became {after} after four passes — this is the flood, "
+          f"and every one of those rows is uploaded the moment somebody signs "
+          f"back in")
+    check("and no failure line is queued for upload",
+          not any("retry_logs failed" in (r["activity"] or "")
+                  for r in Database.connect().execute(
+                      "SELECT activity FROM pending_logs").fetchall()),
+          "'SyncManager: retry_logs failed — HTTP 401' in the company's record")
+    check("the real activity is still there, waiting for a live session",
+          pending_log_count() == before, f"{pending_log_count()} of {before} kept")
+
+    # A MACHINE UPGRADING WITH A PILE ALREADY IN THE QUEUE. The rows above
+    # were written by an older build before it was taught not to. They are
+    # diagnostics about the queue, not anything an employee did, and sending
+    # them now puts hundreds of "retry_logs failed — HTTP 401" lines into the
+    # company's audit log with today's timestamps and yesterday's message
+    # inside. That is what the Audit Logs page actually showed.
+    with Database.get_connection() as conn:
+        conn.execute("DELETE FROM pending_logs")
+        conn.execute(
+            "INSERT INTO pending_logs (employee_id, activity, timestamp, uploaded)"
+            " VALUES ('E001', ?, '2026-08-11 10:00:00', 0)",
+            ("SyncManager: retry_logs failed for log 1274 — HTTP 401 {}",))
+        conn.execute(
+            "INSERT INTO pending_logs (employee_id, activity, timestamp, uploaded)"
+            " VALUES ('E001', 'REAL ACTIVITY kept', '2026-08-11 10:00:00', 0)")
+
+    sent = []
+    sync_mod._http.post = lambda *a, **k: sent.append(k.get("json", {})) or _Accepted()
+    try:
+        SyncManager.retry_logs()
+    finally:
+        sync_mod._http.post = real_post
+
+    check("an old build's failure lines are dropped, not uploaded",
+          not any("retry_logs failed" in str(p.get("activity", "")) for p in sent),
+          f"{[str(p.get('activity'))[:60] for p in sent]}")
+    check("while the real activity beside them still goes",
+          any("REAL ACTIVITY kept" in str(p.get("activity", "")) for p in sent),
+          f"{len(sent)} sent")
 
     print("\nIdle totals")
     with Database.get_connection() as conn:

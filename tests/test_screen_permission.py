@@ -65,6 +65,14 @@ def main():
           asked == [], str(asked))
 
     print("\nOn a Mac that has not")
+    # Asked ONCE, by the system, and never by a dialog of ours. A window on
+    # every launch is what people learn to click away — "jab bhi on kru to ye
+    # ni aana chahiye, bas download krne ke bd ek baar".
+    from client.infrastructure.database.database import Database
+    Database.initialize()
+    from client.services.settings_service import SettingsService
+    SettingsService.save_setting(sp.ASKED_KEY, "")
+
     sys.platform = "darwin"
     sp.has_screen_access = lambda: False
     asked = []
@@ -72,12 +80,15 @@ def main():
     told = []
     real_log = sp.LoggerService.log
     sp.LoggerService.log = lambda m, *a, **k: told.append(str(m))
-    # The dialog is the part a person sees; suppress it and keep the decision.
     import PySide6.QtWidgets as _qt
+    boxes = []
     real_box = _qt.QMessageBox
-    _qt.QMessageBox = type("_Box", (), {"__init__": lambda self, *a: None})
+    _qt.QMessageBox = type("_Box", (), {
+        "__init__": lambda self, *a: boxes.append(1)})
     try:
-        ok = sp.ensure_at_startup()
+        first = sp.ensure_at_startup()
+        second = sp.ensure_at_startup()          # the next launch
+        third = sp.ensure_at_startup()           # and the one after
     finally:
         sys.platform = real_platform
         sp.has_screen_access = real_has
@@ -85,8 +96,16 @@ def main():
         sp.LoggerService.log = real_log
         _qt.QMessageBox = real_box
 
-    check("the system prompt is shown AT LAUNCH", asked == [1], str(asked))
-    check("startup reports that captures will not work", ok is False, str(ok))
+    check("the system prompt is shown on the FIRST launch", asked == [1], str(asked))
+    check("and never again, however many times the app is opened",
+          len(asked) == 1,
+          f"{len(asked)} prompts across three launches — a permission window "
+          f"at every start is the one people click away")
+    check("no dialog of our own is ever put on screen", boxes == [],
+          f"{len(boxes)} of our own windows — macOS already asks")
+    check("startup reports that captures will not work",
+          first is False and second is False and third is False,
+          f"{first} {second} {third}")
     check("and it is written down, so an empty day can be explained",
           any("SCREEN RECORDING" in m for m in told), str(told))
 

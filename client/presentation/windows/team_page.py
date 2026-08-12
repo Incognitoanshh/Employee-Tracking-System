@@ -490,6 +490,21 @@ class _Bubble(QFrame):
         text = str(message.get("body") or "")
         if text:
             body = QLabel(text)
+            # PLAIN TEXT, EXPLICITLY.
+            #
+            # A QLabel left on AutoText decides for itself whether what it was
+            # given is HTML, and anybody here can write to anybody. Measured:
+            # <b> came out bold and <span style="font-size:40px"> came out
+            # forty pixels tall, so a message could style itself into looking
+            # like something the application said, hide its own words with a
+            # transparent colour, or break the layout of everyone who opened
+            # the channel. What is kept in the company record has to be the
+            # characters somebody actually typed.
+            #
+            # Remote images were tested and are NOT fetched by QLabel, so this
+            # was never a way to reach the network — it is about the text
+            # being the text.
+            body.setTextFormat(Qt.TextFormat.PlainText)
             body.setWordWrap(True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             style = (f"color:{C.TEXT_MUTED};font-size:13px;border:none;"
@@ -1463,12 +1478,14 @@ class TeamPage(QWidget):
         self._messages = history + later
         self._oldest_seq = self._messages[0]["seq"] if self._messages else None
 
+        self._title.setTextFormat(Qt.TextFormat.PlainText)
         self._title.setText(channel.get("name", "—"))
         bits = [channel.get("team_name", "")]
         if channel.get("type") == "ANNOUNCEMENT":
             bits.append("announcements — only administrators post here")
         if channel.get("is_archived"):
             bits.append("archived — read only")
+        self._subtitle.setTextFormat(Qt.TextFormat.PlainText)
         self._subtitle.setText("  ·  ".join(b for b in bits if b))
 
         can_post = bool(channel.get("can_post"))
@@ -1777,6 +1794,7 @@ class TeamPage(QWidget):
         self._read_only.hide()
         results = payload.get("results") or []
         self._title.setText(f"{payload.get('total', 0)} result(s)")
+        self._subtitle.setTextFormat(Qt.TextFormat.PlainText)
         self._subtitle.setText(f"for “{payload.get('query', '')}”")
         self._messages = [
             {**row, "sender_name": f"{row.get('sender_name')} · "
@@ -1802,6 +1820,7 @@ class TeamPage(QWidget):
             return
         self._reply_to = target
         excerpt = str(target.get("body") or "")[:70]
+        self._reply_label.setTextFormat(Qt.TextFormat.PlainText)
         self._reply_label.setText(
             f"Replying to {target.get('sender_name')}: {excerpt}"
             + ("…" if len(str(target.get("body") or "")) > 70 else ""))
@@ -1925,6 +1944,7 @@ class TeamPage(QWidget):
         if self._pinned:
             first = str(self._pinned[0].get("body") or "")[:60] or "(file)"
             more = f"   +{len(self._pinned) - 1} more" if len(self._pinned) > 1 else ""
+            self._pinned_bar.setTextFormat(Qt.TextFormat.PlainText)
             self._pinned_bar.setText(f"📌  {first}{more}")
             self._pinned_bar.show()
         else:
