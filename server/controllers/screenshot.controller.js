@@ -101,8 +101,16 @@ exports.downloadScreenshot = async (req, res) => {
         // integer", which this handler turned into a 500. A 500 says the
         // server is broken; it was not, the request was. It also puts a
         // stack trace in the log for something entirely ordinary.
+        // DIGITS ONLY, and all of them. Number.parseInt stops at the first
+        // character it cannot use, so a UUID beginning "2f3a-…" parses as 2 —
+        // a real row id, fetched from a value that was never an id at all.
+        // Caught by CI, where a random UUID happened to start with a digit
+        // that matched an existing screenshot and returned it.
+        if (!/^\d+$/.test(String(id))) {
+            return res.status(404).json({ success: false, error: "Screenshot not found" });
+        }
         const screenshotId = Number.parseInt(id, 10);
-        if (!Number.isInteger(screenshotId) || screenshotId < 1) {
+        if (!Number.isSafeInteger(screenshotId) || screenshotId < 1) {
             return res.status(404).json({ success: false, error: "Screenshot not found" });
         }
 

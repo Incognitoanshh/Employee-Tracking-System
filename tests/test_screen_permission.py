@@ -145,10 +145,19 @@ def main():
 
     SessionManager.role = "employee"
     SessionManager.employee_id = "TEST_PERM"
+
+    import client.application.managers.screenshot_manager as sm
+
+    # A screen this machine does not have. CI is headless, and what is being
+    # checked here is the DECISION — capture or refuse — not whether the host
+    # can grab pixels.
+    from PIL import Image
+    real_grab = sm._grab_every_screen
+    sm._grab_every_screen = lambda: Image.new("RGB", (400, 300), (20, 30, 40))
+
     real_has2 = sp2.has_screen_access
     sp2.has_screen_access = lambda: False
     said = []
-    import client.application.managers.screenshot_manager as sm
     real_log2 = sm.LoggerService.log
     sm.LoggerService.log = lambda m, *a, **k: said.append(str(m))
     try:
@@ -176,6 +185,7 @@ def main():
     finally:
         sp2.has_screen_access = real_has2
         sm.LoggerService.log = real_log2
+        sm._grab_every_screen = real_grab
     check("the ordinary line carries no warning",
           any("SCREENSHOT CAPTURED" in m for m in said)
           and not any("NOT granted" in m for m in said),

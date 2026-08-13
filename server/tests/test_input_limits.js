@@ -162,9 +162,20 @@ async function main() {
         res = await api("GET", "/screenshots/download/not-an-id", { token: admin });
         check("a stale or malformed link is a 404, not a 500", res.status === 404,
             `HTTP ${res.status}`);
+        // A UUID that BEGINS WITH DIGITS is the one that mattered: parseInt
+        // stops at the first character it cannot use, so "2f3a-…" parsed as
+        // 2 — an existing row, returned in full from a value that was never
+        // an id. CI found it with a random UUID; this one is not random.
+        res = await api("GET", "/screenshots/download/2f3a4b5c-1111-2222-3333-444455556666",
+            { token: admin });
+        check("a UUID that starts with a digit does not become that row",
+            res.status === 404,
+            `HTTP ${res.status} — parseInt truncated it into a real screenshot id`);
         res = await api("GET", `/screenshots/download/${crypto.randomUUID()}`, { token: admin });
-        check("a UUID where an integer belongs is a 404 too", res.status === 404,
+        check("and neither does any other UUID", res.status === 404,
             `HTTP ${res.status}`);
+        res = await api("GET", "/screenshots/download/1e3", { token: admin });
+        check("nor does scientific notation", res.status === 404, `HTTP ${res.status}`);
         res = await api("GET", "/screenshots/download/999999", { token: admin });
         check("and a number that simply does not exist is also 404", res.status === 404,
             `HTTP ${res.status}`);
