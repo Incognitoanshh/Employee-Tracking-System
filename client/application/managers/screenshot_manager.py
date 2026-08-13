@@ -271,17 +271,31 @@ class ScreenshotManager:
             )
             return None
 
-        # macOS WITHOUT SCREEN RECORDING does not fail — it hands back the
-        # desktop picture with every window missing, which uploads and stores
-        # exactly like a real capture. Tracking then looks alive and shows
-        # nothing but wallpaper. Say so instead, in a line an administrator
-        # can find, and take nothing.
-        from client.services.screen_permission import has_screen_access
-        if not has_screen_access():
-            LoggerService.log(
-                "SCREENSHOT SKIPPED : Screen Recording permission not granted "
-                "— allow it in System Settings and restart the app")
-            return None
+        # macOS SCREEN RECORDING — ASKED ABOUT, NEVER OBEYED BLINDLY.
+        #
+        # This used to refuse to capture whenever CGPreflightScreenCaptureAccess
+        # said no. That was wrong, and it stopped a real machine from taking a
+        # single screenshot for a day: the toggle was ON in System Settings,
+        # switched off and on again, the app quit and reopened, and every
+        # capture still read "SKIPPED".
+        #
+        # The reason is that this app is not code-signed. macOS records the
+        # permission against the binary's hash, and every new build has a
+        # different one — so the row showing "Amaze Connect" as allowed can
+        # belong to a previous binary while the running one is unknown to TCC.
+        # Preflight then answers no about an app the person can plainly see
+        # switched on.
+        #
+        # So the answer is a WARNING, not a veto. A capture that turns out to
+        # be the desktop with no windows in it is worth far less than a real
+        # one — but it is worth more than nothing at all, and refusing to try
+        # means the one thing this product exists to do stops silently.
+        permission_missing = False
+        try:
+            from client.services.screen_permission import has_screen_access
+            permission_missing = not has_screen_access()
+        except Exception:
+            permission_missing = False
 
         # HARD CAP — the guarantee that the daily number is never exceeded.
         #
@@ -358,6 +372,10 @@ class ScreenshotManager:
             LoggerService.log(
                 f"SCREENSHOT CAPTURED : {enc_filepath} "
                 f"({len(png_bytes) // 1024} KB)"
+                + ("  [macOS reports Screen Recording is NOT granted for this "
+                   "build — the image may show only the desktop. Allow "
+                   "Amaze Connect in System Settings, then quit and reopen.]"
+                   if permission_missing else "")
             )
 
             # Local DB mein record karo

@@ -48,7 +48,7 @@ exports.getMyProfile = async (req, res) => {
         const result = await pool.query(
             `SELECT e.employee_id, e.username, e.full_name, e.designation, e.role,
                     e.phone, e.department, e.joining_date, e.employment_status,
-                    e.photo, e.created_at, e.suspended,
+                    e.photo, e.created_at, e.suspended, e.password_changed_at,
                     m.employee_id  AS manager_id,
                     COALESCE(m.full_name, m.username) AS manager_name,
                     (SELECT string_agg(t.name, ', ' ORDER BY t.name)
@@ -85,6 +85,7 @@ exports.getMyProfile = async (req, res) => {
                     : (row.employment_status || "active"),
                 photo: row.photo,
                 member_since: row.created_at,
+                password_changed_at: row.password_changed_at,
                 status: row.is_online ? "online" : "offline",
             },
         });

@@ -160,11 +160,33 @@ class ProfilePage(QWidget):
     def _run(self, fn, on_done, on_fail=None, *args, **kwargs):
         worker = _Worker(fn, *args, **kwargs)
         worker.done.connect(on_done)
-        worker.fail.connect(on_fail or (lambda error: self._toast(error, ok=False)))
+        worker.fail.connect(on_fail or self._on_failure)
         worker.finished.connect(
             lambda: self._workers.remove(worker) if worker in self._workers else None)
         self._workers.append(worker)
         worker.start()
+
+    def _on_failure(self, error: str):
+        """What a person sees when something did not work.
+
+        NOT the exception. The first render of this page put
+        "HTTPConnectionPool(host='127.0.0.1', port=9): Max retries exceeded..."
+        across the top in orange — true, useless, and alarming. The detail
+        belongs in the log, where somebody looking into it will find it; the
+        screen gets a sentence and a way forward.
+        """
+        text = str(error or "")
+        try:
+            LoggerService.log_verbose(f"ProfilePage: {text}")
+        except Exception:
+            pass
+        network = any(word in text.lower() for word in
+                      ("connection", "timed out", "timeout", "unreachable",
+                       "max retries", "temporarily"))
+        self._toast(
+            "Could not reach the server — this will load when the connection is back."
+            if network else (text if len(text) < 120 else "Something went wrong."),
+            ok=False)
 
     def _toast(self, message: str, ok: bool = True):
         """One line under the header. Not a modal — saving a phone number
@@ -509,6 +531,9 @@ class ProfilePage(QWidget):
         # Not overwritten while somebody is typing in it.
         if not self._phone.hasFocus():
             self._phone.setText(str(profile.get("phone") or ""))
+
+        changed = str(profile.get("password_changed_at") or "")
+        self._rows["password_changed"].setText(changed[:10] if changed else "Never")
 
         if profile.get("photo"):
             self._run(self._fetch_photo, self._avatar.set_image, lambda _e: None)

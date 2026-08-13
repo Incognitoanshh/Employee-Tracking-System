@@ -123,14 +123,23 @@ def main():
     check("and it is written down, so an empty day can be explained",
           any("SCREEN RECORDING" in m for m in told), str(told))
 
-    print("\nAnd a capture without it takes nothing")
-    # The important half. A blank capture is worse than no capture: it fills
-    # the day with wallpaper and hides the fact that nothing is being seen.
+    print("\nWhen macOS says the permission is missing")
+    # REPORTED FROM A REAL MACHINE, and caused by the previous version of this
+    # code. The toggle was ON in System Settings, switched off and on again,
+    # the app quit and reopened — and every capture still read SKIPPED, all
+    # day, because the gate here refused to capture whenever
+    # CGPreflightScreenCaptureAccess said no.
+    #
+    # It says no more often than it should for an app that is not code-signed:
+    # macOS records the permission against the binary's hash, so the row the
+    # person can see switched on may belong to a previous build.
+    #
+    # A warning, then. Never a veto — refusing to try means the one thing this
+    # product exists to do stops, silently, on a machine where it was working
+    # the day before.
     from client.application.managers.screenshot_manager import ScreenshotManager
     from client.application.managers.session_manager import SessionManager
     from client.services import screen_permission as sp2
-    # capture_screenshot reads the daily limit from the local database, which
-    # a machine that has never run the app does not have.
     from client.infrastructure.database.database import Database
     Database.initialize()
 
@@ -148,9 +157,29 @@ def main():
         sp2.has_screen_access = real_has2
         sm.LoggerService.log = real_log2
 
-    check("nothing is captured", result is None, str(result))
-    check("and the reason names the permission, not 'capture failed'",
-          any("Screen Recording permission" in m for m in said), str(said))
+    check("a capture is STILL taken", result is not None,
+          "this is the regression: a day with no screenshots at all on a "
+          "machine whose permission was switched on the whole time")
+    check("and it is not silent about it — the line says the system disagrees",
+          any("Screen Recording is NOT granted" in m for m in said),
+          str(said)[:200])
+    check("naming what to do about it",
+          any("System Settings" in m and "quit and reopen" in m for m in said),
+          str(said)[:200])
+
+    print("\nAnd when the permission IS granted, nothing is added")
+    sp2.has_screen_access = lambda: True
+    said.clear()
+    sm.LoggerService.log = lambda m, *a, **k: said.append(str(m))
+    try:
+        ScreenshotManager.capture_screenshot()
+    finally:
+        sp2.has_screen_access = real_has2
+        sm.LoggerService.log = real_log2
+    check("the ordinary line carries no warning",
+          any("SCREENSHOT CAPTURED" in m for m in said)
+          and not any("NOT granted" in m for m in said),
+          str(said)[:200])
 
     print("\nWho is captured at all")
     # The owner's rule: an administrator is tracked like anybody else; only
