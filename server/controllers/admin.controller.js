@@ -345,8 +345,48 @@ exports.updateProfile = async (req, res) => {
     const raw = req.body || {};
     const hasName = "full_name" in raw;
     const hasRole = "designation" in raw;
-    if (!hasName && !hasRole) {
+
+    // THE FIELDS ONLY A SUPER ADMIN MAY SET.
+    //
+    // An ordinary admin manages people day to day; who somebody reports to,
+    // which department they belong to, when they joined and whether they are
+    // on notice are the company's record of them, not a working detail. The
+    // employee cannot touch any of it at all — their own page is read-only
+    // here, which is the point of a monitoring product.
+    const ORG_FIELDS = ["department", "reporting_manager", "joining_date",
+                        "employment_status"];
+    const org = ORG_FIELDS.filter((f) => f in raw);
+    if (org.length && req.employee?.role !== ROLE_SUPER_ADMIN) {
+        return res.status(403).json({
+            success: false,
+            message: "Only a super admin can change department, manager, "
+                   + "joining date or employment status.",
+        });
+    }
+
+    if (!hasName && !hasRole && !org.length) {
         return res.status(400).json({ success: false, message: "Nothing to change" });
+    }
+
+    const STATUSES = ["active", "probation", "notice_period", "resigned", "terminated"];
+    if ("employment_status" in raw && raw.employment_status !== null
+        && !STATUSES.includes(String(raw.employment_status))) {
+        return res.status(400).json({
+            success: false,
+            message: `employment_status must be one of ${STATUSES.join(", ")}`,
+        });
+    }
+    if ("joining_date" in raw && raw.joining_date
+        && !/^\d{4}-\d{2}-\d{2}$/.test(String(raw.joining_date))) {
+        return res.status(400).json({
+            success: false, message: "joining_date must be YYYY-MM-DD",
+        });
+    }
+    if ("reporting_manager" in raw && raw.reporting_manager
+        && String(raw.reporting_manager) === employee_id) {
+        return res.status(400).json({
+            success: false, message: "Somebody cannot report to themselves",
+        });
     }
 
     const fullName = String(raw.full_name ?? "").trim();
@@ -381,13 +421,28 @@ exports.updateProfile = async (req, res) => {
         }
         const was = before.rows[0].full_name || before.rows[0].username;
 
+        // COALESCE with a NULL parameter for anything not sent: a field that
+        // was not mentioned keeps what it had. Sending it explicitly as null
+        // is how it gets cleared, which is why each has its own "was it
+        // present" flag rather than relying on the value alone.
         const updated = await pool.query(
             `UPDATE employees
-                SET full_name   = COALESCE($2, full_name),
-                    designation = COALESCE($3, designation)
+                SET full_name         = COALESCE($2, full_name),
+                    designation       = COALESCE($3, designation),
+                    department        = CASE WHEN $4::boolean THEN $5 ELSE department END,
+                    reporting_manager = CASE WHEN $6::boolean THEN $7 ELSE reporting_manager END,
+                    joining_date      = CASE WHEN $8::boolean THEN $9::date ELSE joining_date END,
+                    employment_status = CASE WHEN $10::boolean THEN $11 ELSE employment_status END
               WHERE employee_id = $1
-              RETURNING employee_id, username, full_name, designation, role`,
-            [employee_id, hasName ? fullName : null, hasRole ? designation : null]
+              RETURNING employee_id, username, full_name, designation, role,
+                        department, reporting_manager, joining_date, employment_status`,
+            [employee_id,
+             hasName ? fullName : null,
+             hasRole ? designation : null,
+             "department" in raw, raw.department || null,
+             "reporting_manager" in raw, raw.reporting_manager || null,
+             "joining_date" in raw, raw.joining_date || null,
+             "employment_status" in raw, raw.employment_status || null]
         );
 
         // On the record. Renaming somebody changes how every report and every
