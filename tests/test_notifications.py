@@ -333,6 +333,54 @@ def main():
     check("and makes a sound, on this platform's own path",
           len(alert_sounds) == 1, str(alert_sounds))
 
+    print("\nThe switches on My Profile actually switch something")
+    # A preference that saves a value nothing reads is worse than no
+    # preference: somebody turns notifications off, they keep arriving, and
+    # now nothing on the page can be trusted.
+    from client.infrastructure.database.database import Database
+    Database.initialize()
+    from client.services.settings_service import SettingsService
+
+    tray = _FakeTray()
+    sounds = []
+    _qt.QApplication.beep = staticmethod(lambda: sounds.append(1))
+    ran = []
+    import subprocess as _sp2
+    real_run2 = _sp2.run
+    _sp2.run = lambda cmd, **kw: ran.append(cmd) or type("R", (), {"returncode": 0})()
+    try:
+        SettingsService.save_setting(notifier.PREF_DESKTOP, "0")
+        shown_now = notifier.deliver(tray, "Title", "Body")
+        check("with desktop notifications off, nothing is shown at all",
+              shown_now is False and tray.shown == [] and ran == [],
+              f"shown={tray.shown} osascript={ran}")
+        check("and nothing sounds either — off means off",
+              sounds == [], str(sounds))
+
+        SettingsService.save_setting(notifier.PREF_DESKTOP, "1")
+        SettingsService.save_setting(notifier.PREF_SOUND, "0")
+        tray.shown.clear(); sounds.clear(); ran.clear()
+        notifier.deliver(tray, "Title", "Body")
+        check("with only the sound off, it still appears",
+              bool(tray.shown) or bool(ran), f"{tray.shown} {ran}")
+        check("but makes no noise",
+              sounds == [] and not any("Ping" in str(c) for c in ran),
+              f"beeps={sounds} osascript={ran}")
+
+        SettingsService.save_setting(notifier.PREF_SOUND, "1")
+        tray.shown.clear(); sounds.clear(); ran.clear()
+        notifier.deliver(tray, "Title", "Body")
+        check("and with both on it is back to normal",
+              bool(tray.shown) or bool(ran))
+    finally:
+        _sp2.run = real_run2
+        _qt.QApplication.beep = real_beep
+        for key in (notifier.PREF_DESKTOP, notifier.PREF_SOUND):
+            SettingsService.save_setting(key, "1")
+
+    check("a preference nobody has set means ON",
+          notifier.pref_enabled("notify_something_new") is True)
+
     print("\nWhen there is no tray")
     # On a machine with no system tray — some Linux desktops — showMessage is
     # unreachable. That must not take the panel down; this runs off the poll,

@@ -180,6 +180,35 @@ def collapse(items, limit=3):
     return head
 
 
+# ─────────────────────────────────────────────── what this machine wants
+
+# Preferences live in the client's own settings table, beside the theme:
+# these are choices about THIS machine, and somebody signed in on two may
+# reasonably want different answers on each. They are read here, where the
+# deciding happens, so a page cannot set one and have nothing change.
+PREF_DESKTOP = "notify_desktop"
+PREF_SOUND = "notify_sound"
+PREF_CHAT = "notify_chat"
+PREF_ALERTS = "notify_alerts"
+
+
+def pref_enabled(key: str, default: bool = True) -> bool:
+    """One preference. Anything unset means ON.
+
+    A fresh install that silently stopped notifying looks like a broken
+    feature, and the first thing anybody does with a broken feature is stop
+    trusting the ones beside it.
+    """
+    try:
+        from client.services.settings_service import SettingsService
+        raw = SettingsService.get_setting(key)
+    except Exception:
+        return default
+    if raw is None or raw == "":
+        return default
+    return str(raw) == "1"
+
+
 def deliver(tray, title, body):
     """Actually put it on the screen, on whichever desktop this is.
 
@@ -206,7 +235,13 @@ def deliver(tray, title, body):
     """
     import sys
 
+    # Switched off on this machine — and switched off means nothing appears
+    # and nothing sounds, not "appears without a sound".
+    if not pref_enabled(PREF_DESKTOP):
+        return False
+
     mac = sys.platform == "darwin"
+    quiet = not pref_enabled(PREF_SOUND)
     shown = False
 
     if tray is not None:
@@ -215,7 +250,7 @@ def deliver(tray, title, body):
             tray.showMessage(title, body,
                              QSystemTrayIcon.MessageIcon.Information, 6000)
             shown = not mac
-            if not mac:
+            if not mac and not quiet:
                 # A SOUND ON EVERY NOTIFICATION, by the owner's decision —
                 # group messages and administrative alerts included, not only
                 # what is addressed to this person by name.
@@ -231,7 +266,7 @@ def deliver(tray, title, body):
             script = (
                 f"display notification {_applescript_string(body)} "
                 f"with title {_applescript_string(title)} "
-                f'sound name "Ping"'
+                + ("" if quiet else 'sound name "Ping"')
             )
             subprocess.run(["osascript", "-e", script],
                            capture_output=True, timeout=10)

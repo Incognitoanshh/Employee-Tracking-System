@@ -35,6 +35,7 @@ from client.presentation.theme import (
     C, R, R_SM, app_style, button, table_style, scrollbar,
 )
 from client.presentation import theme as _theme
+from client.presentation.windows.profile_page import ProfilePage
 from client.presentation.widgets.panel_widgets import (
     ActivityRow, Card, NavButton, PageHeader, StatCard,
 )
@@ -1174,6 +1175,7 @@ class EmployeePanel(QWidget):
             "attendance": AttendancePage(self),
             "logs": LogsPage(self),
             "screenshots": ScreenshotsPage(self),
+            "profile": ProfilePage(self),
             "settings": SettingsPage(self),
             "help": HelpPage(self),
         }
@@ -1236,6 +1238,7 @@ class EmployeePanel(QWidget):
             ("attendance", "📅", "Attendance"),
             ("logs", "📋", "Activity Logs"),
             ("screenshots", "📷", "Screenshots"),
+            ("profile", "👤", "My Profile"),
             ("settings", "⚙", "Settings"),
             ("help", "❓", "Help & Support"),
         ):
@@ -1414,6 +1417,10 @@ class EmployeePanel(QWidget):
             nav.set_badge(total)
 
     def _on_chat_messages(self, arrived: list):
+        # Switched off for messages on this machine — see My Profile.
+        if not notifier.pref_enabled(notifier.PREF_CHAT):
+            return
+
         """Announce what arrived, and say who it was from and where.
 
         The deciding is in application/services/notifier — what to show, what
@@ -1458,6 +1465,10 @@ class EmployeePanel(QWidget):
         return {d["channel_id"] for d in getattr(team_page, "_directs", []) or []}
 
     def _on_chat_notifications(self, alerts: list):
+        # Switched off for alerts on this machine — see My Profile.
+        if not notifier.pref_enabled(notifier.PREF_ALERTS):
+            return
+
         """Announcements for everybody; the rest only for administrators."""
         for item in notifier.collapse(notifier.for_alerts(
                 alerts, role=getattr(SessionManager, "role", "employee"))):

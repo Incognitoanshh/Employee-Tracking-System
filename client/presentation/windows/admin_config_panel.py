@@ -5413,6 +5413,10 @@ class AdminConfigPanel(QMainWindow):
                     pass
 
     def _on_chat_messages(self, arrived: list):
+        # Switched off for messages on this machine — see My Profile.
+        if not notifier.pref_enabled(notifier.PREF_CHAT):
+            return
+
         """The same rules as the employee panel, from the same place.
 
         An admin is somebody's colleague as well as an administrator, and a
@@ -5445,6 +5449,10 @@ class AdminConfigPanel(QMainWindow):
             self._notify_tray(item["title"], item["body"], item["kind"])
 
     def _on_chat_alerts(self, alerts: list):
+        # Switched off for alerts on this machine — see My Profile.
+        if not notifier.pref_enabled(notifier.PREF_ALERTS):
+            return
+
         for item in notifier.collapse(notifier.for_alerts(
                 alerts, role=getattr(SessionManager, "role", "admin"))):
             self._notify_tray(item["title"], item["body"], item["kind"])
