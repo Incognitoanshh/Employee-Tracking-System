@@ -176,10 +176,20 @@ class ProfilePage(QWidget):
         screen gets a sentence and a way forward.
         """
         text = str(error or "")
-        try:
-            LoggerService.log_verbose(f"ProfilePage: {text}")
-        except Exception:
-            pass
+        # TO A FILE, AND ONCE.
+        #
+        # LoggerService.log and log_verbose both write a row into the queue
+        # that is uploaded, so a page that logs every failed refresh puts a
+        # line in the company's audit log each time somebody opens it. Sixty-
+        # eight rows of "Could not load your devices" turned up that way,
+        # which is the same flood the screenshot queue produced and was fixed
+        # for. A failure that keeps repeating is one fact, not sixty-eight.
+        if text != getattr(self, "_last_failure", None):
+            self._last_failure = text
+            try:
+                LoggerService._fallback_critical_log(f"ProfilePage: {text}")
+            except Exception:
+                pass
         network = any(word in text.lower() for word in
                       ("connection", "timed out", "timeout", "unreachable",
                        "max retries", "temporarily"))
@@ -512,6 +522,7 @@ class ProfilePage(QWidget):
         return response.content if response.status_code == 200 else None
 
     def _on_profile(self, profile: dict):
+        self._last_failure = None
         self._profile = profile or {}
         name = profile.get("full_name") or profile.get("username") or "—"
         self._name.setText(str(name))

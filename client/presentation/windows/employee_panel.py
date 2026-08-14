@@ -1284,13 +1284,20 @@ class EmployeePanel(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(14)
 
-        avatar = QLabel("👤")
+        # THE WHOLE CORNER OPENS THE PROFILE. Asked for after the page
+        # existed: the first thing anybody clicks to find their account is
+        # their own name and picture, not an entry further down a menu.
+        avatar = QPushButton("👤")
         avatar.setFixedSize(56, 56)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setCursor(Qt.CursorShape.PointingHandCursor)
+        avatar.setToolTip("My Profile")
         avatar.setStyleSheet(
-            f"background:{C.ELEVATED};border:1px solid {C.BORDER};"
-            f"border-radius:28px;font-size:24px;"
+            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};"
+            f"border-radius:28px;font-size:24px;color:{C.TEXT};}}"
+            f"QPushButton:hover{{background:{C.CARD_HOVER};border-color:{C.PRIMARY};}}"
         )
+        avatar.clicked.connect(lambda: self.go("profile"))
+        self._header_avatar = avatar
 
         who = QVBoxLayout()
         who.setSpacing(2)
@@ -1302,6 +1309,13 @@ class EmployeePanel(QWidget):
         self._sub.setStyleSheet(f"color:{C.PRIMARY};font-size:13px;font-weight:600;")
         who.addWidget(self._name)
         who.addWidget(self._sub)
+
+        # The name and the line under it are part of the same target.
+        for label in (self._name, self._sub):
+            label.setCursor(Qt.CursorShape.PointingHandCursor)
+            label.setToolTip("My Profile")
+            label.mousePressEvent = (
+                lambda _event, _self=self: _self.go("profile"))
 
         self._status_chip = QLabel()
         self._status_chip.setFixedHeight(56)

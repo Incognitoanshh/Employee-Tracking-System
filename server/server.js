@@ -13,6 +13,7 @@ const adminRoutes      = require("./routes/admin.routes");
 const attendanceRoutes = require("./routes/attendance.routes");
 const chatRoutes       = require("./routes/chat.routes");
 const profileRoutes    = require("./routes/profile.routes");
+const { applyPendingMigrations, migrationStatus } = require("./utils/migrate");
 
 // Startup env validation
 const REQUIRED_ENV = ["JWT_SECRET", "DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
@@ -87,10 +88,17 @@ app.use((req, res, next) => {
 app.get("/api/health", async (req, res) => {
     try {
         const result = await pool.query("SELECT NOW()");
+        // The schema state is here because /api/health is the command a
+        // deployment is already checked with. A release whose migration did
+        // not apply used to look exactly like a healthy one, right up until
+        // somebody opened the page that needed the new column.
+        const schema = migrationStatus();
         res.json({
             success:  true,
-            status:   "healthy",
+            status:   schema.up_to_date ? "healthy" : "degraded",
             database: "connected",
+            schema:   schema.up_to_date ? "up to date"
+                                        : `MIGRATION FAILED: ${schema.failed.join(", ")}`,
             time:     result.rows[0].now,
             uptime:   process.uptime(),
         });
@@ -244,6 +252,15 @@ setInterval(() => {
 // full shift old, so nothing is gained by looking more frequently, and the
 // query is a single UPDATE. Unref'd, like the heartbeat above, so it can
 // never be the reason a test process refuses to exit.
+// THE SCHEMA, BEFORE ANYTHING IS SERVED.
+//
+// Deploying is `git pull && pm2 restart`, which moves the code and nothing
+// else — so a release carrying a migration ran new code against an old
+// schema. It is invisible: everything that does not touch a new column keeps
+// working, and the one page that does answers 500. See utils/migrate.
+applyPendingMigrations(pool).catch((error) =>
+    console.error("[MIGRATE] could not run migrations:", error.message));
+
 const { closeAbandonedShifts } = require("./utils/attendance_cleanup");
 setInterval(() => {
     closeAbandonedShifts(pool)
