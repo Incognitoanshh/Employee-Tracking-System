@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from client.presentation.theme import C, R, R_SM, button, input_style, scrollbar
+from client.presentation.widgets.avatar import Avatar
 from client.presentation.widgets.panel_widgets import PageHeader
 from client.application.managers.chat_manager import ChatManager, MAX_BODY
 from client.application.managers.session_manager import SessionManager
@@ -402,6 +403,21 @@ class _Bubble(QFrame):
             # employees all reading as "Removed User" makes a conversation
             # impossible to attribute, which defeats keeping it.
             name = f"{name} (Former Employee)"
+
+        # THE SENDER'S FACE, before their name.
+        #
+        # This is the place the request was actually about: a conversation
+        # reads as people when you can see who is speaking, and as a log file
+        # when you cannot. Initials until somebody uploads a photo, and
+        # nothing is asked of the server for a face already drawn once — see
+        # widgets/avatar.py.
+        #
+        # Not for a former employee: their account is gone, so there is no
+        # photo to ask for and the request would only earn a 404 per message.
+        if not message.get("former"):
+            face = Avatar(22)
+            face.show_person(message.get("sender_id"), message.get("sender_name") or "")
+            head.addWidget(face)
 
         who = QLabel(name)
         who.setStyleSheet(

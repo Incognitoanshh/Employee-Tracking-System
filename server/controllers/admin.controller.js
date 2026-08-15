@@ -136,6 +136,23 @@ exports.getEmployees = async (req, res) => {
                 e.role,
                 e.full_name,
                 e.designation,
+                -- Carried so every list that draws a person can draw their
+                -- face. Without it the employee list, the admin's own header
+                -- and the team page all fell back to initials while the
+                -- profile page showed the photograph — the same person
+                -- looking like two different accounts.
+                e.photo,
+                e.email,
+                e.phone,
+                e.department,
+                e.reporting_manager,
+                -- The manager BY NAME. The column holds an employee id, and
+                -- an id is not an answer to "who does this person report
+                -- to" — the admin would have to look that up in the same
+                -- list they are already standing in.
+                (SELECT COALESCE(m.full_name, m.username) FROM employees m
+                  WHERE m.employee_id = e.reporting_manager) AS reporting_manager_name,
+                e.joining_date,
                 CASE WHEN oa.hit IS NOT NULL THEN 'online' ELSE 'offline' END AS status,
                 CASE WHEN oa.hit IS NOT NULL THEN NULL
                      ELSE GREATEST(
@@ -146,7 +163,9 @@ exports.getEmployees = async (req, res) => {
                 COALESCE(ec.verbose_logging, false) AS verbose_logging,
                 e.suspended
             FROM (
-                SELECT employee_id, username, role, full_name, designation, suspended
+                SELECT employee_id, username, role, full_name, designation,
+                       suspended, photo, email, phone, department,
+                       reporting_manager, joining_date
                 FROM employees
                 ${searchWhere}
                 ORDER BY employee_id ASC
@@ -345,6 +364,12 @@ exports.updateProfile = async (req, res) => {
     const raw = req.body || {};
     const hasName = "full_name" in raw;
     const hasRole = "designation" in raw;
+    // CONTACT DETAILS, NOT THE COMPANY'S RECORD. An ordinary admin sets these
+    // while onboarding somebody, which is why they are not in ORG_FIELDS
+    // below — a phone number is a working detail in the same way a
+    // designation is, not a statement about somebody's place in the company.
+    const hasEmail = "email" in raw;
+    const hasPhone = "phone" in raw;
 
     // THE FIELDS ONLY A SUPER ADMIN MAY SET.
     //
@@ -364,8 +389,24 @@ exports.updateProfile = async (req, res) => {
         });
     }
 
-    if (!hasName && !hasRole && !org.length) {
+    if (!hasName && !hasRole && !hasEmail && !hasPhone && !org.length) {
         return res.status(400).json({ success: false, message: "Nothing to change" });
+    }
+
+    // The same shapes the employee's own page enforces, so a value set by an
+    // admin cannot be one the person themselves would have been refused.
+    const email = String(raw.email ?? "").trim();
+    if (hasEmail && email && (email.length > 255
+        || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        return res.status(400).json({
+            success: false, message: "That does not look like an email address",
+        });
+    }
+    const phone = String(raw.phone ?? "").trim();
+    if (hasPhone && phone && !/^[0-9+()\-\s]{6,32}$/.test(phone)) {
+        return res.status(400).json({
+            success: false, message: "That does not look like a phone number",
+        });
     }
 
     const STATUSES = ["active", "probation", "notice_period", "resigned", "terminated"];
@@ -432,17 +473,22 @@ exports.updateProfile = async (req, res) => {
                     department        = CASE WHEN $4::boolean THEN $5 ELSE department END,
                     reporting_manager = CASE WHEN $6::boolean THEN $7 ELSE reporting_manager END,
                     joining_date      = CASE WHEN $8::boolean THEN $9::date ELSE joining_date END,
-                    employment_status = CASE WHEN $10::boolean THEN $11 ELSE employment_status END
+                    employment_status = CASE WHEN $10::boolean THEN $11 ELSE employment_status END,
+                    email             = CASE WHEN $12::boolean THEN $13 ELSE email END,
+                    phone             = CASE WHEN $14::boolean THEN $15 ELSE phone END
               WHERE employee_id = $1
               RETURNING employee_id, username, full_name, designation, role,
-                        department, reporting_manager, joining_date, employment_status`,
+                        department, reporting_manager, joining_date,
+                        employment_status, email, phone`,
             [employee_id,
              hasName ? fullName : null,
              hasRole ? designation : null,
              "department" in raw, raw.department || null,
              "reporting_manager" in raw, raw.reporting_manager || null,
              "joining_date" in raw, raw.joining_date || null,
-             "employment_status" in raw, raw.employment_status || null]
+             "employment_status" in raw, raw.employment_status || null,
+             hasEmail, email || null,
+             hasPhone, phone || null]
         );
 
         // On the record. Renaming somebody changes how every report and every

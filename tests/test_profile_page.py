@@ -39,6 +39,7 @@ def check(label, ok, detail=""):
 PROFILE = {
     "employee_id": "E001", "username": "rajesh", "full_name": "Rajesh Kumar",
     "designation": "Developer", "role": "employee", "phone": "+91 98765 43210",
+    "email": "rajesh@amaze.co",
     "department": "Engineering", "team": "Development",
     "reporting_manager": "Priya Nair", "joining_date": "2025-06-01",
     "employment_status": "probation", "photo": None, "status": "online",
@@ -102,21 +103,28 @@ def main():
     check("and the employment status in words a person reads",
           page._rows["employment_status"].text() == "Probation",
           page._rows["employment_status"].text())
-    check("the phone goes into the one box that can be typed in",
+    check("the phone goes into a box that can be typed in",
           page._phone.text() == "+91 98765 43210", page._phone.text())
+    check("and so does the email",
+          page._email.text() == "rajesh@amaze.co", page._email.text())
     check("with initials standing in for a photo nobody has set",
           page._avatar.text() == "RK", page._avatar.text())
 
-    print("\nTHE RULE: two things, and no more")
-    # Not "the fields are disabled" — counted. Anything editable that is not
-    # the phone number is a way to change something that is not the
-    # employee's to change.
+    print("\nTHE RULE: contact details and a photo, and no more")
+    # Not "the fields are disabled" — COUNTED. Anything editable that is not
+    # one of these is a way to change something that is not the employee's to
+    # change, and the count is what notices a box added later without anybody
+    # deciding it belonged here.
+    #
+    # It was one field — the phone — until an email was asked for. That is the
+    # only reason this number has ever moved, and it should not move again
+    # without the same kind of decision.
     boxes = page.findChildren(QLineEdit)
-    check("exactly ONE editable field on the whole page", len(boxes) == 1,
+    check("exactly TWO editable fields on the whole page", len(boxes) == 2,
           f"{len(boxes)}: {[b.placeholderText() for b in boxes]}")
-    check("and it is the phone number",
-          boxes and "98765" in boxes[0].placeholderText(),
-          boxes[0].placeholderText() if boxes else "none")
+    placeholders = " ".join(b.placeholderText() for b in boxes)
+    check("and they are the phone number and the email address",
+          "98765" in placeholders and "@" in placeholders, placeholders)
     labels = [page._rows[k] for k in ("employee_id", "department", "designation",
                                       "reporting_manager", "employment_status")]
     check("id, department, designation, manager and status are labels, not inputs",
@@ -213,6 +221,46 @@ def main():
         pp.QMessageBox.question = real_question
     check("it asks before ending every session", asked == [1], str(asked))
     check("and saying no does nothing at all", called == [], str(called))
+
+    print("\nVerified, or not, and never quietly in between")
+    # A typed address and a proved address are not the same thing, and the
+    # difference only matters at the moment something is sent to it. The page
+    # has to say which it is looking at — silence here is what lets an
+    # unverified address be treated later as a working one.
+    page._on_profile({**PROFILE, "email": "rajesh@amaze.co", "email_verified": True})
+    check("a verified address says so", "Verified" in page._email_state.text(),
+          page._email_state.text())
+    check("and offers nothing to press", page._verify_btn.isHidden())
+
+    page._on_profile({**PROFILE, "email": "rajesh@amaze.co", "email_verified": False})
+    check("an unverified one says THAT", page._email_state.text() == "Not verified",
+          page._email_state.text())
+    check("and offers the way to fix it", not page._verify_btn.isHidden())
+
+    page._on_profile({**PROFILE, "email": None, "email_verified": False})
+    check("with no address at all there is nothing to verify",
+          page._email_state.text() == "" and page._verify_btn.isHidden(),
+          page._email_state.text())
+
+    print("\nAn address with no @ in it never reaches the network")
+    # The commonest typo there is, and the page is 200 ms from the server —
+    # see the round-trip this product actually runs at. Being told after the
+    # wait is a worse way to be told, so it is checked here as well as there.
+    sent = []
+    real_patch = pp._http.patch
+    pp._http.patch = lambda *a, **k: sent.append(k.get("json")) or (_ for _ in ()).throw(
+        AssertionError("nothing should have been sent"))
+    said = []
+    real_toast = page._toast
+    page._toast = lambda message, ok=True: said.append((message, ok))
+    try:
+        page._email.setText("ansh@gmail")
+        page._save_contact()
+        check("nothing is sent", sent == [], str(sent))
+        check("and the person is told why", said and said[-1][1] is False, str(said))
+    finally:
+        pp._http.patch = real_patch
+        page._toast = real_toast
 
     print("\nA photo that is too large is refused before it is uploaded")
     big = os.path.join(os.environ["ETS_DATA_DIR"], "huge.png")

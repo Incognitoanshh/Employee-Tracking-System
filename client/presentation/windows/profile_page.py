@@ -26,13 +26,14 @@ library for four small graphs.
 from __future__ import annotations
 
 import os
+import re
 
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QPixmap, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QFileDialog, QMessageBox, QComboBox,
-    QCheckBox, QSizePolicy,
+    QCheckBox, QSizePolicy, QInputDialog,
 )
 
 from client.core import http as _http
@@ -42,6 +43,7 @@ from client.services.settings_service import SettingsService
 from client.services.logger_service import LoggerService
 from client.presentation import theme as _theme
 from client.presentation.theme import C, R_SM, button, scrollbar
+from client.presentation.widgets.avatar import Avatar, forget as forget_avatar
 from client.presentation.widgets.panel_widgets import Card, PageHeader, Sparkline
 
 # The keys live with the notification decisions, in application/services/
@@ -84,63 +86,6 @@ def _seconds_as_hours(seconds) -> str:
         return "—"
     hours, rest = divmod(max(0, seconds), 3600)
     return f"{hours}h {rest // 60:02d}m"
-
-
-class _Avatar(QLabel):
-    """The photo, drawn round, with the person's initials until one exists."""
-
-    SIZE = 96
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(self.SIZE, self.SIZE)
-        self._pixmap: QPixmap | None = None
-        self._initials = "?"
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._restyle()
-
-    def _restyle(self):
-        self.setStyleSheet(
-            f"QLabel{{background:{C.PRIMARY_DIM};color:#ffffff;"
-            f"border-radius:{self.SIZE // 2}px;font-size:30px;font-weight:700;"
-            f"border:none;}}")
-
-    def set_initials(self, name: str):
-        parts = [p for p in str(name or "").split() if p]
-        self._initials = ("".join(p[0] for p in parts[:2]) or "?").upper()
-        if self._pixmap is None:
-            self.setText(self._initials)
-
-    def set_image(self, data: bytes | None):
-        if not data:
-            self._pixmap = None
-            self.setPixmap(QPixmap())
-            self.setText(self._initials)
-            self._restyle()
-            return
-        source = QPixmap()
-        if not source.loadFromData(data):
-            return
-        # Scaled and clipped here rather than by a stylesheet: a round mask in
-        # CSS leaves the corners of the image showing through on some
-        # platforms, which looks like a rendering fault.
-        side = self.SIZE
-        source = source.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                               Qt.TransformationMode.SmoothTransformation)
-        canvas = QPixmap(side, side)
-        canvas.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addEllipse(0, 0, side, side)
-        painter.setClipPath(path)
-        painter.drawPixmap(
-            (side - source.width()) // 2, (side - source.height()) // 2, source)
-        painter.end()
-        self._pixmap = canvas
-        self.setText("")
-        self.setStyleSheet("QLabel{background:transparent;border:none;}")
-        self.setPixmap(canvas)
 
 
 class ProfilePage(QWidget):
@@ -237,7 +182,7 @@ class ProfilePage(QWidget):
             ("Department", "department"), ("Team", "team"),
             ("Designation", "designation"), ("Reporting manager", "reporting_manager"),
             ("Joining date", "joining_date"), ("Employment status", "employment_status"),
-        ], note="Only your phone number and photo are yours to change. "
+        ], note="Only your phone number, email and photo are yours to change. "
                 "Everything else is set by your administrator."))
         body.addWidget(self._work_card())
         body.addWidget(self._devices_card())
@@ -252,7 +197,7 @@ class ProfilePage(QWidget):
         outer.setContentsMargins(18, 16, 18, 16)
         outer.setSpacing(18)
 
-        self._avatar = _Avatar()
+        self._avatar = Avatar(96)
         outer.addWidget(self._avatar, 0, Qt.AlignmentFlag.AlignTop)
 
         col = QVBoxLayout()
@@ -278,23 +223,57 @@ class ProfilePage(QWidget):
         col.addSpacing(6)
         col.addLayout(photo_row)
 
-        phone_row = QHBoxLayout()
-        phone_row.setSpacing(8)
-        label = QLabel("Phone")
-        label.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:13px;border:none;")
-        self._phone = QLineEdit()
-        self._phone.setPlaceholderText("+91 98765 43210")
-        self._phone.setMaximumWidth(220)
+        # Phone and email together, saved by one button.
+        #
+        # Two Save buttons for two adjacent boxes is two requests and two ways
+        # to leave half a change behind — somebody who edits both and presses
+        # the first one has saved half of what they meant to.
+        def _contact_row(caption, placeholder, width=240):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            label = QLabel(caption)
+            label.setFixedWidth(52)
+            label.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:13px;border:none;")
+            field = QLineEdit()
+            field.setPlaceholderText(placeholder)
+            field.setMaximumWidth(width)
+            row.addWidget(label)
+            row.addWidget(field)
+            row.addStretch()
+            return row, field
+
+        phone_row, self._phone = _contact_row("Phone", "+91 98765 43210", 220)
+        email_row, self._email = _contact_row("Email", "you@company.com")
+
+        # WHETHER THE ADDRESS IS PROVED, beside the box that holds it.
+        #
+        # An address somebody typed and an address somebody proved are not the
+        # same thing, and the difference only matters at the moment something
+        # is sent to it. Saying so here — rather than nowhere — is what stops
+        # an unverified address being treated as a working one later.
+        self._email_state = QLabel("")
+        self._email_state.setStyleSheet(
+            f"color:{C.TEXT_MUTED};font-size:12px;border:none;background:transparent;")
+        self._verify_btn = QPushButton("Verify")
+        self._verify_btn.setStyleSheet(button("secondary"))
+        self._verify_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._verify_btn.clicked.connect(self._start_email_verification)
+        self._verify_btn.hide()
+        email_row.insertWidget(2, self._email_state)
+        email_row.insertWidget(3, self._verify_btn)
+        for field in (self._phone, self._email):
+            field.returnPressed.connect(self._save_contact)
+
         save = QPushButton("Save")
         save.setStyleSheet(button("primary"))
         save.setCursor(Qt.CursorShape.PointingHandCursor)
-        save.clicked.connect(self._save_phone)
-        phone_row.addWidget(label)
-        phone_row.addWidget(self._phone)
-        phone_row.addWidget(save)
-        phone_row.addStretch()
+        save.clicked.connect(self._save_contact)
+        phone_row.insertWidget(2, save)
+
         col.addSpacing(8)
         col.addLayout(phone_row)
+        col.addSpacing(4)
+        col.addLayout(email_row)
 
         outer.addLayout(col, 1)
         return card
@@ -539,9 +518,14 @@ class ProfilePage(QWidget):
                 value = str(value).replace("_", " ").title()
             self._rows[key].setText(str(value) if value else "—")
 
-        # Not overwritten while somebody is typing in it.
+        # Not overwritten while somebody is typing in it. A refresh landing
+        # mid-edit would replace what they were half way through writing.
         if not self._phone.hasFocus():
             self._phone.setText(str(profile.get("phone") or ""))
+        if not self._email.hasFocus():
+            self._email.setText(str(profile.get("email") or ""))
+        self._show_email_state(profile.get("email"),
+                               bool(profile.get("email_verified")))
 
         changed = str(profile.get("password_changed_at") or "")
         self._rows["password_changed"].setText(changed[:10] if changed else "Never")
@@ -615,19 +599,99 @@ class ProfilePage(QWidget):
 
     # ── the two things this page may change ─────────────────────────────
 
-    def _save_phone(self):
-        value = self._phone.text().strip()
+    def _show_email_state(self, email, verified: bool):
+        """The tick, or the button that earns it."""
+        if not email:
+            self._email_state.setText("")
+            self._verify_btn.hide()
+            return
+        if verified:
+            self._email_state.setText("✓ Verified")
+            self._email_state.setStyleSheet(
+                f"color:{C.GREEN};font-size:12px;font-weight:600;"
+                "border:none;background:transparent;")
+            self._verify_btn.hide()
+        else:
+            self._email_state.setText("Not verified")
+            self._email_state.setStyleSheet(
+                f"color:{C.TEXT_MUTED};font-size:12px;"
+                "border:none;background:transparent;")
+            self._verify_btn.show()
+
+    def _start_email_verification(self):
+        """Ask the server to send a code, then ask for it back.
+
+        The code is never in any reply — it goes to the mailbox and nowhere
+        else, which is the entire point. So this cannot check anything itself;
+        it carries what was typed to the server and reports what the server
+        says.
+        """
+        self._verify_btn.setEnabled(False)
+
+        def request():
+            response = _http.post(f"{API_BASE_URL}/profile/me/email/code",
+                                  headers=_headers(), timeout=30)
+            if response.status_code != 200:
+                raise RuntimeError(self._message_from(
+                    response, "The code could not be sent."))
+            return response.json()
+
+        def sent(data):
+            self._verify_btn.setEnabled(True)
+            where = data.get("sent_to") or self._email.text().strip()
+            minutes = data.get("valid_minutes") or 10
+            code, ok = QInputDialog.getText(
+                self, "Verify your email",
+                f"A six-digit code has been sent to\n{where}\n\n"
+                f"It is valid for {minutes} minutes.\n\nEnter the code:")
+            if not ok or not str(code).strip():
+                return
+            self._submit_email_code(str(code).strip())
+
+        def failed(error):
+            self._verify_btn.setEnabled(True)
+            self._toast(str(error), ok=False)
+
+        self._run(request, sent, failed)
+
+    def _submit_email_code(self, code: str):
+        def send():
+            response = _http.post(
+                f"{API_BASE_URL}/profile/me/email/verify",
+                json={"code": code},
+                headers={**_headers(), "Content-Type": "application/json"},
+                timeout=20)
+            if response.status_code != 200:
+                raise RuntimeError(self._message_from(
+                    response, "That code was not accepted."))
+            return True
+
+        self._run(send, lambda _ok: (self._toast("Email verified."),
+                                     self.refresh()))
+
+    def _save_contact(self):
+        phone = self._phone.text().strip()
+        email = self._email.text().strip()
+
+        # CHECKED HERE TOO, and not only on the server. A typed address with
+        # no @ in it is the commonest mistake there is, and finding out after
+        # a round trip — on a connection that is 200 ms away, see the latency
+        # this product runs at — is a worse way to be told.
+        if email and not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+            self._toast("That does not look like an email address.", ok=False)
+            return
 
         def send():
-            response = _http.patch(f"{API_BASE_URL}/profile/me",
-                                   json={"phone": value},
-                                   headers={**_headers(), "Content-Type": "application/json"},
-                                   timeout=15)
+            response = _http.patch(
+                f"{API_BASE_URL}/profile/me",
+                json={"phone": phone, "email": email},
+                headers={**_headers(), "Content-Type": "application/json"},
+                timeout=15)
             if response.status_code != 200:
                 raise RuntimeError(self._message_from(response, "Could not save that."))
-            return value
+            return True
 
-        self._run(send, lambda _v: self._toast("Phone number saved."))
+        self._run(send, lambda _v: self._toast("Saved."))
 
     def _pick_photo(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -657,7 +721,9 @@ class ProfilePage(QWidget):
                 raise RuntimeError(self._message_from(response, "That photo was not accepted."))
             return True
 
-        self._run(send, lambda _ok: (self._toast("Photo updated."), self.refresh()))
+        self._run(send, lambda _ok: (forget_avatar(SessionManager.employee_id),
+                                     self._toast("Photo updated."),
+                                     self._redraw_everywhere()))
 
     def _remove_photo(self):
         def send():
@@ -667,8 +733,23 @@ class ProfilePage(QWidget):
                 raise RuntimeError("Could not remove the photo.")
             return True
 
-        self._run(send, lambda _ok: (self._avatar.set_image(None),
-                                     self._toast("Photo removed.")))
+        self._run(send, lambda _ok: (forget_avatar(SessionManager.employee_id),
+                                     self._toast("Photo removed."),
+                                     self._redraw_everywhere()))
+
+    def _redraw_everywhere(self):
+        """Put the new picture on this page AND on the header behind it.
+
+        The cache is cleared first, so this re-asks the server once and every
+        Avatar drawn afterwards — the team page, a message, the next panel
+        opened — gets the new picture from that one answer.
+        """
+        self.refresh()
+        header = getattr(self._panel, "_header_avatar", None)
+        if header is not None and hasattr(header, "show_person"):
+            header.show_person(
+                SessionManager.employee_id,
+                getattr(SessionManager, "full_name", None) or SessionManager.employee_id)
 
     # ── security ────────────────────────────────────────────────────────
 

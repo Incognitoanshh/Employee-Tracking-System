@@ -36,6 +36,7 @@ from client.presentation.theme import (
 )
 from client.presentation import theme as _theme
 from client.presentation.windows.profile_page import ProfilePage
+from client.presentation.widgets.avatar import Avatar, ClickableAvatar, forget as forget_avatar
 from client.presentation.widgets.panel_widgets import (
     ActivityRow, Card, NavButton, PageHeader, StatCard,
 )
@@ -1287,15 +1288,13 @@ class EmployeePanel(QWidget):
         # THE WHOLE CORNER OPENS THE PROFILE. Asked for after the page
         # existed: the first thing anybody clicks to find their account is
         # their own name and picture, not an entry further down a menu.
-        avatar = QPushButton("👤")
-        avatar.setFixedSize(56, 56)
-        avatar.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Their own face, not a generic 👤 glyph — the picture somebody
+        # uploaded should be the first place it shows up.
+        avatar = ClickableAvatar(56)
         avatar.setToolTip("My Profile")
-        avatar.setStyleSheet(
-            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};"
-            f"border-radius:28px;font-size:24px;color:{C.TEXT};}}"
-            f"QPushButton:hover{{background:{C.CARD_HOVER};border-color:{C.PRIMARY};}}"
-        )
+        avatar.show_person(
+            SessionManager.employee_id,
+            getattr(SessionManager, "full_name", None) or SessionManager.employee_id)
         avatar.clicked.connect(lambda: self.go("profile"))
         self._header_avatar = avatar
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import requests
 from client.core import http as _http
 from datetime import date, datetime
@@ -56,6 +57,7 @@ from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
 from client.presentation.theme import ADMIN as _THEME_ADMIN
 from client.presentation import theme as _theme
+from client.presentation.widgets.avatar import Avatar, ClickableAvatar
 from client.core.config import API_BASE_URL, APP_VERSION
 
 
@@ -116,6 +118,11 @@ PAGES = [
      "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
      "subtitle": "Detailed activity history for compliance and review."},
+    # An administrator is an account like any other, and asked for it in
+    # those words: "admin ka bhi profile hona chahiye". The same page the
+    # employee panel shows — one screen, so a change to it reaches everybody.
+    {"key": "profile",     "icon": "👤", "title": "My Profile",
+     "subtitle": "Your account, your devices and your week."},
 ]
 
 
@@ -3570,22 +3577,87 @@ class EmployeeDetailsDialog(QDialog):
         h_lay.setContentsMargins(20, 16, 20, 16)
         h_lay.setSpacing(4)
 
+        # THE PERSON, NOT JUST THEIR NUMBERS.
+        #
+        # This dialog used to open on a username, a role pill, an id and four
+        # stat cards. Everything the company actually records about somebody —
+        # their name, photo, phone, email, department, who they report to,
+        # when they joined — existed on the record and had no screen here at
+        # all, so the only way to look somebody up was to read the database.
         name_row = QHBoxLayout()
-        title = QLabel(self._employee.get('username', '—'))
+        name_row.setSpacing(12)
+
+        face = Avatar(52)
+        face.show_person(
+            self._employee.get("employee_id"),
+            self._employee.get("full_name") or self._employee.get("username") or "")
+        name_row.addWidget(face)
+
+        who = QVBoxLayout()
+        who.setSpacing(2)
+        # The NAME first, with the login username under it. Every other part
+        # of the product shows people by name; this dialog led with the login
+        # name, so a person read as two different accounts across two screens.
+        shown = (self._employee.get("full_name")
+                 or self._employee.get("username") or "—")
+        title = QLabel(str(shown))
+        title.setTextFormat(Qt.TextFormat.PlainText)
         title.setStyleSheet(f"color:{C['text_primary']}; font-size:17px; font-weight:700; background:transparent;")
-        name_row.addWidget(title)
+        who.addWidget(title)
+        sub = QLabel(f"{self._employee.get('employee_id', '—')}  ·  "
+                     f"{self._employee.get('username', '—')}")
+        sub.setTextFormat(Qt.TextFormat.PlainText)
+        sub.setStyleSheet(f"color:{C['text_secondary']}; font-size:12px; background:transparent;")
+        who.addWidget(sub)
+        name_row.addLayout(who)
+
         name_row.addStretch()
-        role_pill = QLabel(str(self._employee.get('role', '—')).title())
+        role_pill = QLabel(str(self._employee.get('role', '—')).replace("_", " ").title())
         role_pill.setStyleSheet(
             f"background:{C['accent_soft']}; color:{C['accent_hover']}; padding:4px 12px; "
             "border-radius:10px; font-size:11px; font-weight:700;"
         )
         name_row.addWidget(role_pill)
         h_lay.addLayout(name_row)
+        h_lay.addSpacing(10)
 
-        sub = QLabel(f"Employee ID: {self._employee.get('employee_id', '—')}")
-        sub.setStyleSheet(f"color:{C['text_secondary']}; font-size:12px; background:transparent;")
-        h_lay.addWidget(sub)
+        # Two columns of label/value, in the same order My Profile uses — an
+        # admin and the employee should be reading the same page about the
+        # same person, not two different arrangements of it.
+        details = QGridLayout()
+        details.setHorizontalSpacing(18)
+        details.setVerticalSpacing(6)
+        self._profile_rows = {}
+        FIELDS = [
+            ("Email",             "email"),
+            ("Phone",             "phone"),
+            ("Designation",       "designation"),
+            ("Department",        "department"),
+            ("Reporting manager", "reporting_manager"),
+            ("Joining date",      "joining_date"),
+        ]
+        for index, (caption, key) in enumerate(FIELDS):
+            row, column = index % 3, (index // 3) * 2
+            label = QLabel(caption)
+            label.setStyleSheet(
+                f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+            value = QLabel("—")
+            # PLAIN TEXT. These are values somebody typed, and a QLabel
+            # renders HTML by default — a name written as markup would be
+            # drawn as markup on the admin's screen.
+            value.setTextFormat(Qt.TextFormat.PlainText)
+            value.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            value.setStyleSheet(
+                f"color:{C['text_primary']}; font-size:12px; font-weight:600;"
+                "background:transparent;")
+            details.addWidget(label, row, column)
+            details.addWidget(value, row, column + 1)
+            self._profile_rows[key] = value
+        details.setColumnStretch(1, 1)
+        details.setColumnStretch(3, 1)
+        h_lay.addLayout(details)
+        self._fill_profile(self._employee)
 
         root.addWidget(header_card)
 
@@ -3617,6 +3689,25 @@ class EmployeeDetailsDialog(QDialog):
         btns.rejected.connect(self.reject)
         btns.accepted.connect(self.accept)
         root.addWidget(btns)
+
+    def _fill_profile(self, employee: dict):
+        """Put what is known on screen; a dash where nothing is recorded.
+
+        A dash here means the field is genuinely empty on the record — it is
+        not a loading state and not a failure. The fields it fills only
+        started arriving from the employee list once the list query carried
+        them, which is why every one of them read "—" before.
+        """
+        for key, label in getattr(self, "_profile_rows", {}).items():
+            value = employee.get(key)
+            if key == "reporting_manager":
+                # The name if the server resolved one, the id if it could
+                # not — an id is a poor answer but it is still an answer,
+                # and it is what somebody would search for.
+                value = employee.get("reporting_manager_name") or value
+            if key == "joining_date" and value:
+                value = str(value)[:10]        # a date, not a timestamp
+            label.setText(str(value) if value else "—")
 
     def _set_stats(self, details: dict):
         s = details.get('data', details)
@@ -3767,6 +3858,28 @@ class EmployeeDetailsDialog(QDialog):
             w.quit()
             w.wait(1000)
         event.accept()
+
+
+def _avatar_request(employee_id, on_ready):
+    from client.presentation.widgets.avatar import request as _request
+    _request(employee_id, on_ready)
+
+
+def _set_row_face(cell, data):
+    """Put a photo on a table row, if the row is still there.
+
+    The request is in the air while the table can be rebuilt under it — a
+    refresh, a search, a page change — and drawing onto a deleted cell is a
+    hard crash rather than an exception.
+    """
+    from client.presentation.widgets.avatar import round_pixmap
+    pixmap = round_pixmap(data, 26)
+    if pixmap is None:
+        return
+    try:
+        cell.setIcon(QIcon(pixmap))
+    except RuntimeError:
+        pass
 
 
 class _EmployeesTab(QWidget):
@@ -4002,9 +4115,26 @@ class _EmployeesTab(QWidget):
             # a message from her could not find her in her own employee list.
             full_name = str(emp.get("full_name") or "").strip()
             shown = f"{full_name}  ·  {username}" if full_name else str(username)
-            self._table.setItem(i, 1, _cell(
+            name_cell = _cell(
                 shown,
-                tooltip=f"Login username: {username}" if full_name else None))
+                tooltip=f"Login username: {username}" if full_name else None)
+            self._table.setItem(i, 1, name_cell)
+
+            # THE FACE, beside the name.
+            #
+            # Asked for in one line — "photo agar employee lagayega to sab
+            # jagah dikhna chahiye like instagram" — and it earns its place
+            # here more than anywhere: a list of names is scanned, and a
+            # picture is found faster than a word. Only for those who have
+            # uploaded one; nobody gets a placeholder photograph.
+            #
+            # An icon rather than a widget in the cell. Thirty QLabels make
+            # the rows tall and the scrolling coarse, and the icon is drawn
+            # by the table itself.
+            if emp.get("photo"):
+                _avatar_request(
+                    emp_id,
+                    lambda data, cell=name_cell: _set_row_face(cell, data))
             self._table.setItem(i, 2, QTableWidgetItem(self._role_label(role)))
 
             st_item = QTableWidgetItem(status_text)
@@ -4458,7 +4588,7 @@ class _EmployeesTab(QWidget):
         """
         emp_id = emp.get("employee_id", "")
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Edit name — {emp_id}")
+        dlg.setWindowTitle(f"Edit — {emp_id}")
         dlg.setMinimumWidth(380)
         dlg.setStyleSheet(f"QDialog {{ background: {C['bg_surface']}; }}")
 
@@ -4475,6 +4605,75 @@ class _EmployeesTab(QWidget):
         layout.addWidget(_muted_label("Designation  (optional)"))
         layout.addWidget(role_text)
         layout.addSpacing(6)
+
+        # WHERE THE DASHES CAME FROM.
+        #
+        # Department, reporting manager and joining date have existed on the
+        # employee record and in the API since My Profile shipped — with no
+        # form anywhere that could set them. So every profile showed "—" on
+        # three lines for ever, and it read as a page that had not loaded.
+        #
+        # Only a super admin, which is the rule the server already enforces:
+        # these describe somebody's place in the company, and an ordinary
+        # admin moving people between departments or changing who they report
+        # to is an organisational change, not an administrative one.
+        # Contact details — any admin, because onboarding somebody is what an
+        # admin does. The employee can change these on their own page too;
+        # this is for the day they are set up, before they have signed in.
+        email = QLineEdit(str(emp.get("email") or ""))
+        email.setPlaceholderText("name@company.com")
+        phone = QLineEdit(str(emp.get("phone") or ""))
+        phone.setPlaceholderText("+91 98765 43210")
+        layout.addWidget(_muted_label("Email  (optional)"))
+        layout.addWidget(email)
+        layout.addSpacing(6)
+        layout.addWidget(_muted_label("Phone  (optional)"))
+        layout.addWidget(phone)
+        layout.addSpacing(6)
+
+        i_am_super = getattr(SessionManager, "role", "") == "super_admin"
+        department = QLineEdit(str(emp.get("department") or ""))
+        manager = QComboBox()
+        joining = QDateEdit()
+        joining.setCalendarPopup(True)
+        joining.setDisplayFormat("yyyy-MM-dd")
+        joining.setSpecialValueText("Not set")
+        joining.setMinimumDate(QDate(1970, 1, 1))
+
+        if i_am_super:
+            layout.addWidget(_muted_label("Department  (optional)"))
+            layout.addWidget(department)
+            layout.addSpacing(6)
+
+            # A LIST, NOT A TYPED ID. A manager is another employee, and a
+            # typed identifier is a typo away from pointing at nobody — which
+            # the profile would then show as a blank line with no way to tell
+            # whether it was unset or wrong.
+            manager.addItem("— none —", "")
+            # The people on the page in front of the admin. The list is
+            # paginated, so a manager on another page is reached by searching
+            # for them first — which is how this table is used anyway, and is
+            # better than loading every employee in the company to fill a
+            # dropdown that is opened rarely.
+            for other in getattr(self, "_rows", []) or []:
+                other_id = str(other.get("employee_id") or "")
+                if not other_id or other_id == emp_id:
+                    continue          # nobody reports to themselves
+                label = str(other.get("full_name") or other.get("username") or other_id)
+                manager.addItem(f"{label}  ·  {other_id}", other_id)
+            current_manager = str(emp.get("reporting_manager") or "")
+            index = manager.findData(current_manager)
+            manager.setCurrentIndex(index if index >= 0 else 0)
+            layout.addWidget(_muted_label("Reporting manager  (optional)"))
+            layout.addWidget(manager)
+            layout.addSpacing(6)
+
+            existing = str(emp.get("joining_date") or "")[:10]
+            parsed = QDate.fromString(existing, "yyyy-MM-dd") if existing else QDate()
+            joining.setDate(parsed if parsed.isValid() else joining.minimumDate())
+            layout.addWidget(_muted_label("Joining date  (optional)"))
+            layout.addWidget(joining)
+            layout.addSpacing(6)
 
         note = QLabel(
             f"Login username stays {emp.get('username', '')}. This changes how "
@@ -4496,9 +4695,29 @@ class _EmployeesTab(QWidget):
                     "A name is required. Leaving it empty would put this "
                     "account back to showing its login username.")
                 return
+            typed_email = email.text().strip()
+            if typed_email and not re.match(
+                    r"^[^\s@]+@[^\s@]+\.[^\s@]+$", typed_email):
+                QMessageBox.warning(
+                    self, "Check the email",
+                    "That does not look like an email address. Leave it empty "
+                    "if you do not have one yet.")
+                return
+            payload = {"full_name": typed,
+                       "designation": role_text.text().strip(),
+                       "email": typed_email,
+                       "phone": phone.text().strip()}
+            if i_am_super:
+                payload["department"] = department.text().strip()
+                payload["reporting_manager"] = manager.currentData() or ""
+                # The minimum date is what "Not set" shows as, so it means
+                # empty rather than 1 January 1970 — a date that would
+                # otherwise be saved as somebody's first day at work.
+                payload["joining_date"] = (
+                    "" if joining.date() == joining.minimumDate()
+                    else joining.date().toString("yyyy-MM-dd"))
             worker = _PostWorker(
-                f"{API_BASE_URL}/admin/employees/{emp_id}/profile",
-                {"full_name": typed, "designation": role_text.text().strip()})
+                f"{API_BASE_URL}/admin/employees/{emp_id}/profile", payload)
 
             def done(data):
                 if data.get("success"):
@@ -4655,6 +4874,7 @@ class _EmployeesTab(QWidget):
 
 class _Sidebar(QFrame):
     pageChanged = Signal(int)
+    profile_clicked = Signal()
 
     def __init__(self):
         super().__init__()
@@ -4767,10 +4987,11 @@ class _Sidebar(QFrame):
             "admin": "Admin  ·  Employee Management",
         }.get(actual_role, "Admin")
 
-        avatar = QLabel(display_name[:1].upper())
-        avatar.setFixedSize(32, 32)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet(f"background:{C['accent']}; color:white; border-radius:16px; font-weight:700;")
+        avatar = ClickableAvatar(32)
+        avatar.show_person(getattr(SessionManager, "employee_id", None), display_name)
+        avatar.setToolTip("My Profile")
+        avatar.clicked.connect(self.profile_clicked.emit)
+        self._footer_avatar = avatar
 
         role_col = QVBoxLayout()
         role_col.setSpacing(0)
@@ -4780,6 +5001,13 @@ class _Sidebar(QFrame):
         role.setStyleSheet(f"color:{C['text_muted']}; font-size:10px; background:transparent;")
         role_col.addWidget(name)
         role_col.addWidget(role)
+
+        # The name and the role under it are part of the same target.
+        for _label in (name, role):
+            _label.setCursor(Qt.CursorShape.PointingHandCursor)
+            _label.setToolTip("My Profile")
+            _label.mousePressEvent = (
+                lambda _event, _s=self: _s.profile_clicked.emit())
 
         role_row.addWidget(avatar)
         role_row.addLayout(role_col)
@@ -4964,7 +5192,7 @@ class AdminConfigPanel(QMainWindow):
     TAB_ATTRS = (
         "_dashboard_tab", "_alerts_tab", "_config_tab", "_employees_tab",
         "_attendance_tab", "_screenshots_tab", "_teams_tab", "_mychat_tab",
-        "_reports_tab", "_logs_tab",
+        "_reports_tab", "_logs_tab", "_profile_tab",
     )
 
     def __init__(self):
@@ -5053,6 +5281,8 @@ class AdminConfigPanel(QMainWindow):
             lambda total: self.sidebar.set_unread("mychat", total))
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
+        from client.presentation.windows.profile_page import ProfilePage
+        self._profile_tab     = ProfilePage(self)
 
         # Workers ka intezaar timers band karne ke baad, destroy se pehle.
         leftover = self._drain_workers()
@@ -5073,6 +5303,7 @@ class AdminConfigPanel(QMainWindow):
             self._mychat_tab,
             self._reports_tab,
             self._logs_tab,
+            self._profile_tab,
         ):
             self.stack.addWidget(tab)
         c_lay.addWidget(self.stack, 1)
@@ -5133,6 +5364,9 @@ class AdminConfigPanel(QMainWindow):
             )
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
+        self.sidebar.profile_clicked.connect(
+            lambda: self.sidebar.select(
+                next(i for i, page in enumerate(PAGES) if page["key"] == "profile")))
         self.sidebar.logout_btn.clicked.connect(self.logout)
         self.sidebar.password_btn.clicked.connect(self._change_own_password)
         self.header.refresh_clicked.connect(self._refresh_current_page)
