@@ -4,6 +4,28 @@ require("dotenv").config();
 // ─────────────────────────────────────────────────────────────
 types.setTypeParser(1114, (val) => val); // timestamp without time zone
 types.setTypeParser(1184, (val) => val); // timestamp with time zone
+types.setTypeParser(1082, (val) => val); // date
+
+// THE DATE LINE ABOVE WAS MISSING, and a date came back a day early.
+//
+// Seen on a profile page: a joining date stored as 2022-07-15 was displayed
+// as 2022-07-14. pg turns a DATE into a JavaScript Date at LOCAL midnight,
+// and JSON.stringify then writes it in UTC — so on a machine at +05:30 the
+// value left the server as "2022-07-14T18:30:00.000Z", and everything
+// downstream that takes the first ten characters read the previous day.
+//
+// It is not only the joining date. The seven-day chart on the same page
+// labels its columns from a DATE (profile.controller: `day: r.day`), so
+// every bar was attributed to the day before.
+//
+// WHY IT WAS NOT SEEN IN PRODUCTION: that server runs in UTC, where local
+// midnight and UTC midnight are the same instant, so the conversion happens
+// to be harmless. The bug is real and simply invisible there — it appears
+// the moment the server has any other timezone, which is one `TZ=` away.
+//
+// A date has no time and no timezone. Handing it on as the string Postgres
+// wrote is the only representation that cannot be shifted by the machine
+// the code runs on — the same reasoning as the two lines above it.
 
 // BUG FIX (attendance times off by hours):
 // `attendance.login_time` / `logout_time` are TIMESTAMP WITHOUT TIME ZONE
