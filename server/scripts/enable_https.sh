@@ -29,6 +29,21 @@ set -euo pipefail
 DOMAIN="${1:-}"
 EMAIL="${2:-}"
 
+# KEEP THE PLAIN PORT OPEN FOR NOW.
+#
+# Step 6 closes 8000, and the moment it does every client already installed
+# stops working — they have the old address compiled in. On a system that is
+# mid-rollout that is an outage for everyone until the new build is made,
+# downloaded and installed on each machine, which is not minutes.
+#
+# So the cut can be made separately: run with --keep-plain-port now, hand out
+# the new build, and close 8000 afterwards with the one-line command this
+# prints. HTTPS works from the moment the certificate is issued either way.
+KEEP_PLAIN=0
+for arg in "$@"; do
+    [ "$arg" = "--keep-plain-port" ] && KEEP_PLAIN=1
+done
+
 if [ -z "$DOMAIN" ] || [ -z "$EMAIL" ]; then
     echo "Usage: bash server/scripts/enable_https.sh <domain> <email>"
     echo "   eg: bash server/scripts/enable_https.sh ets.yourcompany.com you@company.com"
@@ -97,6 +112,16 @@ echo "  TRUST_PROXY=1, server restarted"
 
 echo
 echo "═══ 6/6  CLOSING THE PLAIN PORT ═══"
+if [ "$KEEP_PLAIN" = "1" ]; then
+    sudo ufw allow 80,443/tcp >/dev/null 2>&1 || true
+    echo "  SKIPPED — 8000 is still open, so the clients already installed go on"
+    echo "  working while the new build is made and handed out."
+    echo
+    echo "  Close it once every machine has the new build:"
+    echo "      sudo ufw deny 8000/tcp && sudo ufw --force enable"
+    echo
+    echo "  Until then the old address still works and is still unencrypted."
+else
 # 8000 stays reachable on localhost for nginx; it just stops being
 # reachable from outside, so nobody can bypass TLS by using the old
 # address. Do this LAST — an existing client talking to :8000 breaks here,
@@ -105,6 +130,7 @@ sudo ufw allow 80,443/tcp >/dev/null
 sudo ufw deny 8000/tcp >/dev/null
 sudo ufw --force enable >/dev/null
 sudo ufw status | head -8
+fi
 
 echo
 echo "═══ VERIFY ═══"
