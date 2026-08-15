@@ -1,9 +1,11 @@
 name: Build Cross-Platform Desktop Apps
 
-# Shown against each run in the Actions list. "test 5" — My Profile, and the
-# macOS fix that stopped a Mac taking no screenshots at all. Still no tag, so
-# the release job below does not run and nothing is published.
-run-name: test 5
+# Shown against each run in the Actions list. "test 6" — profiles for
+# everybody with photos that appear wherever a person does, email with a
+# verification code, and two date bugs that only a non-UTC machine could
+# show. Still no tag, so the release job below does not run and nothing is
+# published.
+run-name: test 6
 
 on:
   push:
@@ -218,7 +220,39 @@ jobs:
           # onedir me libraries seedha .app/Contents/ me rehti hain, koi
           # extraction nahi. DMG me waise bhi .app hi jaata hai, is liye
           # distribution bilkul same rehta hai.
-          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --name="Amaze Connect" client/main.py
+          # --osx-bundle-identifier: A FIXED IDENTITY, because macOS files the
+          # Screen Recording permission under one.
+          #
+          # Without it PyInstaller invents an identifier from the app's name,
+          # and macOS — for an app that is not signed — falls back to
+          # identifying it by the hash of its binary. Both change from one
+          # build to the next, so every installer arrived as a stranger: the
+          # switch the person could see turned ON in System Settings belonged
+          # to the build before it, while the one now running had never been
+          # granted anything. That is the "toggle already ON, quit and reopen,
+          # still no screenshots" report, and it is not a bug in the capture
+          # code.
+          #
+          # THIS DOES NOT FINISH THE JOB. Until the app is signed with an
+          # Apple Developer ID, macOS still keys the permission to the
+          # binary's hash, so a new build asks again — once, on first launch,
+          # and it holds for that build. Signing is the fix; this stops the
+          # identity drifting for reasons of naming.
+          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --osx-bundle-identifier "com.amazeinternet.amazeconnect" --name="Amaze Connect" client/main.py
+
+      - name: Say what the screen capture is for
+        run: |
+          # Shown inside the system's own permission prompt. Without it macOS
+          # asks for Screen Recording with no reason attached, which is what
+          # people decline.
+          #
+          # Written here rather than in a .spec file: this workflow builds
+          # from the pyinstaller command line above and never reads ETS.spec —
+          # which is in .gitignore and exists only on a developer's machine.
+          plutil -insert NSScreenCaptureUsageDescription \
+            -string "Amaze Connect captures periodic screenshots of your work session while you are signed in, as configured by your administrator." \
+            "dist/Amaze Connect.app/Contents/Info.plist"
+          plutil -p "dist/Amaze Connect.app/Contents/Info.plist" | grep -E "BundleIdentifier|ScreenCapture"
 
       - name: Create DMG Installer
         run: |

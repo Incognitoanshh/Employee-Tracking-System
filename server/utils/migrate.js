@@ -39,6 +39,12 @@ let lastResult = { applied: [], pending: [], failed: [], ran: false };
 function migrationFiles() {
     if (!fs.existsSync(MIGRATIONS_DIR)) return [];
     return fs.readdirSync(MIGRATIONS_DIR)
+        // NOT the dot files. macOS leaves an AppleDouble "._name.sql" beside
+        // anything copied from a Mac, and on the server they sat in this
+        // directory looking exactly like migrations. They are binary, so the
+        // first attempt to run one answered "invalid message format" — five
+        // failures that had nothing to do with the schema.
+        .filter((name) => !name.startsWith("."))
         .filter((name) => name.endsWith(".sql") && !NOT_A_MIGRATION.has(name))
         // Sorted by name, which is why they are dated and why two on the same
         // day carry a sequence number.
@@ -48,6 +54,7 @@ function migrationFiles() {
 async function applyPendingMigrations(pool) {
     const applied = [];
     const failed = [];
+    let notPermitted = false;
 
     try {
         await pool.query(`
@@ -83,6 +90,30 @@ async function applyPendingMigrations(pool) {
         } catch (error) {
             await client.query("ROLLBACK").catch(() => {});
             failed.push({ name, message: error.message });
+
+            // NOT ALLOWED IS NOT THE SAME AS BROKEN.
+            //
+            // The application's database user deliberately does not own the
+            // tables — it can read and write rows and cannot alter the
+            // schema, which is the right way round for a service that faces
+            // the internet. On a deployment set up that way every migration
+            // answers "must be owner of table …", and printing that twenty
+            // times buries the one line somebody needs.
+            //
+            // So say it once, name the script that CAN do it, and stop.
+            if (/must be owner|permission denied|insufficient privilege/i
+                    .test(error.message)) {
+                console.error(
+                    `[MIGRATE] This database user is not allowed to change the ` +
+                    `schema — which is correct, and means migrations are not ` +
+                    `this process's job.\n` +
+                    `[MIGRATE] ${files.length - applied.length} pending. Run:  ` +
+                    `bash server/scripts/migrate.sh`);
+                notPermitted = true;
+                client.release();
+                break;
+            }
+
             console.error(
                 `[MIGRATE] FAILED ${name}: ${error.message}\n` +
                 `[MIGRATE] The server is starting anyway. Anything reading the ` +
@@ -98,6 +129,7 @@ async function applyPendingMigrations(pool) {
         pending: failed.map((f) => f.name),
         failed,
         ran: true,
+        notPermitted,
     };
     if (applied.length === 0 && failed.length === 0) {
         console.log(`[MIGRATE] schema is up to date (${files.length} migrations)`);
@@ -107,6 +139,14 @@ async function applyPendingMigrations(pool) {
 
 /** For /api/health, so a deployment can be checked with the same curl. */
 function migrationStatus() {
+    if (lastResult.notPermitted) {
+        return {
+            up_to_date: false,
+            applied_now: lastResult.applied.length,
+            failed: [],
+            message: "schema behind — run: bash server/scripts/migrate.sh",
+        };
+    }
     return {
         up_to_date: lastResult.ran && lastResult.failed.length === 0,
         applied_now: lastResult.applied.length,

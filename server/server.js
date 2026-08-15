@@ -97,8 +97,10 @@ app.get("/api/health", async (req, res) => {
             success:  true,
             status:   schema.up_to_date ? "healthy" : "degraded",
             database: "connected",
-            schema:   schema.up_to_date ? "up to date"
-                                        : `MIGRATION FAILED: ${schema.failed.join(", ")}`,
+            schema:   schema.up_to_date
+                        ? "up to date"
+                        : (schema.message
+                           || `MIGRATION FAILED: ${schema.failed.join(", ")}`),
             time:     result.rows[0].now,
             uptime:   process.uptime(),
         });

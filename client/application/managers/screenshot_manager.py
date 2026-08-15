@@ -136,6 +136,30 @@ def _grab_every_screen():
 class ScreenshotManager:
     STORAGE_PATH = os.path.join(STORAGE_DIR, "screenshots")
 
+    # Asked at most once per run — see _ask_for_screen_access_once. A prompt
+    # per failed capture would be one every few minutes, all day.
+    _screen_access_asked = False
+
+    @classmethod
+    def _ask_for_screen_access_once(cls):
+        """Put the system's own permission prompt up, once per run.
+
+        macOS shows it only for an app that has never been answered for; for
+        one that has, the call returns immediately and nothing appears. Either
+        way it is the system's dialog, never one of ours — a window of our own
+        on every failure is what people learn to click away.
+        """
+        if cls._screen_access_asked:
+            return
+        cls._screen_access_asked = True
+        try:
+            from client.services.screen_permission import request_screen_access
+            request_screen_access()
+        except Exception:
+            # Nothing to do about it, and the capture has already failed and
+            # been logged. Logging again here would double every line.
+            pass
+
     # REMOVED: generate_random_schedule() and generate_interval_schedule().
     #
     # Both tied the number of captures to the shift. The first spread
@@ -392,7 +416,36 @@ class ScreenshotManager:
             connection.commit()
             connection.close()
         except Exception as error:
-            LoggerService.log(f"ScreenshotManager: capture failed — {error}")
+            # SAY WHAT IT MEANS, NOT WHAT IT RETURNED.
+            #
+            # This line used to read, in full:
+            #
+            #   capture failed — Command '['screencapture', '-x', '/var/…png']'
+            #   returned non-zero exit status 1
+            #
+            # which is the message an administrator sees when a whole day has
+            # no screenshots in it. Nothing in it says "permission", so it was
+            # read as a broken build and cost a day of looking in the wrong
+            # place. On macOS an exit status of 1 from screencapture is almost
+            # always TCC refusing — the tool does not distinguish, so neither
+            # can we with certainty, but we can say which it usually is.
+            hint = ""
+            if sys.platform == "darwin" and permission_missing:
+                hint = (
+                    "  [macOS refused the capture: Screen Recording is not "
+                    "granted to THIS build. The switch in System Settings may "
+                    "look ON and still belong to a previous build — this app "
+                    "is not code-signed, so macOS files the permission against "
+                    "the binary itself. Remove Amaze Connect from System "
+                    "Settings › Privacy & Security › Screen & System Audio "
+                    "Recording with the “−” button, reopen the app, and allow "
+                    "it when asked.]")
+                # And ASK, once per run. The system prompt is the only thing
+                # that can actually fix this from inside the app, and the
+                # person is at the machine right now — telling them in a log
+                # they cannot see is not much use on its own.
+                cls._ask_for_screen_access_once()
+            LoggerService.log(f"ScreenshotManager: capture failed — {error}{hint}")
             return None
 
         # Server ko encrypted (.enc) bytes upload karo — plain PNG kabhi

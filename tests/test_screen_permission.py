@@ -191,6 +191,56 @@ def main():
           and not any("NOT granted" in m for m in said),
           str(said)[:200])
 
+    print("\nWhen macOS refuses the capture outright")
+    # WHAT ACTUALLY HAPPENED ON THE REPORTED MACHINE, found in the server's
+    # own activity log after the client had been running all morning:
+    #
+    #   ScreenshotManager: capture failed — Command '['screencapture', '-x',
+    #   '/var/folders/…/tmph_zad9b2.png']' returned non-zero exit status 1
+    #
+    # Not a skip and not a blank picture: macOS refused, screencapture exited
+    # 1, and the day had no screenshots in it. Nothing in that line says
+    # "permission", so it was read as a broken build.
+    #
+    # Two things are checked here — that the line now explains itself, and
+    # that the system prompt is asked for at most ONCE however many captures
+    # fail afterwards. A dialog every few minutes for a whole shift is worse
+    # than the silence it replaced.
+    import subprocess
+    sm._grab_every_screen = lambda: (_ for _ in ()).throw(
+        subprocess.CalledProcessError(1, ["screencapture", "-x", "/tmp/x.png"]))
+    sp2.has_screen_access = lambda: False
+    real_platform = sys.platform
+    sys.platform = "darwin"
+    asked_again = []
+    import client.services.screen_permission as _sp_mod
+    real_req = _sp_mod.request_screen_access
+    _sp_mod.request_screen_access = lambda: asked_again.append(1) or False
+    ScreenshotManager._screen_access_asked = False
+    said.clear()
+    sm.LoggerService.log = lambda m, *a, **k: said.append(str(m))
+    try:
+        first_result = ScreenshotManager.capture_screenshot()
+        ScreenshotManager.capture_screenshot()
+        ScreenshotManager.capture_screenshot()
+    finally:
+        sys.platform = real_platform
+        sp2.has_screen_access = real_has2
+        sm.LoggerService.log = real_log2
+        _sp_mod.request_screen_access = real_req
+        sm._grab_every_screen = real_grab
+
+    check("the capture reports failure rather than pretending", first_result is None)
+    check("and the line says it is the permission, not a broken build",
+          any("Screen Recording is not granted" in m for m in said),
+          str(said)[:240])
+    check("naming the switch that looks ON and is not this build's",
+          any("previous build" in m for m in said), str(said)[:240])
+    check("the system is asked for it, once",
+          asked_again == [1],
+          f"{len(asked_again)} prompts for three failed captures — a permission "
+          f"window every few minutes is what people click away")
+
     print("\nWho is captured at all")
     # The owner's rule: an administrator is tracked like anybody else; only
     # the super admin — the owner — is not.
