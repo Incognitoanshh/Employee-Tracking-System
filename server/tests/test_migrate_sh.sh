@@ -89,6 +89,22 @@ check "sab skip hoti hain" \
       "$(echo "$out2" | tail -3 | head -1)"
 
 echo
+echo "File PSQL nahi kholta — kyunki wo postgres ban kar chalta hai"
+# YE FUNCTIONAL TEST SE PAKDA NAHI JA SAKTA. Yahan sab kuch EK hi user ke
+# roop me chalta hai, jo har file padh sakta hai. Server pe psql `postgres`
+# banta hai aur /home/etsadmin/... ke andar jhaank nahi sakta — to `-f` ke
+# saath har migration "Permission denied" deti hai, file par, database par
+# nahi. Poora output aisa lagta hai jaise database ne mana kiya ho.
+#
+# Isliye ye baat khud script ke code pe jaanchi jaati hai: file wahi shell
+# padhe jo use padh sakta hai, aur psql ko sirf stdin mile.
+check "migration -f se nahi, stdin se chalti hai" \
+      "$(grep -q 'psql_super -1 -q < "\$path"' "$ROOT/server/scripts/migrate.sh" && echo 1 || echo 0)" \
+      "$(grep -n 'psql_super -1' "$ROOT/server/scripts/migrate.sh")"
+check "kisi bhi migration ko -f se nahi khola jaata" \
+      "$(grep -q '\-f "\$path"' "$ROOT/server/scripts/migrate.sh" && echo 0 || echo 1)"
+
+echo
 echo "Jaisa production HAI: sab lagi hui, record me kuch nahi"
 # YAHI ASLI HAALAT HAI. Production pe har migration mahino se lagi hui hai,
 # par schema_migrations wahan tab bana jab boot runner pehli baar chala — to
