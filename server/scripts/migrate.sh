@@ -125,9 +125,28 @@ for path in "$MIGRATIONS_DIR"/*.sql; do
     # padh sakta hai; psql sirf stdin padhta hai. Isse file ki permission ka
     # sawaal hi khatam ho jaata hai.
     #
-    # Ek transaction me (-1): aadhi lagi migration wo schema chhod jaati hai
-    # jiske liye koi code likha hi nahi gaya.
-    if psql_super -1 -q < "$path" \
+    # EK TRANSACTION ME — par -1 SIRF TAB jab file khud apni na sambhalti ho.
+    #
+    # 19 migrations apna BEGIN/COMMIT khud likhti hain. Un par -1 lagane se
+    # do transaction ek dusre pe chadh jaate hain: psql ka BEGIN chalta hai,
+    # file ka BEGIN "there is already a transaction in progress" warn karta
+    # hai, file ka COMMIT bahar wale ko band kar deta hai, aur psql ka apna
+    # COMMIT "there is no transaction in progress" par aakar khatam hota hai.
+    #
+    # Kaam ho jaata hai, par wo guarantee nahi rehti jo yahan likhi thi —
+    # file ke COMMIT ke baad ka koi bhi statement transaction ke BAHAR chalta
+    # hai. Jo file khud sambhalti hai, use apna kaam karne dena chahiye.
+    # Do alag call, ek array nahi: `set -u` ke saath bash 3.2 me khaali array
+    # "unbound variable" deta hai, aur wo bilkul unhi files pe lagta hai jo
+    # apni transaction khud sambhalti hain — yaani theek us case pe jiske
+    # liye ye likha gaya tha.
+    if grep -qiE '^[[:space:]]*BEGIN[[:space:]]*;' "$path"; then
+        run_it() { psql_super -q < "$path" > /dev/null; }
+    else
+        run_it() { psql_super -1 -q < "$path" > /dev/null; }
+    fi
+
+    if run_it \
         && psql_super -q -c "INSERT INTO schema_migrations (name) VALUES ('$name')
                              ON CONFLICT (name) DO NOTHING" > /dev/null; then
         echo "   applied"

@@ -76,10 +76,20 @@ async function applyPendingMigrations(pool) {
         if (done.has(name)) continue;
         const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, name), "utf8");
         const client = await pool.connect();
+        // A MIGRATION THAT OPENS ITS OWN TRANSACTION IS LEFT TO IT.
+        //
+        // Nineteen of them write their own BEGIN/COMMIT. Wrapping those in
+        // another one nests two transactions: the inner BEGIN warns "there is
+        // already a transaction in progress", the inner COMMIT closes the
+        // OUTER one, and everything after it runs unwrapped — so the promise
+        // made by the comment below was not being kept for exactly the files
+        // that looked most careful.
+        const managesItself = /^[ \t]*BEGIN[ \t]*;/im.test(sql);
+
         try {
             // One transaction each: a migration that fails half-way must not
             // leave the schema in a shape nothing was written for.
-            await client.query("BEGIN");
+            if (!managesItself) await client.query("BEGIN");
             // WAIT FOR A LOCK, BUT NOT FOR EVER.
             //
             // Most of these are ALTER TABLE, which needs ACCESS EXCLUSIVE —
@@ -93,12 +103,17 @@ async function applyPendingMigrations(pool) {
             // get its lock is a migration to run from
             // server/scripts/migrate.sh at a quiet moment, not one to hold
             // the database open waiting for.
-            await client.query("SET LOCAL lock_timeout = '10s'");
+            // SET LOCAL needs a transaction; without one it does nothing and
+            // says so. For a file that opens its own, the timeout goes in as
+            // a session setting instead, which the release resets.
+            await client.query(managesItself
+                ? "SET lock_timeout = '10s'"
+                : "SET LOCAL lock_timeout = '10s'");
             await client.query(sql);
             await client.query(
                 `INSERT INTO schema_migrations (name) VALUES ($1)
                  ON CONFLICT (name) DO NOTHING`, [name]);
-            await client.query("COMMIT");
+            if (!managesItself) await client.query("COMMIT");
             applied.push(name);
             console.log(`[MIGRATE] applied ${name}`);
         } catch (error) {
