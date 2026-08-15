@@ -1,6 +1,6 @@
 const pool = require("../config/db");
 const crypto = require("crypto");
-const { endSession, markLoggedIn } = require("../utils/session");
+const { endSession, endSessionForToken, markLoggedIn } = require("../utils/session");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { validatePassword } = require("../utils/password_policy");
@@ -30,7 +30,11 @@ exports.logout = async (req, res) => {
             // row EXIST kare aur token mismatch ho. Row delete karne se check
             // hi skip ho jata (koi row hi nahi milta), purana token tab bhi
             // apni natural 24h expiry tak chalta rehta — security gap.
-            await endSession(pool, decoded.employee_id);
+            // BY TOKEN, not by employee. A logout is a statement about the
+            // session that sent it — see utils/session.js. Matching on the
+            // employee alone let a stale instance end a session opened
+            // afterwards, on another machine.
+            await endSessionForToken(pool, decoded.employee_id, token);
         } catch (dbError) {
             // DB issue — client-side session already clear ho chuki hogi,
             // logout request ko fail mat karo iske liye.

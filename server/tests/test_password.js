@@ -216,8 +216,15 @@ async function main() {
             current_password: temporary, new_password: "ThirdPass99" } });
         check("the employee replaces the temporary password",
             res.status === 200, `status ${res.status}`);
+        // CHANGING THE PASSWORD HANDS BACK A NEW TOKEN and stores it, so the
+        // one used to make the request is stale from that moment. Signing out
+        // with the stale one ends nothing — see the logout-by-token rule in
+        // utils/session.js — so the CURRENT one is what has to be used here.
+        // This test passed before only because a logout matched on the
+        // employee and cleared whatever session happened to be there.
+        const afterChange = res.body.token || tempToken;
 
-        res = await freshLogin("emp1", "ThirdPass99", tempToken);
+        res = await freshLogin("emp1", "ThirdPass99", afterChange);
         check("the flag clears once they choose their own",
             res.body.must_change_password === false, String(res.body.must_change_password));
         empToken = res.body.token;
@@ -240,6 +247,12 @@ async function main() {
             res.status === 200, `status ${res.status}`);
 
         const empRes = await freshLogin("emp1", "ThirdPass99", empToken);
+        // The session moved; what is held has to move with it. Signing out
+        // with a token that is no longer the current one now ends nothing, so
+        // a stale variable here leaves a live session behind and every login
+        // after it is refused with 409 — which is the single-session rule
+        // working, on a test that had stopped keeping track.
+        empToken = empRes.body.token || empToken;
         res = await api("POST", "/admin/employees/A002/password",
             { token: empRes.body.token });
         check("an employee cannot reset anybody's password",

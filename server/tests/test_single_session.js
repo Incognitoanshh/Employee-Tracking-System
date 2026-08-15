@@ -320,6 +320,58 @@ async function main() {
                         FROM active_sessions WHERE employee_id = 'E001'`) === "true");
 
         // ── the flag never drifts from the session ──────────────────────
+        console.log("\nA LOGOUT FROM A SESSION THAT IS ALREADY OVER ENDS NOTHING");
+        // WHAT HAPPENED ON A REAL MACHINE, in the audit log, one minute apart:
+        //
+        //   10:06:39  LOGIN SUCCESS : raju
+        //   10:07:41  SchedulerService: stopped
+        //   10:07:41  LOGOUT
+        //
+        // An older build was still running when the new one was installed.
+        // The new one signed in; the single-session rule pushed the old one
+        // out; the old one shut down cleanly and sent its logout on the way.
+        // The server matched on employee_id alone, cleared the row, and
+        // killed the session that had REPLACED it. The app on screen was left
+        // holding a token the server would now reject, and presence counted
+        // the person as offline while they were working.
+        //
+        // A logout is a statement about the session that sent it.
+        psql(DB, `DELETE FROM active_sessions`);
+        const oldToken = (await login("emp1", "SuperSecret123", LAPTOP)).body.token;
+
+        // The old copy goes quiet — which is why the new one is allowed to
+        // sign in at all. A session still beating would be refused, and that
+        // is the rule working; this is the case where it is not beating: the
+        // machine was left running with an old build whose heartbeat had
+        // lapsed.
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() - INTERVAL '30 minutes'
+                   WHERE employee_id = 'E001'`);
+        const newToken = (await login("emp1", "SuperSecret123", DESKTOP)).body.token;
+        check("the new machine can sign in once the old one has gone quiet",
+            Boolean(newToken));
+
+        let out = await api("POST", "/auth/logout", { token: oldToken });
+        check("the stale instance's logout is accepted without complaint",
+            out.status === 200, `HTTP ${out.status}`);
+        check("but the session it names is NOT the one it ends",
+            psql(DB, `SELECT COALESCE(token,'(null)') FROM active_sessions
+                       WHERE employee_id='E001'`) !== "(null)");
+        check("the machine that is actually signed in stays signed in",
+            (await api("GET", "/profile/me", { token: newToken })).status === 200,
+            "this is the bug: quitting an old copy signed the person out of "
+            + "the new one");
+        check("and they are still counted as logged in",
+            psql(DB, `SELECT is_logged_in FROM employees WHERE employee_id='E001'`) === "t");
+
+        // And the ordinary case still works — a session ending its own.
+        out = await api("POST", "/auth/logout", { token: newToken });
+        check("a logout from the CURRENT session does end it", out.status === 200);
+        check("the token is cleared",
+            psql(DB, `SELECT COALESCE(token,'(null)') FROM active_sessions
+                       WHERE employee_id='E001'`) === "(null)");
+        check("and the flag follows it",
+            psql(DB, `SELECT is_logged_in FROM employees WHERE employee_id='E001'`) === "f");
+
         console.log("\nThe flag and the session agree, whatever ended it");
         const sa = (await login("superadmin", "SuperSecret123", "owner-machine")).body.token;
         // Seven places end a session: logout, a stale refresh, a password
