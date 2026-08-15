@@ -73,7 +73,14 @@ jobs:
           total=0
           for t in server/tests/test_*.js; do
             echo "── $(basename "$t")"
-            if node "$t" > /tmp/out.txt 2>&1; then
+            # A BOUND, so a hang is a failure instead of a six-hour bill.
+            #
+            # That is not hypothetical: a deadlock between a test's queries
+            # and a migration running in the background took one job to the
+            # six-hour limit and printed nothing at all — no failure, no
+            # output, just the name of the test it had reached. Two minutes
+            # is generous; the whole suite runs in about that.
+            if timeout 120 node "$t" > /tmp/out.txt 2>&1; then
               total=$((total + $(grep -c PASS /tmp/out.txt || true)))
             else
               failed=$((failed + 1))

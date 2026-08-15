@@ -80,6 +80,20 @@ async function applyPendingMigrations(pool) {
             // One transaction each: a migration that fails half-way must not
             // leave the schema in a shape nothing was written for.
             await client.query("BEGIN");
+            // WAIT FOR A LOCK, BUT NOT FOR EVER.
+            //
+            // Most of these are ALTER TABLE, which needs ACCESS EXCLUSIVE —
+            // it queues behind every open transaction on that table and
+            // blocks every new one behind itself. This runs at boot while the
+            // server is already answering requests, so without a bound a
+            // single long query turns a restart into an outage, and nothing
+            // in the log says why.
+            //
+            // Ten seconds, then give up and say so. A migration that cannot
+            // get its lock is a migration to run from
+            // server/scripts/migrate.sh at a quiet moment, not one to hold
+            // the database open waiting for.
+            await client.query("SET LOCAL lock_timeout = '10s'");
             await client.query(sql);
             await client.query(
                 `INSERT INTO schema_migrations (name) VALUES ($1)

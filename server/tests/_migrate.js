@@ -67,6 +67,35 @@ function migrate(db, { skip = [] } = {}) {
                 String(error.stderr || error.message).trim());
         }
     }
+    // WRITE DOWN WHAT WAS APPLIED, in the same table the server reads.
+    //
+    // Without this the server's boot-time runner finds an empty
+    // schema_migrations, concludes that NOTHING has been applied, and
+    // re-applies all thirty — in the background, while the test is already
+    // making requests. Several of them are ALTER TABLE, which takes an
+    // ACCESS EXCLUSIVE lock, and the test's own queries hold locks of their
+    // own: the two wait for each other and neither ever gives up.
+    //
+    // That is not a theory. It is a CI job that ran for SIX HOURS and was
+    // cancelled, and a second that was still going after seventeen minutes.
+    // The log stopped after "── test_presence.js" with no failure and no
+    // output, because a deadlocked test prints nothing at all.
+    //
+    // Recording them here is also what production looks like: there, the
+    // runner applies each migration and records it, so the next boot has
+    // nothing to do. A test database that has every migration applied but
+    // remembers none of them is a state that exists nowhere else.
+    const names = files
+        .map((f) => path.basename(f))
+        .filter((n) => n !== "ets.sql");
+    execFileSync("psql", ["-d", db, "-v", "ON_ERROR_STOP=1", "-q", "-c",
+        `CREATE TABLE IF NOT EXISTS schema_migrations (
+             name TEXT PRIMARY KEY,
+             applied_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'));
+         INSERT INTO schema_migrations (name) VALUES ${
+             names.map((n) => `('${n}')`).join(", ")}
+         ON CONFLICT (name) DO NOTHING`], { stdio: "pipe" });
+
     return db;
 }
 
