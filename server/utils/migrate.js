@@ -109,8 +109,14 @@ async function applyPendingMigrations(pool) {
                     `this process's job.\n` +
                     `[MIGRATE] ${files.length - applied.length} pending. Run:  ` +
                     `bash server/scripts/migrate.sh`);
+                // NOT released here — the `finally` below does it, and doing
+                // both throws "Release called on client which has already
+                // been released to the pool". That exception escapes
+                // applyPendingMigrations, and server.js awaits this call
+                // during boot: the one code path that exists for a correctly
+                // locked-down database could have taken the server down on
+                // the way up.
                 notPermitted = true;
-                client.release();
                 break;
             }
 
