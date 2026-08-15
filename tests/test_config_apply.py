@@ -175,7 +175,20 @@ def main():
         check("and the shift",
               got and "T10:00" in str((got.get("shift") or {}).get("start_ist")),
               json.dumps(got.get("shift") if got else None))
-        check(f"in well under a second ({took*1000:.0f} ms)", took < 1.0,
+        # A SECOND WAS TOO TIGHT A LINE TO DRAW ON A SHARED MACHINE.
+        #
+        # This failed CI at 1314 ms and blocked a build, on code that had
+        # nothing to do with config sync — the runner was simply busy. A test
+        # that fails on somebody else's load is a test people learn to re-run
+        # rather than read, and eventually to ignore.
+        #
+        # What it is really guarding is the difference between "the change is
+        # applied on the next sync" and "the change waits for a poll that is
+        # minutes away" — the bug this file was written for. Three seconds
+        # still catches that by a wide margin, and no longer fails for being
+        # unlucky. The number is printed either way, so a real slowdown is
+        # still visible in the output.
+        check(f"promptly, not on some later poll ({took*1000:.0f} ms)", took < 3.0,
               f"{took:.2f}s")
 
         print("\nThe scheduler acts on it rather than storing it away")
