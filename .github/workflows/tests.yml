@@ -93,6 +93,17 @@ jobs:
           echo "$total checks passed, $failed suite(s) failed"
           test "$failed" -eq 0
 
+      - name: Check the migration script itself
+        run: |
+          # It ships as an instruction to run on production, so it is run
+          # here first — against the real migrations, in a directory whose
+          # name contains a space. That is not decoration: the first version
+          # of this script split every path on whitespace and produced 45
+          # failures on the live server, none of which was a real migration
+          # error, because the application directory is called
+          # "Employee-Tracking-System-main copy".
+          bash server/tests/test_migrate_sh.sh
+
       - name: Refuse a known-vulnerable dependency
         working-directory: server
         run: npm audit --omit=dev --audit-level=high

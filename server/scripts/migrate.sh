@@ -47,7 +47,16 @@ DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
 # postgres ke roop me — yahi is script ka poora maqsad hai.
-psql_super() { sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 "$@"; }
+#
+# MIGRATE_NO_SUDO=1 se ye sudo ke bina chalta hai, aur SIRF isliye hai ki ye
+# script khud test ki ja sake. Pehli baar ye bina chalaye bheji gayi thi aur
+# production pe hi tooti — is baar tests/test_migrate_sh.sh ise asli files pe
+# chalata hai, ek aisi directory me jiske naam me space hai.
+if [ -n "${MIGRATE_NO_SUDO:-}" ]; then
+    psql_super() { psql -d "$DB" -v ON_ERROR_STOP=1 "$@"; }
+else
+    psql_super() { sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 "$@"; }
+fi
 
 # Wahi record jo server padhta hai, aur wahi shakl. Agar ye table nahi hai to
 # server ne abhi tak boot pe koshish nahi ki — bana dena surakshit hai.
@@ -61,15 +70,30 @@ applied=0
 skipped=0
 failed=0
 
-# Naam se sorted — wahi kram jo server/utils/migrate.js aur tests/_migrate.js
-# use karte hain, aur wahi wajah jisse migrations pe date aur sequence number
-# hota hai.
+# GLOB, `find | sort` NAHI — aur ye poora bug ki wajah tha.
 #
-# `._` se shuru hone wali files CHHODI jaati hain. macOS har us file ke saath
-# ek AppleDouble chhod deta hai jo Mac se copy hui ho; wo binary hoti hain aur
-# psql unpe "invalid message format" deta hai.
-for path in $(find "$MIGRATIONS_DIR" -maxdepth 1 -name '*.sql' ! -name '._*' | sort); do
+# `for path in $(find ...)` ka natija whitespace pe TOOTTA hai. App ka folder
+# hai "…/Employee-Tracking-System-main copy" — usme space hai — to har raasta
+# do tukdon me bat gaya: "…/Employee-Tracking-System-main" aur
+# "copy/server/migrations/….sql". psql ne ek bhi file nahi kholi aur poori
+# script "Permission denied" / "No such file or directory" ugalti rahi.
+#
+# Quoted glob space ko safely sambhalta hai, aur shell use naam se sorted hi
+# deta hai — wahi kram jo migrate.js aur _migrate.js use karte hain, aur isi
+# liye migrations pe date aur sequence number hote hain.
+#
+# `mapfile` NAHI: wo bash 4 ka hai, aur macOS pe abhi bhi bash 3.2 hai — wahan
+# ye script "command not found" (exit 127) deti hai. Ek nangi glob loop har
+# jagah chalti hai.
+shopt -s nullglob
+
+for path in "$MIGRATIONS_DIR"/*.sql; do
     name="$(basename "$path")"
+
+    # `._` se shuru hone wali files CHHODI jaati hain. macOS har us file ke
+    # saath ek AppleDouble chhod deta hai jo Mac se copy hui ho; wo binary
+    # hoti hain aur psql unpe "invalid message format" deta hai.
+    case "$name" in ._*) continue ;; esac
 
     # retention_purge.sql ek scheduled job hai, schema change nahi — wahi
     # exclusion jo doosri dono jagah hai.

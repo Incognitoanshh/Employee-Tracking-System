@@ -6,6 +6,14 @@ name: Build Cross-Platform Desktop Apps
 # show. Still no tag, so the release job below does not run and nothing is
 # published.
 run-name: test 6
+# THE ARTIFACT NAMES BELOW MUST BE CHANGED WITH IT.
+#
+# run-name is what the Actions list shows; the artifact names are what
+# somebody downloads and what appears in their Downloads folder. Changing
+# only the first produced a run called "test 6" holding two files called
+# "test-5-…", which is the one thing anybody looks at to know which build
+# they are installing. It has already caused an argument about whether a
+# build was the new one.
 
 on:
   push:
@@ -181,7 +189,7 @@ jobs:
       - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
-          name: test-5-Windows-Installer
+          name: test-6-Windows-Installer
           path: installer_out/Amaze-Connect-Setup.exe
 
   build-mac:
@@ -270,7 +278,7 @@ jobs:
       - name: Upload Mac DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: test-5-Mac-DMG
+          name: test-6-Mac-DMG
           path: dmg_out/Amaze-Connect.dmg
 
   # ── the release ────────────────────────────────────────────────────────
@@ -304,9 +312,9 @@ jobs:
           # A file called "Setup.exe" on a release page tells nobody which
           # build it is. Somebody reporting a bug should be able to say so
           # from the filename alone.
-          cp "installers/test-5-Windows-Installer/Amaze-Connect-Setup.exe" \
+          cp "installers/test-6-Windows-Installer/Amaze-Connect-Setup.exe" \
              "release/Amaze-Connect-${VERSION}-Windows-Setup.exe"
-          cp "installers/test-5-Mac-DMG/Amaze-Connect.dmg" \
+          cp "installers/test-6-Mac-DMG/Amaze-Connect.dmg" \
              "release/Amaze-Connect-${VERSION}-macOS.dmg"
           ls -lh release
 
