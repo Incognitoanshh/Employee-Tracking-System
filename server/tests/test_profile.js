@@ -94,7 +94,22 @@ async function main() {
             PORT: String(PORT),
             ENCRYPTION_KEY: "0".repeat(64),
             PROFILE_PHOTO_DIR: photos,
+            // Enough for mailer.js to consider itself configured. Nothing is
+            // ever sent — `send` is replaced below — but the endpoint refuses
+            // before writing anything when it thinks it has no mailbox, and
+            // that refusal is itself worth having a server that can pass.
+            SMTP_HOST: "smtp.invalid",
+            SMTP_USER: "no-reply@amaze.test",
+            SMTP_PASS: "not-a-real-password",
         });
+
+        // THE CODE IS CAUGHT HERE INSTEAD OF BEING POSTED. Replacing `send`
+        // on the module the controller holds is what makes this testable
+        // without a mailbox — and it also proves the code never travels back
+        // in the response, because the only place it can be read is here.
+        const mailer = require(path.join(root, "server", "utils", "mailer.js"));
+        const posted = [];
+        mailer.send = async (message) => { posted.push(message); };
 
         const { server, pool } = require(path.join(root, "server", "server.js"));
         await new Promise((r) => (server.listening ? r() : server.once("listening", r)));
@@ -135,6 +150,167 @@ async function main() {
             JSON.stringify(res.body).slice(0, 120));
         res = await api("PATCH", "/profile/me", { token: employee, body: { phone: "9".repeat(60) } });
         check("and so is something absurdly long", res.status === 400, `HTTP ${res.status}`);
+
+        console.log("\nMy email address");
+        res = await api("PATCH", "/profile/me",
+            { token: employee, body: { email: "rajesh@amaze.co" } });
+        check("my email saves", res.status === 200,
+            JSON.stringify(res.body).slice(0, 120));
+        check("and it comes back on the profile",
+            (await api("GET", "/profile/me", { token: employee })).body.profile.email
+                === "rajesh@amaze.co");
+
+        // THE TYPO EVERYBODY MAKES, and the one a shape check is for. Nothing
+        // here claims the address WORKS — only sending to it can — so what is
+        // refused is what cannot possibly be an address.
+        for (const bad of ["ansh@gmail", "no-at-sign.com", "two@@at.com", "@nothing.com"]) {
+            res = await api("PATCH", "/profile/me", { token: employee, body: { email: bad } });
+            check(`"${bad}" is refused`, res.status === 400, `HTTP ${res.status}`);
+        }
+        check("and the refusals changed nothing",
+            psql(DB, `SELECT email FROM employees WHERE employee_id='E001'`)
+                === "rajesh@amaze.co");
+
+        // SAVING ONE MUST NOT WIPE THE OTHER. The page sends both together,
+        // but anything else calling this endpoint may send one — and a
+        // COALESCE-free UPDATE would have written NULL over the field that
+        // was not mentioned.
+        res = await api("PATCH", "/profile/me",
+            { token: employee, body: { phone: "+91 99999 11111" } });
+        check("saving only the phone leaves the email alone",
+            res.status === 200
+            && psql(DB, `SELECT email FROM employees WHERE employee_id='E001'`)
+                === "rajesh@amaze.co");
+        res = await api("PATCH", "/profile/me", { token: employee, body: { email: "" } });
+        check("an empty address clears it, which people do want",
+            res.status === 200
+            && psql(DB, `SELECT COALESCE(email,'(null)') FROM employees WHERE employee_id='E001'`)
+                === "(null)");
+        check("and the phone survived that too",
+            psql(DB, `SELECT phone FROM employees WHERE employee_id='E001'`)
+                === "+91 99999 11111");
+
+        console.log("\nProving the email address");
+        await api("PATCH", "/profile/me",
+            { token: employee, body: { email: "rajesh@amaze.co" } });
+
+        res = await api("POST", "/profile/me/email/code", { token: employee });
+        check("a code can be asked for", res.status === 200, `HTTP ${res.status}`);
+        check("it went to the address on the profile",
+            posted.length === 1 && posted[0].to === "rajesh@amaze.co",
+            JSON.stringify(posted[0] || {}).slice(0, 120));
+        check("and the code itself is NOT in the reply — that is the whole point",
+            !/[0-9]{6}/.test(JSON.stringify(res.body)),
+            JSON.stringify(res.body));
+
+        let sentCode = (posted[0].text.match(/\b([0-9]{6})\b/) || [])[1];
+        check("the message carries a six-digit code", Boolean(sentCode),
+            posted[0].text.slice(0, 80));
+        check("and it is not what is stored — the row holds a hash",
+            psql(DB, `SELECT code_hash FROM email_verifications WHERE employee_id='E001'`)
+                !== sentCode);
+
+        res = await api("POST", "/profile/me/email/code", { token: employee });
+        check("asking again straight away is throttled", res.status === 429,
+            `HTTP ${res.status} — the button is otherwise a way to send `
+            + `somebody a hundred emails`);
+        // A WAIT SOMEBODY WOULD ACTUALLY WAIT. Under a minute, because the
+        // throttle is sixty seconds — "ask again in 19799 seconds" is what
+        // the broken arithmetic below produced, and it reads as a fault.
+        const waitSeconds = Number(
+            (JSON.stringify(res.body).match(/in (\d+) seconds/) || [])[1]);
+        check("and it says how long to wait, in a number that makes sense",
+            waitSeconds > 0 && waitSeconds <= 60, String(waitSeconds));
+
+        // THE THROTTLE MUST ALSO LET GO, and a "429 was returned" check
+        // cannot see that half. Any arithmetic slip that makes the age come
+        // out negative — the shape of mistake this kind of code invites, and
+        // one this codebase avoids only because of a type parser three files
+        // away — still produces a 429 and still passes the check above,
+        // while locking somebody out of asking again for hours.
+        psql(DB, `UPDATE email_verifications
+                     SET sent_at = (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 minutes'
+                   WHERE employee_id='E001'`);
+        posted.length = 0;
+        res = await api("POST", "/profile/me/email/code", { token: employee });
+        check("two minutes later a new code CAN be asked for", res.status === 200,
+            `HTTP ${res.status} ${JSON.stringify(res.body).slice(0, 90)}`);
+        check("and one was actually sent", posted.length === 1);
+        // The new code REPLACES the old one — one pending verification per
+        // person, so that somebody who asked twice finds exactly one of them
+        // opens the door. Everything below therefore uses this one.
+        sentCode = (posted[0].text.match(/\b([0-9]{6})\b/) || [])[1];
+
+        res = await api("POST", "/profile/me/email/verify",
+            { token: employee, body: { code: "000000" === sentCode ? "111111" : "000000" } });
+        check("a wrong code is refused", res.status === 400, `HTTP ${res.status}`);
+        check("and it says how many tries are left",
+            /left/i.test(JSON.stringify(res.body)), JSON.stringify(res.body).slice(0, 120));
+        check("the address is still unverified",
+            (await api("GET", "/profile/me", { token: employee }))
+                .body.profile.email_verified === false);
+
+        res = await api("POST", "/profile/me/email/verify",
+            { token: employee, body: { code: sentCode } });
+        check("the right code is accepted", res.status === 200,
+            JSON.stringify(res.body).slice(0, 120));
+        check("the profile now says it is verified",
+            (await api("GET", "/profile/me", { token: employee }))
+                .body.profile.email_verified === true);
+        check("and the pending code is gone, so it cannot be used twice",
+            psql(DB, `SELECT COUNT(*) FROM email_verifications WHERE employee_id='E001'`)
+                === "0");
+
+        // GUESSING IS BOUNDED. Six digits is a million possibilities against a
+        // person and nothing at all against a loop.
+        await api("PATCH", "/profile/me",
+            { token: employee, body: { email: "rajesh2@amaze.co" } });
+        posted.length = 0;
+        psql(DB, `DELETE FROM email_verifications`);
+        await api("POST", "/profile/me/email/code", { token: employee });
+        const second = (posted[0].text.match(/\b([0-9]{6})\b/) || [])[1];
+        const wrong = second === "123456" ? "654321" : "123456";
+        let lastStatus = 0;
+        for (let i = 0; i < 6; i += 1) {
+            lastStatus = (await api("POST", "/profile/me/email/verify",
+                { token: employee, body: { code: wrong } })).status;
+        }
+        check("six wrong codes stop being answered", lastStatus === 429,
+            `HTTP ${lastStatus}`);
+        res = await api("POST", "/profile/me/email/verify",
+            { token: employee, body: { code: second } });
+        check("and the real code no longer works either — ask for a new one",
+            res.status === 429, `HTTP ${res.status}`);
+
+        // CHANGING THE ADDRESS UN-PROVES IT. Carrying the tick across would
+        // make the tick mean nothing, and something is eventually sent on the
+        // strength of it.
+        psql(DB, `DELETE FROM email_verifications`);
+        psql(DB, `UPDATE employees SET email='rajesh@amaze.co',
+                  email_verified_at = NOW() WHERE employee_id='E001'`);
+        await api("PATCH", "/profile/me",
+            { token: employee, body: { email: "somewhere-else@amaze.co" } });
+        check("a new address is not verified",
+            (await api("GET", "/profile/me", { token: employee }))
+                .body.profile.email_verified === false);
+
+        // ...but saving the SAME address again is not a change, and must not
+        // throw away a verification somebody has already done. The page sends
+        // phone and email together, so this happens on every phone edit.
+        psql(DB, `UPDATE employees SET email_verified_at = NOW() WHERE employee_id='E001'`);
+        await api("PATCH", "/profile/me", {
+            token: employee,
+            body: { email: "somewhere-else@amaze.co", phone: "+91 98888 77777" },
+        });
+        check("saving the same address keeps it verified",
+            (await api("GET", "/profile/me", { token: employee }))
+                .body.profile.email_verified === true,
+            "editing a phone number would otherwise un-verify the email every time");
+
+        res = await api("POST", "/profile/me/email/verify",
+            { token: employee, body: { code: "12345" } });
+        check("a code of the wrong shape never reaches the database",
+            res.status === 400, `HTTP ${res.status}`);
 
         console.log("\nWhat an employee must NOT be able to change about themselves");
         // Sent through their own endpoint, which only reads `phone` — the
@@ -190,6 +366,30 @@ async function main() {
         check("the employee's page now shows the manager by NAME, not an id",
             res.body.profile.reporting_manager === "Priya Nair",
             String(res.body.profile.reporting_manager));
+
+        // A DATE LEAVES AS THE DATE IT IS, with no time and no timezone on it.
+        //
+        // Seen on a real page: a joining date of 2022-07-15 displayed as
+        // 2022-07-14. pg builds a JavaScript Date at LOCAL midnight from a
+        // DATE column, and JSON.stringify writes that in UTC — so at +05:30
+        // it left as "…T18:30:00.000Z" and every reader taking the first ten
+        // characters got the day before.
+        //
+        // This check is exact rather than "starts with", because the
+        // timestamp form is wrong even where it happens to be harmless: on a
+        // UTC server the first ten characters are right, which is precisely
+        // why it survived to be found on somebody's laptop instead.
+        check("the joining date is a plain YYYY-MM-DD, not a timestamp",
+            res.body.profile.joining_date === "2025-06-01",
+            JSON.stringify(res.body.profile.joining_date));
+
+        // The chart on the same page labels its columns from a DATE too, so
+        // the same slip moved every bar to the day before.
+        const chart = (await api("GET", "/profile/me/work-summary", { token: employee }))
+            .body.last_7_days || [];
+        check("and so is every day on the seven-day chart",
+            chart.length === 7 && chart.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.day)),
+            JSON.stringify(chart.slice(0, 2)));
 
         res = await api("POST", "/admin/employees/E001/profile", {
             token: owner, body: { employment_status: "on a beach" },
@@ -251,9 +451,36 @@ async function main() {
         check("I can fetch my own photo", res.status === 200 || res.status === 304,
             `HTTP ${res.status}`);
         res = await api("GET", "/profile/photo/E001", { token: other });
-        check("another employee cannot fetch mine", res.status === 403, `HTTP ${res.status}`);
+        check("a stranger in the company cannot fetch mine", res.status === 403,
+            `HTTP ${res.status}`);
         res = await api("GET", "/profile/photo/E001", { token: admin });
         check("an admin can — they manage people", res.status === 200, `HTTP ${res.status}`);
+
+        // A FACE IS SHOWN WHERE THE NAME ALREADY IS.
+        //
+        // Photographs are meant to appear beside messages and in the team
+        // list — "photo agar employee lagayega to sab jagah dikhna chahiye
+        // like instagram". While only the owner of a photo and an
+        // administrator could read it, every one of those places drew
+        // initials instead, and the feature existed on exactly one page.
+        //
+        // The line is where chat already draws it: a colleague you share a
+        // team with, because you can already see their name, their messages
+        // and whether they are online. What is checked here is that it did
+        // not become the whole directory — the two assertions matter as a
+        // pair, and the 403 above is the half that is easy to lose.
+        const team = (await api("POST", "/admin/teams",
+            { token: admin, body: { name: "Design" } })).body.team;
+        await api("POST", `/admin/teams/${team.id}/members`,
+            { token: admin, body: { employee_ids: ["E001", "E002"] } });
+
+        res = await api("GET", "/profile/photo/E001", { token: other });
+        check("a team-mate CAN — the same people chat already shows them",
+            res.status === 200, `HTTP ${res.status}`);
+        res = await api("GET", "/profile/photo/E002", { token: employee });
+        check("and it works in both directions", res.status === 404,
+            `HTTP ${res.status} — 404 because E002 has uploaded nothing, `
+            + `which is a different answer from "not allowed"`);
 
         res = await api("DELETE", "/profile/me/photo", { token: employee });
         check("removing it works", res.status === 200, `HTTP ${res.status}`);
@@ -269,7 +496,18 @@ async function main() {
                           (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour', INTERVAL '2 hours')`);
         psql(DB, `INSERT INTO idle_daily (employee_id, day, idle_seconds)
                   VALUES ('E001', DATE(NOW() AT TIME ZONE 'Asia/Kolkata'), 1800)`);
-        psql(DB, `INSERT INTO screenshots (employee_id, file_name) VALUES ('E001','a.enc'),('E001','b.enc')`);
+        // created_at IS GIVEN, not left to the column default.
+        //
+        // The default is `now()`, which writes the SESSION's wall clock into
+        // a column that is read as naive UTC. On a UTC server those are the
+        // same thing; on a machine at +05:30 the row lands five and a half
+        // hours ahead, and after 18:30 UTC it belongs to tomorrow's IST day —
+        // so this check passed all morning and failed in the evening, on the
+        // same code. A test that depends on what time it is run is worse than
+        // no test.
+        psql(DB, `INSERT INTO screenshots (employee_id, file_name, created_at) VALUES
+                    ('E001','a.enc', NOW() AT TIME ZONE 'UTC'),
+                    ('E001','b.enc', NOW() AT TIME ZONE 'UTC')`);
 
         res = await api("GET", "/profile/me/work-summary", { token: employee });
         check("it answers", res.status === 200, JSON.stringify(res.body).slice(0, 140));

@@ -50,6 +50,11 @@ router.delete("/me/photo", profileCtrl.deleteMyPhoto);
 // The caller's own by default; an administrator may name somebody else, and
 // the controller is what decides that. Two routes rather than an optional
 // parameter: Express 5 rejects `:name?` outright.
+// Proving the address. Both answer about the caller only — there is no id
+// here either, so there is nothing to point at somebody else's mailbox.
+router.post("/me/email/code", profileCtrl.sendEmailCode);
+router.post("/me/email/verify", profileCtrl.verifyEmailCode);
+
 router.get("/photo", profileCtrl.getPhoto);
 router.get("/photo/:employee_id", profileCtrl.getPhoto);
 

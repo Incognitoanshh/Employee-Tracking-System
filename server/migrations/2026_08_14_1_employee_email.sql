@@ -1,0 +1,26 @@
+-- An email address on the employee record.
+--
+-- The previous migration argued AGAINST this column, in these words: "the
+-- product has never had one, and inventing a field nobody fills is worse than
+-- a page that does not claim to know." That reasoning was sound for a field
+-- nobody had asked for. It stopped applying the moment the owner asked for
+-- one — a field somebody wants filled is not an invented field, and there is
+-- now a place to fill it from (My Profile, and the admin's edit dialog).
+--
+-- NULLABLE and no default, so no existing row changes and no query that runs
+-- today gives a different answer. An account created before this simply has
+-- no email, which is the truth about it.
+--
+-- NOT UNIQUE, deliberately. Two people sharing an address is a real thing in
+-- small companies — a shared inbox, a family business, a contractor billed
+-- through one mailbox. A UNIQUE constraint here would turn that into a
+-- failed save with a database error in it, and email is not how anybody signs
+-- in: `username` is, and that is where uniqueness is enforced.
+--
+-- NOT VERIFIED BY THIS MIGRATION. The column records what somebody typed. If
+-- an address is ever to be trusted — used to send a password reset, say —
+-- that needs a confirmation step, and a `email_verified_at` column to record
+-- the result. Neither exists yet, so nothing in the product should treat this
+-- value as proof of anything.
+
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS email VARCHAR(255);

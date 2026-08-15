@@ -8,7 +8,7 @@
  * admin.controller behind its own role checks.
  *
  * WHAT AN EMPLOYEE MAY CHANGE ABOUT THEMSELVES
- *   their phone number, and their photo.
+ *   their phone number, their email address, and their photo.
  *
  * That is the entire list. Role, employee id, department, manager, joining
  * date, employment status, attendance and working hours are all read-only
@@ -26,6 +26,8 @@ const pool = require("../config/db");
 const { isTodayIST, istDate, istToday } = require("../utils/ist_sql");
 const { isOnlineSql, HEARTBEAT_GRACE_MINUTES } = require("../utils/presence");
 const { endSession } = require("../utils/session");
+const crypto = require("crypto");
+const mailer = require("../utils/mailer");
 
 const PHOTO_DIR = process.env.PROFILE_PHOTO_DIR
     ? path.resolve(process.env.PROFILE_PHOTO_DIR)
@@ -47,7 +49,8 @@ exports.getMyProfile = async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT e.employee_id, e.username, e.full_name, e.designation, e.role,
-                    e.phone, e.department, e.joining_date, e.employment_status,
+                    e.phone, e.email, e.email_verified_at, e.department,
+                    e.joining_date, e.employment_status,
                     e.photo, e.created_at, e.suspended, e.password_changed_at,
                     m.employee_id  AS manager_id,
                     COALESCE(m.full_name, m.username) AS manager_name,
@@ -72,6 +75,11 @@ exports.getMyProfile = async (req, res) => {
                 designation: row.designation,
                 role: row.role,
                 phone: row.phone,
+                email: row.email,
+                // Whether the address was PROVED, not merely typed. The page
+                // shows the difference, because an unverified address is not
+                // something anything should be sent to.
+                email_verified: Boolean(row.email_verified_at),
                 department: row.department,
                 team: row.teams,
                 reporting_manager: row.manager_name,
@@ -100,15 +108,21 @@ exports.updateMyProfile = async (req, res) => {
     const employeeId = me(req);
     if (!employeeId) return fail(res, 401, "Unauthenticated");
 
-    if (!("phone" in (req.body || {}))) {
-        return fail(res, 400, "Nothing to change — only phone can be set here");
+    const body = req.body || {};
+    const wantsPhone = "phone" in body;
+    const wantsEmail = "email" in body;
+    if (!wantsPhone && !wantsEmail) {
+        return fail(res, 400,
+            "Nothing to change — only phone and email can be set here");
     }
 
     // Empty means "remove it", which is a thing people want to do.
-    const raw = String(req.body.phone ?? "").trim();
-    const phone = raw === "" ? null : raw;
+    const rawPhone = String(body.phone ?? "").trim();
+    const phone = rawPhone === "" ? null : rawPhone;
+    const rawEmail = String(body.email ?? "").trim();
+    const email = rawEmail === "" ? null : rawEmail;
 
-    if (phone !== null) {
+    if (wantsPhone && phone !== null) {
         if (phone.length > 32) {
             return fail(res, 400, "Phone number is too long — 32 characters at most");
         }
@@ -118,10 +132,241 @@ exports.updateMyProfile = async (req, res) => {
         }
     }
 
+    if (wantsEmail && email !== null) {
+        if (email.length > 255) {
+            return fail(res, 400, "Email address is too long — 255 characters at most");
+        }
+        // SHAPE ONLY, AND NOT MUCH OF IT. This checks that there is something,
+        // then an @, then something with a dot in it — which catches the
+        // typos people actually make ("ansh@gmail", a name with no @ at all)
+        // and refuses nothing valid. A stricter pattern is where real
+        // addresses get rejected; the only thing that proves an address works
+        // is sending to it, and nothing here claims this one is verified.
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            return fail(res, 400, "That does not look like an email address");
+        }
+    }
+
     try {
-        await pool.query(`UPDATE employees SET phone = $1 WHERE employee_id = $2`,
-                         [phone, employeeId]);
-        return res.json({ success: true, phone });
+        // Only what was sent is touched, so saving a phone cannot wipe an
+        // email the page never showed.
+        // CHANGING THE ADDRESS UN-PROVES IT. What was verified was the old
+        // one, and carrying the tick across to a new address would make the
+        // tick mean nothing at all — which is worse than not having it, since
+        // something would eventually be sent on the strength of it.
+        //
+        // Setting it to the SAME value it already had is not a change, and
+        // must not throw away a verification somebody has already done: that
+        // is what saving the phone number on a page carrying both fields
+        // would otherwise do every time.
+        await pool.query(
+            `UPDATE employees
+                SET phone = CASE WHEN $1::boolean THEN $2 ELSE phone END,
+                    email = CASE WHEN $3::boolean THEN $4 ELSE email END,
+                    email_verified_at = CASE
+                        WHEN $3::boolean AND $4 IS DISTINCT FROM email
+                        THEN NULL ELSE email_verified_at END
+              WHERE employee_id = $5`,
+            [wantsPhone, phone, wantsEmail, email, employeeId]);
+        // The pending code goes with it, for the same reason.
+        if (wantsEmail) {
+            await pool.query(
+                `DELETE FROM email_verifications
+                  WHERE employee_id = $1 AND email IS DISTINCT FROM $2`,
+                [employeeId, email]);
+        }
+        return res.json({ success: true, phone, email });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return fail(res, 500, "Internal server error");
+    }
+};
+
+// ────────────────────────────────────────────── proving the email address
+
+// Six digits. Long enough that guessing needs a loop rather than luck, short
+// enough to be read off a phone and typed without a mistake — which matters
+// more than it sounds, because a code somebody mistypes gets requested again.
+const CODE_LENGTH = 6;
+const CODE_VALID_MINUTES = 10;
+// A code that lives all day is a code sitting in an inbox somebody else may
+// read later. Ten minutes is long enough for slow mail and short enough that
+// a forgotten message is worth nothing.
+const MAX_ATTEMPTS = 5;
+// Six digits is a million possibilities against a person and nothing at all
+// against a script. Five wrong answers ends this code — not the account, and
+// not the ability to request another one, because locking somebody out of
+// their own email field is a worse outcome than making them ask again.
+const RESEND_SECONDS = 60;
+
+const hashCode = (code) =>
+    crypto.createHash("sha256").update(String(code)).digest("hex");
+
+exports.sendEmailCode = async (req, res) => {
+    const employeeId = me(req);
+    if (!employeeId) return fail(res, 401, "Unauthenticated");
+
+    // ASKED BEFORE ANYTHING IS WRITTEN. A server with no mailbox configured
+    // would otherwise store a code, promise to send it, and send nothing —
+    // and the person would sit waiting for mail that was never going to
+    // arrive. This is a 503: the request was fine, the server cannot do it.
+    const why = mailer.unavailableReason();
+    if (why) return fail(res, 503, why);
+
+    try {
+        const row = await pool.query(
+            `SELECT email, email_verified_at FROM employees WHERE employee_id = $1`,
+            [employeeId]);
+        const email = row.rows[0]?.email;
+        if (!email) {
+            return fail(res, 400,
+                "Save an email address first, then it can be verified.");
+        }
+        if (row.rows[0].email_verified_at) {
+            return fail(res, 400, "That address is already verified.");
+        }
+
+        // THE AGE IS COMPUTED IN SQL, where the types are not in question.
+        //
+        // The JavaScript version of this was `new Date(row.sent_at + "Z")`,
+        // which is correct here ONLY because config/db.js installs a type
+        // parser that hands timestamps back as raw strings rather than Date
+        // objects. Appending "Z" to "2026-08-14 11:13:00.12" gives UTC;
+        // appending it to a Date — which is what pg does by default — gives
+        // "…GMT+0530 (India Standard Time)Z", and an answer wrong by the
+        // machine's offset.
+        //
+        // So the arithmetic was right, and right for a reason living in
+        // another file that nothing here states. These columns are naive UTC
+        // (see utils/ist_sql.js); comparing them in SQL needs no such
+        // agreement, and cannot be broken by changing that parser later.
+        const pending = await pool.query(
+            `SELECT GREATEST(0, EXTRACT(EPOCH FROM
+                        (NOW() AT TIME ZONE 'UTC') - sent_at))::int AS age
+               FROM email_verifications WHERE employee_id = $1`,
+            [employeeId]);
+        if (pending.rows[0]) {
+            const age = Number(pending.rows[0].age);
+            // Throttled, because the button is otherwise a way to send
+            // somebody a hundred messages — and mail providers stop
+            // delivering for everybody when that happens.
+            if (age < RESEND_SECONDS) {
+                return fail(res, 429,
+                    `A code was just sent. Ask again in ${RESEND_SECONDS - age} seconds.`);
+            }
+        }
+
+        // crypto, not Math.random: this is a credential, however short-lived,
+        // and Math.random is predictable from previous values.
+        const code = String(crypto.randomInt(0, 10 ** CODE_LENGTH))
+            .padStart(CODE_LENGTH, "0");
+
+        // SENT BEFORE IT IS STORED. If the mail fails, nothing is written and
+        // the previous code — if any — still works; storing first would
+        // invalidate a code that is still in somebody's inbox in exchange for
+        // one that never arrived.
+        await mailer.send({
+            to: email,
+            subject: `${code} is your Amaze Connect verification code`,
+            text: `Your Amaze Connect verification code is ${code}.\n\n`
+                + `It is valid for ${CODE_VALID_MINUTES} minutes.\n\n`
+                + `If you did not ask for this, somebody has typed your `
+                + `address into their profile by mistake. You can ignore this `
+                + `message — nothing has been given access to your account.`,
+        });
+
+        await pool.query(
+            `INSERT INTO email_verifications
+                 (employee_id, email, code_hash, expires_at, attempts, sent_at)
+             VALUES ($1, $2, $3,
+                     (NOW() AT TIME ZONE 'UTC') + INTERVAL '${CODE_VALID_MINUTES} minutes',
+                     0, NOW() AT TIME ZONE 'UTC')
+             ON CONFLICT (employee_id) DO UPDATE
+                SET email = EXCLUDED.email, code_hash = EXCLUDED.code_hash,
+                    expires_at = EXCLUDED.expires_at, attempts = 0,
+                    sent_at = EXCLUDED.sent_at`,
+            [employeeId, email, hashCode(code)]);
+
+        // The address is echoed so the page can say where it went. The CODE
+        // is not — it goes to the mailbox and nowhere else, which is the
+        // entire point of the exercise.
+        return res.json({ success: true, sent_to: email,
+                          valid_minutes: CODE_VALID_MINUTES });
+    } catch (error) {
+        console.error("[MAIL]", req.originalUrl, error.message);
+        // A rejected login, a wrong port, a provider refusing the message —
+        // all of it is "we could not send it", and the person can act on
+        // that. A 500 would tell the client the server is broken.
+        return fail(res, 502,
+            "The code could not be sent. Check the server's email settings.");
+    }
+};
+
+exports.verifyEmailCode = async (req, res) => {
+    const employeeId = me(req);
+    if (!employeeId) return fail(res, 401, "Unauthenticated");
+
+    const code = String(req.body?.code ?? "").trim();
+    if (!/^[0-9]{6}$/.test(code)) {
+        return fail(res, 400, "Enter the six-digit code from the email.");
+    }
+
+    try {
+        const row = await pool.query(
+            `SELECT v.email, v.code_hash, v.attempts,
+                    v.expires_at < (NOW() AT TIME ZONE 'UTC') AS expired,
+                    e.email AS current_email
+               FROM email_verifications v
+               JOIN employees e ON e.employee_id = v.employee_id
+              WHERE v.employee_id = $1`, [employeeId]);
+        const pending = row.rows[0];
+        if (!pending) {
+            return fail(res, 400, "Ask for a code first.");
+        }
+        if (pending.expired) {
+            await pool.query(`DELETE FROM email_verifications WHERE employee_id = $1`,
+                             [employeeId]);
+            return fail(res, 400, "That code has expired. Ask for a new one.");
+        }
+        // The address changed after the code was sent. Verifying now would
+        // prove the OLD address and mark the NEW one as proved — which is the
+        // one way this whole exercise could be turned inside out.
+        if (pending.email !== pending.current_email) {
+            await pool.query(`DELETE FROM email_verifications WHERE employee_id = $1`,
+                             [employeeId]);
+            return fail(res, 400,
+                "The address changed after that code was sent. Ask for a new one.");
+        }
+        if (pending.attempts >= MAX_ATTEMPTS) {
+            return fail(res, 429,
+                "Too many wrong codes. Ask for a new one.");
+        }
+
+        // timingSafeEqual over the hashes, so the comparison cannot be read
+        // one character at a time. Both sides are the same length by
+        // construction, which the function requires.
+        const given = Buffer.from(hashCode(code));
+        const stored = Buffer.from(String(pending.code_hash));
+        const ok = given.length === stored.length
+                && crypto.timingSafeEqual(given, stored);
+
+        if (!ok) {
+            await pool.query(
+                `UPDATE email_verifications SET attempts = attempts + 1
+                  WHERE employee_id = $1`, [employeeId]);
+            const left = MAX_ATTEMPTS - (pending.attempts + 1);
+            return fail(res, 400, left > 0
+                ? `That code is not right. ${left} attempt${left === 1 ? "" : "s"} left.`
+                : "That code is not right, and that was the last attempt. "
+                  + "Ask for a new one.");
+        }
+
+        await pool.query(
+            `UPDATE employees SET email_verified_at = NOW() AT TIME ZONE 'UTC'
+              WHERE employee_id = $1`, [employeeId]);
+        await pool.query(`DELETE FROM email_verifications WHERE employee_id = $1`,
+                         [employeeId]);
+        return res.json({ success: true, email: pending.email });
     } catch (error) {
         console.error("[500]", req.method, req.originalUrl, error.message);
         return fail(res, 500, "Internal server error");
@@ -176,15 +421,36 @@ exports.getPhoto = async (req, res) => {
     const employeeId = me(req);
     if (!employeeId) return fail(res, 401, "Unauthenticated");
 
-    // The id is the CALLER's, so one person cannot read another's photo by
-    // guessing a filename — and the name is taken from the database, never
-    // from the URL, so there is nothing to traverse with.
+    // The filename is taken from the database, never from the URL, so there
+    // is nothing here to traverse with whatever the caller sends.
     const wanted = String(req.params.employee_id || employeeId);
     const isSelf = wanted === employeeId;
     const elevated = ["admin", "super_admin"].includes(req.employee?.role);
-    if (!isSelf && !elevated) return fail(res, 403, "Not yours to look at");
 
     try {
+        // A FACE IS ONLY SHOWN TO PEOPLE WHO ALREADY SEE THE NAME.
+        //
+        // Photographs are meant to appear beside messages, in the team list,
+        // wherever a colleague appears — so restricting them to "yourself and
+        // administrators" left every one of those places drawing initials.
+        //
+        // The line is drawn where chat already draws it: you may see the
+        // photo of somebody you share a team with, because you can already
+        // see their name, their messages and their presence. It is not a new
+        // disclosure, and it deliberately does not open the whole directory —
+        // two employees in unrelated departments still cannot look each other
+        // up.
+        if (!isSelf && !elevated) {
+            const shares = await pool.query(
+                `SELECT 1 FROM team_members a
+                  JOIN team_members b ON a.team_id = b.team_id
+                 WHERE a.employee_id = $1 AND b.employee_id = $2
+                 LIMIT 1`, [employeeId, wanted]);
+            if (shares.rowCount === 0) {
+                return fail(res, 403, "Not yours to look at");
+            }
+        }
+
         const row = await pool.query(
             `SELECT photo FROM employees WHERE employee_id = $1`, [wanted]);
         const name = row.rows[0]?.photo;
