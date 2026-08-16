@@ -65,11 +65,24 @@ async function annotateAttendance(rows) {
             const shiftStart = config.shift_start ? String(config.shift_start) : null;
             const shiftEnd   = config.shift_end   ? String(config.shift_end)   : null;
 
-            // A reconnect mid-day is not an arrival.
+            // A reconnect mid-day is not an arrival — you cannot arrive twice,
+            // so the second sign-in of a day is not judged late or on time.
+            //
+            // IT SAYS SO, rather than showing a dash. The dash was already the
+            // label for "no shift is configured", so one symbol carried two
+            // unrelated meanings: "there is nothing to measure against" and
+            // "this is not the measurement". Reported as a bug, and fairly —
+            // the same person on the same morning read "On time" on one row
+            // and "—" on the next, a minute apart, with nothing to explain it.
             const isFirst = row.day_first_login
                 && String(row.day_first_login) === String(row.login_time);
             if (!isFirst) {
-                return { ...strip(row), status: "reconnect", status_label: "—", late_minutes: null };
+                return {
+                    ...strip(row),
+                    status: "reconnect",
+                    status_label: "Signed in again",
+                    late_minutes: null,
+                };
             }
 
             const loginMinutes = Number(row.ist_minutes);

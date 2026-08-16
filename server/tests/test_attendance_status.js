@@ -176,6 +176,16 @@ async function main() {
         const reconnect = find("2026-08-05 08:00");
         check("a second sign-in the same day is not judged at all",
             reconnect?.status === "reconnect", JSON.stringify(reconnect?.status_label));
+        // AND IT SAYS WHICH KIND OF "not judged" IT IS. A dash here read
+        // identically to "no shift configured", so the same person on the
+        // same morning saw "On time" on one row and "—" on the next, a
+        // minute apart, and reported it as a bug. Two meanings, one symbol.
+        check("and it says so in words rather than a dash",
+            reconnect?.status_label === "Signed in again",
+            JSON.stringify(reconnect?.status_label));
+        check("no row is left showing a bare dash",
+            !(res.body.data || []).some((r) => (r.status_label || "").trim() === "—"),
+            JSON.stringify((res.body.data || []).map((r) => r.status_label)));
 
         const late = find("2026-08-06 04:15");
         check("09:45 IST is Late 45m",

@@ -71,7 +71,11 @@ function classifyLogin({ loginMinutes, shiftStart, shiftEnd, graceMinutes, isDay
     // No usable shift means no baseline to be late against. Saying so beats
     // defaulting to 09:00 and quietly marking a night shift late every day.
     if (start === null || end === null) {
-        return { status: "unknown", late_minutes: null, label: "—" };
+        // NAMED, not a dash. An administrator seeing "—" has no way to tell
+        // this from a reconnect, from a page that failed to load, or from a
+        // bug — and the answer here is something they can actually act on:
+        // give this person a shift and the column starts working.
+        return { status: "unknown", late_minutes: null, label: "No shift set" };
     }
 
     const offset = shiftDayOffset(loginMinutes, start, end);
