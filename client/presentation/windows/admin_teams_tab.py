@@ -29,6 +29,7 @@ from client.core import http as _http
 from PySide6.QtCore import Qt, QSize, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
+    QLineEdit, QWidget,
     QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QVBoxLayout,
     QWidget,
@@ -126,8 +127,89 @@ def _section(title: str) -> QLabel:
     return label
 
 
-def _pick_people(parent, people: list[dict], preselected: set | None = None) -> QListWidget:
-    """A checkable list of employees, used by both 'new team' and 'new channel'."""
+class _PeoplePicker(QWidget):
+    """A searchable, checkable list of employees.
+
+    WHY THE SEARCH IS NOT OPTIONAL. This is how a team or a channel gets its
+    members, and it was a plain list: to put twenty people in a channel out of
+    a hundred, somebody had to scroll and read every row, twice, and hope. At
+    six employees it looks fine; the first real company makes it unusable.
+
+    FILTERING HIDES ROWS, IT NEVER UNTICKS ONE. That is the whole trick — you
+    search "priya", tick her, search "amit", tick him, and both are still
+    ticked when you press Create. A picker that forgot the first name when you
+    typed the second would be worse than no search at all, and it is the
+    mistake this shape is chosen to avoid: the items are never rebuilt, only
+    shown and hidden.
+
+    `.count()` and `.item()` are forwarded so the callers that already read
+    the list keep working unchanged.
+    """
+
+    def __init__(self, parent, people, preselected=None):
+        super().__init__(parent)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("Search by name or employee ID…")
+        self.search.setClearButtonEnabled(True)
+        self.search.setStyleSheet(
+            f"QLineEdit{{background:{C['bg_surface_alt']};border:1px solid {C['border']};"
+            f"border-radius:8px;color:{C['text_primary']};font-size:12px;padding:6px 10px;}}")
+        column.addWidget(self.search)
+
+        self.listing = _checkable_list(self, people, preselected)
+        column.addWidget(self.listing)
+
+        self.counter = QLabel("")
+        self.counter.setStyleSheet(
+            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+        column.addWidget(self.counter)
+
+        self.search.textChanged.connect(self._filter)
+        self.listing.itemChanged.connect(lambda _i: self._recount())
+        self._recount()
+
+    def _filter(self, text: str):
+        needle = text.strip().lower()
+        for i in range(self.listing.count()):
+            item = self.listing.item(i)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+        self._recount()
+
+    def _recount(self):
+        picked = sum(1 for i in range(self.listing.count())
+                     if self.listing.item(i).checkState() == Qt.CheckState.Checked)
+        hidden = sum(1 for i in range(self.listing.count())
+                     if self.listing.item(i).isHidden())
+        # The count is what makes the search safe to trust: somebody who has
+        # filtered the list can still see that the four people they ticked
+        # earlier are still ticked.
+        note = f"{picked} selected"
+        if hidden:
+            note += f"  ·  {hidden} hidden by the search"
+        self.counter.setText(note)
+
+    # The callers already speak QListWidget; keep them working.
+    def count(self):
+        return self.listing.count()
+
+    def item(self, index):
+        return self.listing.item(index)
+
+    def setEnabled(self, on):
+        super().setEnabled(on)
+        self.listing.setEnabled(on)
+
+
+def _pick_people(parent, people: list[dict], preselected: set | None = None):
+    """A searchable, checkable list of employees, for 'new team' and 'new channel'."""
+    return _PeoplePicker(parent, people, preselected)
+
+
+def _checkable_list(parent, people: list[dict], preselected: set | None = None) -> QListWidget:
     listing = QListWidget(parent)
     listing.setStyleSheet(
         f"QListWidget{{background:{C['bg_surface_alt']};border:1px solid {C['border']};"
