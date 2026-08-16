@@ -209,9 +209,29 @@ def main():
 
             by_hint["Rajesh Kumar"].setText("Sunita Verma")
             by_hint["QA Engineer"].setText("Accounts")
+
+            # THE EMPLOYEE ID IS REQUIRED NOW, and the dialog normally arrives
+            # with one already filled in — the server is asked for the next in
+            # the series (26AMZEM001) when it opens. There is no server here,
+            # so it is typed, which is also what an administrator does when
+            # that request cannot be made.
+            warned.clear()
+            buttons[0].click()
+            check("an empty employee ID is refused, before the network",
+                  len(sent) == 0 and warned, f"sent={len(sent)} warned={warned}")
+
+            warned.clear()
+            by_hint["26AMZEM001"].setText("sunita verma")
+            buttons[0].click()
+            check("and so is one with a space in it — it is a roll number",
+                  len(sent) == 0 and warned, f"sent={len(sent)} warned={warned}")
+
+            by_hint["26AMZEM001"].setText("26AMZEM007")
             buttons[0].click()
             check("with a name, it is sent to the server",
                   len(sent) == 1, str(len(sent)))
+            check("carrying the id exactly as typed",
+                  sent[0][1].get("employee_id") == "26AMZEM007", str(sent[0][1]))
             check("as full_name, the field the rest of the product reads",
                   sent[0][1].get("full_name") == "Sunita Verma", str(sent[0][1]))
             check("with the designation",

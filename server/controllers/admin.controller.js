@@ -230,6 +230,81 @@ exports.getEmployees = async (req, res) => {
 };
 
 
+/**
+ * The next employee id, so nobody has to guess one.
+ *
+ * THE SHAPE IS 26AMZEM001 — the year, the company, the role, the number.
+ * It is the owner's own format, and each part earns its place:
+ *
+ *   26   the year they joined, readable off a report years later without
+ *        looking anything up
+ *   AMZ  the company
+ *   SU   super admin  ·  AD  admin  ·  EM  employee
+ *   001  the number within that year and that role
+ *
+ * Each role keeps its own count, which follows from the format: the first
+ * employee of 2026 is 26AMZEM001 whether or not an admin was created first.
+ * The number starts again at 001 in January, which is what makes the year
+ * part worth having — 27AMZEM001 exists even though 26AMZEM048 does.
+ *
+ * THE YEAR IS THE IST YEAR. At 22:00 on 31 December in Delhi it is still the
+ * old year in UTC, and somebody entered that evening would otherwise be
+ * numbered into a year that had already ended here.
+ *
+ * RETIRED IDS COUNT. The highest number ever ISSUED is what the next one
+ * follows, not the highest still in use — a number is never handed out twice,
+ * which is the whole point of a roll number.
+ *
+ * A SUGGESTION, NOT A RULE. The field stays editable, and the ids that
+ * predate this format keep working: the validation on create is deliberately
+ * wider than this. It exists so the common case is a box already filled in
+ * correctly rather than a convention nobody wrote down.
+ */
+const ID_COMPANY = process.env.EMPLOYEE_ID_PREFIX || "AMZ";
+const ID_ROLE_CODE = { super_admin: "SU", admin: "AD", employee: "EM" };
+
+exports.nextEmployeeId = async (req, res) => {
+    try {
+        const role = String(req.query.role || "employee");
+        const roleCode = ID_ROLE_CODE[role];
+        if (!roleCode) {
+            return res.status(400).json({
+                success: false,
+                message: `role must be one of ${Object.keys(ID_ROLE_CODE).join(", ")}`,
+            });
+        }
+
+        const year = (await pool.query(
+            `SELECT TO_CHAR(NOW() AT TIME ZONE 'Asia/Kolkata', 'YY') AS yy`
+        )).rows[0].yy;
+        const prefix = `${year}${ID_COMPANY}${roleCode}`;
+
+        const used = await pool.query(
+            `SELECT employee_id FROM (
+                 SELECT employee_id FROM employees
+                 UNION ALL
+                 SELECT employee_id FROM retired_employee_ids
+             ) all_ids
+             WHERE employee_id LIKE $1`,
+            [`${prefix}%`]
+        );
+
+        let highest = 0;
+        for (const { employee_id } of used.rows) {
+            const m = new RegExp(`^${prefix}(\\d+)$`).exec(String(employee_id));
+            if (m) highest = Math.max(highest, Number(m[1]));
+        }
+
+        return res.json({
+            success: true,
+            employee_id: `${prefix}${String(highest + 1).padStart(3, "0")}`,
+        });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.createEmployee = async (req, res) => {
     const {
         employee_id, username, password, role = "employee",
@@ -237,6 +312,27 @@ exports.createEmployee = async (req, res) => {
     } = req.body || {};
 
     // BUG FIX: pehle empty/missing fields directly DB tak pahunch jaate the.
+    // AN EMPLOYEE ID IS A ROLL NUMBER, and the rules that go with one.
+    //
+    // It was accepted as any non-empty string, so "raju kumar", "  ", "#1"
+    // and an accidental paste all became permanent primary keys — printed on
+    // reports, typed into search boxes, carried in URLs, and impossible to
+    // change afterwards without touching every row that references them.
+    //
+    // Letters, digits, hyphen and underscore; 2 to 20 characters. Wide enough
+    // for EMP001, AMZ-004 and TEST001, narrow enough that nothing with a
+    // space or a slash in it ever becomes an identifier.
+    const idPattern = /^[A-Za-z0-9_-]{2,20}$/;
+    if (employee_id !== undefined && employee_id !== null
+        && !idPattern.test(String(employee_id).trim())) {
+        return res.status(400).json({
+            success: false,
+            message: "Employee ID must be 2–20 characters: letters, digits, "
+                   + "hyphen or underscore, with no spaces. It cannot be "
+                   + "changed later, so it is worth getting right.",
+        });
+    }
+
     if (!employee_id || !username || !password) {
         return res.status(400).json({
             success: false,
@@ -254,6 +350,31 @@ exports.createEmployee = async (req, res) => {
     // Same rules as a change or a reset. Account creation used to accept any
     // non-empty string, which would have made it the way around the policy
     // the other two enforce.
+    // A RETIRED NUMBER IS NOT AVAILABLE. It belonged to somebody, and it is
+    // still printed on every report exported while they worked here.
+    try {
+        const retired = await pool.query(
+            `SELECT full_name FROM retired_employee_ids WHERE employee_id = $1`,
+            [String(employee_id).trim()]
+        );
+        if (retired.rows.length > 0) {
+            const who = retired.rows[0].full_name;
+            return res.status(409).json({
+                success: false,
+                message: `That employee ID already belonged to ${who || "a former employee"} `
+                       + `and is not reissued. Reports exported while they worked here still `
+                       + `name them by it.`,
+            });
+        }
+    } catch (error) {
+        // The table arrives with a migration. A server that has not run it
+        // yet must still be able to create employees — this check is a
+        // guarantee about ids, not a precondition for hiring anybody.
+        if (!/relation .*retired_employee_ids.* does not exist/i.test(error.message)) {
+            throw error;
+        }
+    }
+
     const weak = validatePassword(password, { username, employeeId: employee_id });
     if (weak) {
         return res.status(400).json({ success: false, message: weak });
@@ -1804,6 +1925,20 @@ exports.deleteEmployee = async (req, res) => {
             `DELETE FROM activity_logs
              WHERE employee_id = $1`,
             [employee_id]
+        );
+
+        // THE NUMBER IS RETIRED, NOT FREED — see the migration for why.
+        //
+        // Inside the same transaction as the delete: if the account goes and
+        // this does not, the id becomes available again and the guarantee is
+        // silently gone. The name is kept alongside it so an administrator
+        // who looks up an id from an old report is told who it was, rather
+        // than "that id is taken" with no explanation.
+        await client.query(
+            `INSERT INTO retired_employee_ids (employee_id, full_name, retired_by)
+             SELECT employee_id, full_name, $2 FROM employees WHERE employee_id = $1
+             ON CONFLICT (employee_id) DO NOTHING`,
+            [employee_id, req.employee?.employee_id || null]
         );
 
         await client.query(

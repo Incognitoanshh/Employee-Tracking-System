@@ -11,6 +11,7 @@ router.use(adminOnly);
 
 // Employees
 router.get("/employees",  adminCtrl.getEmployees);
+router.get("/employees/next-id", adminCtrl.nextEmployeeId);
 router.post("/employees", adminCtrl.createEmployee);
 router.delete("/employees/:employee_id", adminCtrl.deleteEmployee);
 

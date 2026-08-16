@@ -4764,6 +4764,50 @@ class _EmployeesTab(QWidget):
         designation.setPlaceholderText("QA Engineer")
         username.setPlaceholderText("rajesh")
 
+        # THE ID IS A ROLL NUMBER, so it arrives already filled in.
+        #
+        # It cannot be changed afterwards — it is the primary key, and it is
+        # printed on reports, typed into search boxes and carried in URLs. A
+        # blank box invites "raju kumar" or a stray paste, and by the time
+        # anybody notices there are rows pointing at it.
+        #
+        # The server works out the next one in whatever series this company
+        # already uses (EMP002 after EMP001, AMZ005 after AMZ004). It stays
+        # editable: a company that numbers people some other way must not be
+        # forced into ours.
+        emp_id.setPlaceholderText("26AMZEM001")
+
+        # THE ID FOLLOWS THE ROLE, so it is fetched again when the role
+        # changes — an account switched from employee to admin should be
+        # 26AMZAD001, not an EM number with the wrong letters in it.
+        #
+        # It only ever replaces a value THIS dialog put there. Anything typed
+        # by hand is left alone: somebody who has deliberately entered an id
+        # and then adjusts the role must not watch their entry vanish.
+        suggested = {"value": ""}
+
+        def _suggest():
+            worker = _FetchWorker(
+                f"{API_BASE_URL}/admin/employees/next-id",
+                {"role": role.currentText()})
+
+            def _fill(data: dict):
+                if not data.get("success"):
+                    return
+                typed = emp_id.text().strip()
+                if typed and typed != suggested["value"]:
+                    return          # theirs, not ours
+                suggested["value"] = data.get("employee_id", "")
+                emp_id.setText(suggested["value"])
+
+            worker.result.connect(_fill)
+            worker.error.connect(lambda _e: None)   # a blank box is a fine fallback
+            _track_worker(self._workers, worker)
+            worker.start()
+
+        role.currentTextChanged.connect(lambda _t: _suggest())
+        _suggest()
+
         password.setEchoMode(QLineEdit.EchoMode.Password)
 
         # Creation rules (server bhi yehi enforce karta hai):
@@ -4820,8 +4864,22 @@ class _EmployeesTab(QWidget):
                     "audit log. Without it they show up as their login username.")
                 return
 
+            typed_id = emp_id.text().strip()
+            # CHECKED HERE AS WELL AS ON THE SERVER. The server refuses a bad
+            # id, but only after a round trip — and this dialog is filled in
+            # once per person, by somebody who then has to work out which of
+            # six fields the message was about.
+            if not re.match(r"^[A-Za-z0-9_-]{2,20}$", typed_id):
+                QMessageBox.warning(
+                    self, "Check the employee ID",
+                    "An employee ID is 2–20 characters: letters, digits, "
+                    "hyphen or underscore, with no spaces.\n\n"
+                    "It cannot be changed afterwards — it is what reports, "
+                    "searches and the audit log refer to this person by.")
+                return
+
             payload = {
-                "employee_id": emp_id.text().strip(),
+                "employee_id": typed_id,
                 "username": username.text().strip(),
                 "password": password.text(),
                 "role": role.currentText(),

@@ -553,6 +553,126 @@ async function main() {
         employee = await login("rajesh", "rajesh-laptop");
         check("signing back in works immediately", Boolean(employee));
 
+        console.log("\nAn employee id is a roll number");
+        // It was any non-empty string, so "raju kumar", "  " and a stray
+        // paste all became permanent primary keys — printed on reports, typed
+        // into searches, and impossible to change afterwards without touching
+        // every row that points at them.
+        for (const bad of ["raju kumar", " ", "a", "#1", "EMP/001",
+                           "x".repeat(21), "emp 001"]) {
+            const attempt = await api("POST", "/admin/employees", {
+                token: owner,
+                body: { employee_id: bad, username: `u${Date.now()}`,
+                        password: "GoodPass123", role: "employee", full_name: "Somebody" },
+            });
+            check(`"${bad}" is refused as an id`, attempt.status === 400,
+                `HTTP ${attempt.status}`);
+        }
+        for (const good of ["EMP009", "AMZ-004", "TEST_01"]) {
+            const attempt = await api("POST", "/admin/employees", {
+                token: owner,
+                body: { employee_id: good, username: `ok${good}`,
+                        password: "GoodPass123", role: "employee", full_name: "Somebody" },
+            });
+            check(`"${good}" is accepted`, attempt.status === 200,
+                `HTTP ${attempt.status} ${JSON.stringify(attempt.body).slice(0, 90)}`);
+        }
+
+        console.log("\nAnd the next one is offered rather than guessed");
+        // 26AMZEM001 — year, company, role, number. Each role counts
+        // separately, and the year part is why the number starts again in
+        // January.
+        const yy = new Date().toLocaleDateString("en-GB", {
+            timeZone: "Asia/Kolkata", year: "2-digit" });
+        for (const [role, code] of [["employee", "EM"], ["admin", "AD"],
+                                    ["super_admin", "SU"]]) {
+            const got = await api("GET", `/admin/employees/next-id?role=${role}`,
+                { token: owner });
+            check(`a ${role} is offered ${yy}AMZ${code}nnn`,
+                new RegExp(`^${yy}AMZ${code}\\d{3}$`).test(got.body.employee_id || ""),
+                String(got.body.employee_id));
+        }
+        let firstEm = (await api("GET", "/admin/employees/next-id?role=employee",
+            { token: owner })).body.employee_id;
+        check("the first of the year is 001", firstEm.endsWith("001"), firstEm);
+        await api("POST", "/admin/employees", {
+            token: owner,
+            body: { employee_id: firstEm, username: "formatted",
+                    password: "GoodPass123", role: "employee", full_name: "Formatted Hire" },
+        });
+        const secondEm = (await api("GET", "/admin/employees/next-id?role=employee",
+            { token: owner })).body.employee_id;
+        check("and the one after it is 002", secondEm.endsWith("002"), secondEm);
+        const adminId = (await api("GET", "/admin/employees/next-id?role=admin",
+            { token: owner })).body.employee_id;
+        check("an admin still starts at 001 — the roles count separately",
+            adminId.endsWith("001"), adminId);
+
+        // A NUMBER IS NEVER HANDED OUT TWICE, so a retired one does not free
+        // its place in the series.
+        await api("DELETE", `/admin/employees/${firstEm}`, { token: owner });
+        const afterRetire = (await api("GET", "/admin/employees/next-id?role=employee",
+            { token: owner })).body.employee_id;
+        check("deleting 001 does not make 001 the next suggestion again",
+            afterRetire !== firstEm, `${firstEm} was retired, offered ${afterRetire}`);
+
+        const badRole = await api("GET", "/admin/employees/next-id?role=wizard",
+            { token: owner });
+        check("an invented role is refused rather than guessed at",
+            badRole.status === 400, `HTTP ${badRole.status}`);
+
+        // EMP001, EMP009 and E001/E002 exist by now; the commonest series
+        // wins and the padding is kept.
+        let nid = await api("GET", "/admin/employees/next-id", { token: owner });
+        check("a suggestion comes back", nid.status === 200 && Boolean(nid.body.employee_id),
+            JSON.stringify(nid.body));
+        check("it is a valid id", /^[A-Za-z0-9_-]{2,20}$/.test(nid.body.employee_id || ""),
+            String(nid.body.employee_id));
+        check("and it is not one already taken",
+            psql(DB, `SELECT count(*) FROM employees WHERE employee_id='${nid.body.employee_id}'`) === "0",
+            String(nid.body.employee_id));
+        const created = await api("POST", "/admin/employees", {
+            token: owner,
+            body: { employee_id: nid.body.employee_id, username: "suggested",
+                    password: "GoodPass123", role: "employee", full_name: "Suggested Hire" },
+        });
+        check("the suggestion can actually be used", created.status === 200,
+            `HTTP ${created.status} ${JSON.stringify(created.body).slice(0, 90)}`);
+        const nextAgain = await api("GET", "/admin/employees/next-id", { token: owner });
+        check("and the next suggestion moves on",
+            nextAgain.body.employee_id !== nid.body.employee_id,
+            `${nid.body.employee_id} -> ${nextAgain.body.employee_id}`);
+
+        console.log("\nThe same roll number is never given to two people");
+        // employee_id is the primary key, so the database itself refuses a
+        // second one — but what matters is that the ANSWER is usable: a 409
+        // and a sentence, not a 500 with a constraint name in it.
+        let dupe = await api("POST", "/admin/employees", {
+            token: owner,
+            body: { employee_id: "EMP009", username: "someone-else",
+                    password: "GoodPass123", role: "employee", full_name: "Different Person" },
+        });
+        check("a second account cannot take an id already in use",
+            [400, 409].includes(dupe.status), `HTTP ${dupe.status}`);
+        check("and it says so in words somebody can act on",
+            /already|exists|taken|use/i.test(dupe.body.message || ""),
+            JSON.stringify(dupe.body).slice(0, 140));
+        check("the original is untouched",
+            psql(DB, `SELECT username FROM employees WHERE employee_id='EMP009'`) === "okEMP009");
+
+        // AND NOT AFTER A DELETION EITHER. Attendance, screenshots and the
+        // audit log all name people by this id; handing a retired one to a
+        // new hire would quietly merge two people's history.
+        await api("DELETE", "/admin/employees/EMP009", { token: owner });
+        const reused = await api("POST", "/admin/employees", {
+            token: owner,
+            body: { employee_id: "EMP009", username: "recycled",
+                    password: "GoodPass123", role: "employee", full_name: "New Hire" },
+        });
+        check("a deleted person's id is not handed to somebody new",
+            [400, 409].includes(reused.status),
+            `HTTP ${reused.status} — reusing it merges two people's history`);
+
         console.log("\nNobody else's account is reachable from here");
         check("there is no employee id in any of these routes to tamper with",
             (await api("GET", "/profile/me", { token: other })).body.profile.employee_id === "E002",
