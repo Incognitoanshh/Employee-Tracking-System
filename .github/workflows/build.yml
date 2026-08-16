@@ -6,15 +6,20 @@ name: Build Cross-Platform Desktop Apps
 # is already deployed. This build exists to carry the label into the final
 # round of testing. Still no tag, so the release job below does not run and
 # nothing is published.
-run-name: test 7
-# THE ARTIFACT NAMES BELOW MUST BE CHANGED WITH IT.
+run-name: v1.0.0
+# THE ARTIFACT NAMES NO LONGER CARRY A LABEL, deliberately.
 #
-# run-name is what the Actions list shows; the artifact names are what
-# somebody downloads and what appears in their Downloads folder. Changing
-# only the first produced a run called "test 6" holding two files called
+# They used to ("test-5-Windows-Installer"), and twice a run was renamed
+# while they were not — so a run called "test 6" held two files called
 # "test-5-…", which is the one thing anybody looks at to know which build
-# they are installing. It has already caused an argument about whether a
-# build was the new one.
+# they are installing. It caused an argument about whether a build was the
+# new one, and then happened again.
+#
+# Two names for one thing, kept in step by remembering. Now there is one:
+# run-name says which build this is, the artifacts are just "Windows-Installer"
+# and "Mac-DMG", and the RELEASE job renames the files after the tag —
+# Amaze-Connect-1.0.0-Windows-Setup.exe — which is the name that reaches
+# anybody outside this repository.
 
 on:
   push:
@@ -190,7 +195,7 @@ jobs:
       - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
-          name: test-7-Windows-Installer
+          name: Windows-Installer
           path: installer_out/Amaze-Connect-Setup.exe
 
   build-mac:
@@ -279,7 +284,7 @@ jobs:
       - name: Upload Mac DMG Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: test-7-Mac-DMG
+          name: Mac-DMG
           path: dmg_out/Amaze-Connect.dmg
 
   # ── the release ────────────────────────────────────────────────────────
@@ -313,9 +318,9 @@ jobs:
           # A file called "Setup.exe" on a release page tells nobody which
           # build it is. Somebody reporting a bug should be able to say so
           # from the filename alone.
-          cp "installers/test-7-Windows-Installer/Amaze-Connect-Setup.exe" \
+          cp "installers/Windows-Installer/Amaze-Connect-Setup.exe" \
              "release/Amaze-Connect-${VERSION}-Windows-Setup.exe"
-          cp "installers/test-7-Mac-DMG/Amaze-Connect.dmg" \
+          cp "installers/Mac-DMG/Amaze-Connect.dmg" \
              "release/Amaze-Connect-${VERSION}-macOS.dmg"
           ls -lh release
 
