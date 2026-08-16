@@ -1,6 +1,7 @@
 const pool = require("../config/db");
 const { endSession, markLoggedIn } = require("../utils/session");
 const { isOnlineSql } = require("../utils/presence");
+const { closeShiftFor } = require("../utils/attendance_cleanup");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 const {
     canManage,
@@ -1489,7 +1490,27 @@ exports.forceLogout = async (req, res) => {
         // admin pressing Force logout actually wants.
         await endSession(pool, employee_id);
 
-        return res.json({ success: true, message: `Force logout set for ${employee_id}` });
+        // AND THE SHIFT ENDS WITH THE SESSION.
+        //
+        // The attendance row is normally closed by the client as it shuts
+        // down, by posting to /attendance/logout. After a force logout that
+        // post carries a token this server has just invalidated, so it is
+        // refused — and Attendance goes on showing ACTIVE for somebody an
+        // administrator has signed out and whose app is closed, until the
+        // sixteen-hour sweep eventually catches it. Two screens disagreeing
+        // about the same person, which is the thing attendance_cleanup was
+        // written to end.
+        //
+        // Closed at the last evidence they were there, not at the moment the
+        // button was pressed — an admin clicking at six for a machine that
+        // went quiet at two must not add four hours to a timesheet.
+        const closed = await closeShiftFor(pool, employee_id);
+
+        return res.json({
+            success: true,
+            message: `Force logout set for ${employee_id}`
+                   + (closed ? " — their open shift was closed too." : ""),
+        });
     } catch (err) {
         console.error("[500]", req.method, req.originalUrl, err.message);
         return res.status(500).json({ success: false, message: "Internal server error" });

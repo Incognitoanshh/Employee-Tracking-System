@@ -260,6 +260,78 @@ async function main() {
         check("the server is still serving afterwards",
             (await api("GET", "/admin/employees", { token: admin })).status === 200);
 
+        console.log("\nA FORCE LOGOUT ENDS THE SHIFT, NOT JUST THE SESSION");
+        // Reported from the live panel: an employee was force-logged-out and
+        // their app closed, and Attendance went on showing ACTIVE.
+        //
+        // The row is normally closed by the client as it shuts down, by posting
+        // to /attendance/logout. After a force logout that post carries a token
+        // the server has just invalidated, so it is refused — and nothing else
+        // closes the row until the sixteen-hour sweep. Two screens disagreeing
+        // about the same person again: Attendance said working, the employee
+        // list said offline.
+        psql(DB, `DELETE FROM active_sessions`);
+        psql(DB, `DELETE FROM attendance`);
+        const victim = await login("rajesh", "victim-machine");
+        // The row is written directly rather than through /attendance/login,
+        // which stamps the server's own clock — this test needs a shift that
+        // began hours ago, with evidence in the middle of it.
+        psql(DB, `DELETE FROM attendance`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001','2026-08-16 03:00:00')`);
+        check("their shift is open", psql(DB,
+            `SELECT COUNT(*) FROM attendance
+              WHERE employee_id='E001' AND logout_time IS NULL`) === "1");
+
+        // Some evidence of being there, an hour after signing in — and a
+        // session that went quiet after it. This is the reported case: the
+        // app was CLOSED, and only then did the administrator press the
+        // button. The heartbeat counts as evidence too, so it has to be old
+        // for the activity line to be the last thing known.
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','USER ACTIVE','2026-08-16 04:00:00')`);
+        psql(DB, `UPDATE active_sessions SET last_seen = '2026-08-16 03:30:00+00'
+                   WHERE employee_id = 'E001'`);
+
+        let forced = await api("POST", "/admin/force-logout",
+            { token: admin, body: { employee_id: "E001" } });
+        check("the force logout is accepted", forced.status === 200,
+            `HTTP ${forced.status} ${JSON.stringify(forced.body).slice(0, 120)}`);
+        check("and it says the shift was closed too",
+            /shift was closed/.test(forced.body.message || ""), forced.body.message);
+        check("the row is no longer open", psql(DB,
+            `SELECT COUNT(*) FROM attendance
+              WHERE employee_id='E001' AND logout_time IS NULL`) === "0",
+            "Attendance would still read ACTIVE for somebody who was signed out");
+        check("closed at the last evidence, not at the moment the button was pressed",
+            psql(DB, `SELECT TO_CHAR(logout_time, 'YYYY-MM-DD HH24:MI:SS')
+                        FROM attendance WHERE employee_id='E001'`) === "2026-08-16 04:00:00",
+            psql(DB, `SELECT logout_time::text FROM attendance WHERE employee_id='E001'`));
+
+        // WHEN THE APP IS STILL RUNNING, "last evidence" is now — the person
+        // was at their desk until the moment they were signed out, and that
+        // is what should be recorded.
+        psql(DB, `DELETE FROM attendance`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 hours')`);
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() WHERE employee_id='E001'`);
+        await api("POST", "/admin/force-logout",
+            { token: admin, body: { employee_id: "E001" } });
+        check("a live session closes at about now, not at the login time",
+            psql(DB, `SELECT (logout_time > (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 minutes')::text
+                        FROM attendance WHERE employee_id='E001'`) === "true",
+            psql(DB, `SELECT logout_time::text FROM attendance WHERE employee_id='E001'`));
+
+        // AND IT DOES NOT REACH ANYBODY ELSE'S ROW.
+        psql(DB, `DELETE FROM attendance`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time) VALUES
+            ('E001','2026-08-16 03:00:00'), ('A001','2026-08-16 03:00:00')`);
+        await api("POST", "/admin/force-logout",
+            { token: admin, body: { employee_id: "E001" } });
+        check("the other person's shift is untouched", psql(DB,
+            `SELECT COUNT(*) FROM attendance
+              WHERE employee_id='A001' AND logout_time IS NULL`) === "1");
+
         server.close();
         await pool.end();
     } finally {

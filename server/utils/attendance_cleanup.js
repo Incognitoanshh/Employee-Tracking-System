@@ -76,4 +76,53 @@ async function closeAbandonedShifts(pool) {
     return result.rowCount || 0;
 }
 
-module.exports = { closeAbandonedShifts };
+/**
+ * Close ONE person's open shift, now, at the last evidence they were there.
+ *
+ * For force logout. An administrator ending somebody's session is ending
+ * their working session — but the row that records it was only ever closed by
+ * the client, which posts to /attendance/logout as it shuts down. After a
+ * force logout that post arrives with a token the server has just
+ * invalidated, so it is refused, and the row stays open.
+ *
+ * What that looked like: Attendance showing ACTIVE for somebody who had been
+ * signed out by an admin and whose app was closed, until the sixteen-hour
+ * sweep eventually caught it. The same disagreement between two screens that
+ * closeAbandonedShifts above was written to end.
+ *
+ * CLOSED AT THE LAST EVIDENCE, not at the moment the button was pressed.
+ * Somebody force-logged-out at six in the evening, whose machine went quiet
+ * at two, worked until two — recording four extra hours because an
+ * administrator clicked later would be a fiction in the timesheet, and the
+ * timesheet is what people are paid from.
+ */
+async function closeShiftFor(db, employeeId) {
+    const result = await db.query(`
+        UPDATE attendance a
+           SET logout_time = ended,
+               total_hours = ended - a.login_time
+          FROM (
+            SELECT a2.id,
+                   GREATEST(
+                       a2.login_time,
+                       COALESCE(s.last_seen AT TIME ZONE 'UTC', a2.login_time),
+                       COALESCE((SELECT MAX(al.created_at) FROM activity_logs al
+                                  WHERE al.employee_id = a2.employee_id
+                                    AND al.created_at >= a2.login_time),
+                                a2.login_time),
+                       COALESCE((SELECT MAX(sc.created_at) FROM screenshots sc
+                                  WHERE sc.employee_id = a2.employee_id
+                                    AND sc.created_at >= a2.login_time),
+                                a2.login_time)
+                   ) AS ended
+              FROM attendance a2
+              LEFT JOIN active_sessions s ON s.employee_id = a2.employee_id
+             WHERE a2.employee_id = $1
+               AND a2.logout_time IS NULL
+          ) evidence
+         WHERE a.id = evidence.id`,
+        [employeeId]);
+    return result.rowCount;
+}
+
+module.exports = { closeAbandonedShifts, closeShiftFor };
