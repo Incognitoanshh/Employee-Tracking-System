@@ -79,7 +79,15 @@ class _PhotoFetcher(QThread):
     def run(self):
         data: bytes | None = None
         try:
-            token = getattr(SessionManager, "token", None)
+            # auth_token, NOT token. SessionManager has never had a `token`
+            # attribute — the class defines `auth_token` and every other
+            # caller uses it. getattr with a default turned that mistake into
+            # silence: the value was None, the request was never made, "no
+            # photo" was cached for the run, and every avatar outside My
+            # Profile drew initials for ever. My Profile worked because it
+            # builds its own header from auth_token, which is what made the
+            # bug look like "the photo is only local".
+            token = getattr(SessionManager, "auth_token", None)
             if token:
                 response = _http.get(
                     f"{API_BASE_URL}/profile/photo/{self._employee_id}",
