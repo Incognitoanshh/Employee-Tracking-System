@@ -29,6 +29,11 @@ router.post("/employees/:employee_id/suspend", adminCtrl.setSuspended);
 // Settings before /alerts so neither route can shadow the other.
 router.get("/alerts/settings",  alertsCtrl.getSettings);
 router.post("/alerts/settings", alertsCtrl.saveSettings);
+// Alerts by email. Reading who they go to is an admin's business; changing
+// it is the owner's, and so is making one send.
+router.get("/alerts/email", alertsCtrl.getEmailSettings);
+router.post("/alerts/email", superAdminOnly, alertsCtrl.saveEmailSettings);
+router.post("/alerts/email/run", superAdminOnly, alertsCtrl.runEmailsNow);
 router.get("/alerts",           alertsCtrl.getAlerts);
 
 // Config

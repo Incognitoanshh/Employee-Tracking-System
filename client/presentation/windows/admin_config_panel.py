@@ -967,6 +967,7 @@ class _ConfigTab(QWidget):
         self._refresh_holidays()
         self._refresh_retention()
         self._refresh_alert_settings()
+        self._refresh_alert_email_settings()
         self._refresh_upcoming()
 
     def _setting_row(self, label_text: str, desc: str, widget, suffix: str = ""):
@@ -1076,6 +1077,20 @@ class _ConfigTab(QWidget):
     # feature works on day one, not as a recommendation.
     def _build_alerts_section(self) -> QFrame:
         self._alert_on = QCheckBox("Show alerts in the panel")
+        # WHERE THE ALERTS GO, and what has actually gone out.
+        #
+        # An alert that only lives on a page is one somebody has to think to
+        # open — and the alerts worth having are exactly the ones nobody is
+        # thinking about that morning.
+        self._alert_email_to = QLineEdit()
+        self._alert_email_to.setPlaceholderText("owner@company.com, hr@company.com")
+        self._alert_digest = QCheckBox("Send a summary every evening")
+        self._alert_digest_hour = QSpinBox()
+        self._alert_digest_hour.setRange(0, 23)
+        self._alert_email_state = QLabel("")
+        self._alert_email_state.setWordWrap(True)
+        self._alert_email_state.setStyleSheet(
+            f"color:{C['text_muted']};font-size:11px;background:transparent;")
         self._alert_silent = QSpinBox(); self._alert_silent.setRange(1, 720)
         self._alert_late   = QSpinBox(); self._alert_late.setRange(0, 1440)
         self._alert_idle   = QSpinBox(); self._alert_idle.setRange(15, 1440)
@@ -1127,6 +1142,115 @@ class _ConfigTab(QWidget):
                 row,
                 self._alert_status,
             ])
+
+    def _email_section(self):
+        """Who is told, without having to open the panel to find out."""
+        send_now = _btn("Send now", variant="secondary", height=34, width=120)
+        send_now.clicked.connect(self._run_alert_emails)
+        save = _btn("Save", variant="primary", height=34, width=100)
+        save.clicked.connect(self._save_alert_email_settings)
+
+        buttons = QWidget()
+        row = QHBoxLayout(buttons)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(save)
+        row.addWidget(send_now)
+        row.addStretch()
+
+        return self._build_section(
+            "\U0001F4E7", "Alerts by email",
+            "The same alerts, sent to somebody rather than waiting to be "
+            "found. Each person is emailed once per problem per day — the "
+            "second time it is still true, nothing is sent, or the mail "
+            "becomes noise nobody reads.",
+            [
+                self._setting_row(
+                    "Send to",
+                    "Comma separated. Leave empty and nothing is sent.",
+                    self._alert_email_to),
+                self._setting_row(
+                    "Daily summary",
+                    "Everything from the day in one message, including the "
+                    "things not worth interrupting for. Sent even when there "
+                    "is nothing — silence and a broken job look the same.",
+                    self._alert_digest),
+                self._setting_row(
+                    "Summary at",
+                    "IST, on the 24-hour clock.",
+                    self._alert_digest_hour, "o'clock"),
+                buttons,
+                self._alert_email_state,
+            ])
+
+    def _refresh_alert_email_settings(self):
+        w = _FetchWorker(f"{API_BASE_URL}/admin/alerts/email")
+
+        def fill(data: dict):
+            if not data.get("success"):
+                return
+            self._alert_email_to.setText(", ".join(data.get("recipients") or []))
+            self._alert_digest.setChecked(bool(data.get("digest", True)))
+            self._alert_digest_hour.setValue(int(data.get("digest_hour") or 19))
+
+            counts = data.get("counts") or {}
+            recent = data.get("recent") or []
+            if not data.get("can_send"):
+                # The reason comes from the server and names the missing
+                # setting — far better than "email not working".
+                self._alert_email_state.setText(
+                    "⚠  " + (data.get("unavailable_reason") or "Email is not set up."))
+                return
+            last = recent[0] if recent else None
+            self._alert_email_state.setText(
+                f"Sent {counts.get('sent', 0)} · failed {counts.get('failed', 0)} "
+                f"in the last 30 days."
+                + (f"  Last: {last.get('subject','')[:60]} "
+                   f"({last.get('status')})" if last else "  Nothing sent yet."))
+
+        w.result.connect(fill)
+        w.error.connect(lambda e: self._alert_email_state.setText(f"Could not read: {e}"))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _save_alert_email_settings(self):
+        body = {
+            "recipients": self._alert_email_to.text().strip(),
+            "digest": self._alert_digest.isChecked(),
+            "digest_hour": self._alert_digest_hour.value(),
+        }
+        w = _PostWorker(f"{API_BASE_URL}/admin/alerts/email", body)
+
+        def done(data):
+            if data.get("success"):
+                self._alert_email_state.setText("Saved.")
+                self._refresh_alert_email_settings()
+            else:
+                self._alert_email_state.setText(
+                    data.get("message") or "Could not save.")
+
+        w.result.connect(done)
+        w.error.connect(lambda e: self._alert_email_state.setText(str(e)))
+        _track_worker(self._workers, w)
+        w.start()
+
+    def _run_alert_emails(self):
+        self._alert_email_state.setText("Sending…")
+        w = _PostWorker(f"{API_BASE_URL}/admin/alerts/email/run", {})
+
+        def done(data):
+            if data.get("reason"):
+                self._alert_email_state.setText(data["reason"])
+                return
+            self._alert_email_state.setText(
+                f"Sent {data.get('sent', 0)}, failed {data.get('failed', 0)}, "
+                f"already sent today {data.get('skipped', 0)}.")
+            self._refresh_alert_email_settings()
+
+        w.result.connect(done)
+        w.error.connect(lambda e: self._alert_email_state.setText(str(e)))
+        _track_worker(self._workers, w)
+        w.start()
 
     def _refresh_alert_settings(self):
         w = _FetchWorker(f"{API_BASE_URL}/admin/alerts/settings")
@@ -1634,6 +1758,7 @@ class _ConfigTab(QWidget):
             ]))
 
         body.addWidget(self._build_alerts_section())
+        body.addWidget(self._email_section())
         body.addWidget(self._build_retention_section())
 
         body.addWidget(self._build_holidays_section())

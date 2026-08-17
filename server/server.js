@@ -263,6 +263,31 @@ setInterval(() => {
 applyPendingMigrations(pool).catch((error) =>
     console.error("[MIGRATE] could not run migrations:", error.message));
 
+// ALERTS BY EMAIL, on a timer.
+//
+// The alerts themselves are worked out on demand; this is the thing that
+// decides anybody should be told without being asked. Every ten minutes is
+// often enough that "nobody signed in for the 09:00 shift" reaches somebody
+// while the morning can still be rescued, and rare enough that a mail server
+// having a bad minute is retried rather than hammered.
+//
+// unref'd, like the sweep below: a timer must never be the reason this
+// process cannot exit.
+const { runAlertEmails } = require("./utils/alert_emails_job");
+
+const ALERT_EMAIL_MINUTES = Number(process.env.ALERT_EMAIL_MINUTES || 10);
+const alertEmailTimer = setInterval(() => {
+    runAlertEmails()
+        .then((result) => {
+            if (result.sent || result.failed) {
+                console.log(`[ALERT-MAIL] sent ${result.sent}, failed ${result.failed}`
+                          + `, already sent today ${result.skipped}`);
+            }
+        })
+        .catch((error) => console.error("[ALERT-MAIL] run failed:", error.message));
+}, ALERT_EMAIL_MINUTES * 60 * 1000);
+alertEmailTimer.unref();
+
 const { closeAbandonedShifts } = require("./utils/attendance_cleanup");
 setInterval(() => {
     closeAbandonedShifts(pool)

@@ -77,10 +77,13 @@ function isConfigured() {
 /**
  * Send one message. Resolves on success, throws with a readable message.
  *
+ * `html` is optional. When it is given the message carries both parts, so a
+ * client that cannot render HTML still shows the text version.
+ *
  * The transport is built once and reused: a connection per message is slow,
  * and several providers treat a burst of new connections as abuse.
  */
-async function send({ to, subject, text }) {
+async function send({ to, subject, text, html }) {
     const why = unavailableReason();
     if (why) throw new Error(why);
 
@@ -95,7 +98,12 @@ async function send({ to, subject, text }) {
         });
     }
 
-    await transport.sendMail({ from: FROM, to, subject, text });
+    // BOTH, whenever there is an html version. A mail client that will not
+    // render HTML — or a person who has turned it off — still gets a readable
+    // message rather than an empty one, and `text` is what a screen reader
+    // and a search index use. The verification code goes as text alone,
+    // which is exactly right for six digits.
+    await transport.sendMail({ from: FROM, to, subject, text, ...(html ? { html } : {}) });
 }
 
 module.exports = { send, isConfigured, unavailableReason };
