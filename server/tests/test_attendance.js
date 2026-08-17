@@ -260,6 +260,42 @@ async function main() {
         check("the server is still serving afterwards",
             (await api("GET", "/admin/employees", { token: admin })).status === 200);
 
+        console.log("\nAN OPEN ROW IS ONLY 'ACTIVE' IF SOMEBODY IS ACTUALLY THERE");
+        // Seen on the live panel with two accounts at once: Attendance said
+        // ACTIVE, the employee list said "Offline · 11 hr ago", about the
+        // same person at the same moment. The column drew ACTIVE from
+        // logout_time being null and asked nothing else, so an app closed
+        // without signing out read as somebody at their desk for up to
+        // sixteen hours — until the abandoned-shift sweep reached it.
+        psql(DB, `DELETE FROM attendance`);
+        psql(DB, `DELETE FROM active_sessions`);
+        const working = await login("rajesh", "at-their-desk");
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour')`);
+
+        let list = await api("GET", "/attendance/all", { token: admin });
+        let mine = (list.body.data || []).find((r) => r.employee_id === "E001");
+        check("a live session reads as live", mine && mine.session_live === true,
+            JSON.stringify(mine));
+
+        // The app is closed: the heartbeat stops. Nothing else changes — the
+        // row is still open, exactly as it was.
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() - INTERVAL '30 minutes'
+                   WHERE employee_id='E001'`);
+        list = await api("GET", "/attendance/all", { token: admin });
+        mine = (list.body.data || []).find((r) => r.employee_id === "E001");
+        check("once the heartbeat stops it does NOT", mine && mine.session_live === false,
+            JSON.stringify(mine));
+        check("and the row is still open — this is a label, not a closure",
+            mine && mine.logout_time === null, JSON.stringify(mine && mine.logout_time));
+
+        // THE TWO SCREENS MUST AGREE. That is the whole point.
+        const listed = await api("GET", "/admin/employees", { token: admin });
+        const asShown = (listed.body.data || []).find((r) => r.employee_id === "E001");
+        check("and the employee list says the same thing",
+            asShown && asShown.status === "offline" && mine.session_live === false,
+            `employees: ${asShown && asShown.status}, attendance: ${mine && mine.session_live}`);
+
         console.log("\nA FORCE LOGOUT ENDS THE SHIFT, NOT JUST THE SESSION");
         // Reported from the live panel: an employee was force-logged-out and
         // their app closed, and Attendance went on showing ACTIVE.

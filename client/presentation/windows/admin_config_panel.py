@@ -3418,12 +3418,34 @@ class _AttendanceTab(QWidget):
 
             if row.get("logout_time"):
                 self._table.setItem(i, 3, _cell(_fmt_ts(row.get("logout_time")), muted=True))
-            else:
+            elif row.get("session_live"):
                 # Abhi chal raha session — emoji ki jagah rang, jo baaki
                 # status indicators se match karta hai.
                 active = _cell("● ACTIVE")
                 active.setForeground(QColor(C["success"]))
                 self._table.setItem(i, 3, active)
+            else:
+                # OPEN, BUT NOBODY IS THERE.
+                #
+                # This column said ACTIVE for any row without a logout time
+                # and asked nothing else — so an app closed without signing
+                # out read as somebody at their desk, for up to sixteen hours,
+                # until the abandoned-shift sweep reached it. The employee
+                # list, which asks presence, said "Offline · 11 hr ago" about
+                # the same person at the same moment.
+                #
+                # Now it says what is actually true: the shift was never
+                # closed. Amber, because it is neither working nor a finished
+                # shift — it is a row waiting to be tidied up.
+                stale = _cell("Not signed out")
+                stale.setForeground(QColor(C["warning"]))
+                stale.setToolTip(
+                    "This shift was never closed — the app was shut down "
+                    "without signing out, or the machine went offline.\n\n"
+                    "It is closed automatically once the session has been "
+                    "gone long enough, at the last moment the person was "
+                    "seen. They are not counted as working in the meantime.")
+                self._table.setItem(i, 3, stale)
 
             # Duration right-align — numbers ko align hona chahiye, warna
             # column me zigzag dikhta hai.
@@ -5871,7 +5893,7 @@ class AdminConfigPanel(QMainWindow):
         # clear_session() se PEHLE, warna employee_id None ho jaata hai aur
         # LoggerService.log() chup-chaap return kar deta hai.
         try:
-            LoggerService.log("LOGOUT")
+            LoggerService.log(f"LOGOUT : {reason or 'signed out from the console'}")
         except Exception:
             pass
 

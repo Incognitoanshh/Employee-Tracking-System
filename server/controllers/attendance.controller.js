@@ -1,5 +1,7 @@
 const pool = require("../config/db");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
+// The same grace the employee list uses, so "working" cannot mean two things.
+const { HEARTBEAT_GRACE_MINUTES } = require("../utils/presence");
 const {
     classifyLogin,
     isNonWorkingDay,
@@ -165,7 +167,29 @@ exports.getAttendance = async (req, res) => {
                     -- this stays correct across pagination.
                     MIN(login_time) OVER (
                         PARTITION BY employee_id, ${istDate("login_time")}
-                    )                                                  AS day_first_login
+                    )                                                  AS day_first_login,
+                    -- IS THIS OPEN ROW ACTUALLY SOMEBODY WORKING?
+                    --
+                    -- The page drew "ACTIVE" from logout_time being null and
+                    -- asked nothing else, so a row left open by an app that
+                    -- was closed without signing out read as somebody at
+                    -- their desk — for up to sixteen hours, until the
+                    -- abandoned-shift sweep reached it.
+                    --
+                    -- Meanwhile the employee list, which asks presence, said
+                    -- Offline about the same person at the same moment. Two
+                    -- screens, one person, opposite answers. Seen with two
+                    -- accounts at once: ACTIVE here, "Offline · 11 hr ago"
+                    -- there.
+                    --
+                    -- The same live-session test presence uses, so they
+                    -- cannot disagree again.
+                    EXISTS (
+                        SELECT 1 FROM active_sessions ses
+                         WHERE ses.employee_id = attendance.employee_id
+                           AND ses.token IS NOT NULL
+                           AND ses.last_seen > NOW() - INTERVAL '${HEARTBEAT_GRACE_MINUTES} minutes'
+                    )                                                  AS session_live
              FROM attendance ${where}
              ORDER BY id DESC
              LIMIT $${idx} OFFSET $${idx + 1}`,
