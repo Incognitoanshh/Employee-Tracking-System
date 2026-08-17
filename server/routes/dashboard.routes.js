@@ -38,4 +38,10 @@ router.get(
 // employee_id JWT se aata hai, client se nahi).
 router.get("/me", dashboardController.getMySummary);
 
+// Today, for everybody — so adminOnly, for exactly the reason written above
+// the summary route. This is company-wide: who is absent, who is on leave,
+// who came in late. Without the guard any signed-in employee could read it
+// straight off the URL.
+router.get("/today", adminOnly, dashboardController.getTodayBoard);
+
 module.exports = router;

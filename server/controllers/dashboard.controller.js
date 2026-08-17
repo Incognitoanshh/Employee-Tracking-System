@@ -1,6 +1,8 @@
 const pool = require("../config/db");
 const { isOnlineSql } = require("../utils/presence");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
+const { HEARTBEAT_GRACE_MINUTES } = require("../utils/presence");
+const { todayBoard } = require("../utils/today_board");
 
 exports.getStats = async (req, res) => {
 
@@ -415,5 +417,77 @@ exports.getMySummary = async (req, res) => {
     } catch (error) {
         console.error("[500]", req.method, req.originalUrl, error.message);
         return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+/**
+ * Today, for everybody — the counts the dashboard was missing.
+ *
+ * ONE ROUND TRIP PER SOURCE, then the arithmetic in utils/today_board, where
+ * it can be tested without a database. Five small queries beat a single
+ * clever one here: each is readable on its own, and the join that would have
+ * combined them (employees to attendance to leave to holidays to sessions,
+ * with two of them optional) is the shape of query that quietly starts
+ * multiplying rows.
+ */
+exports.getTodayBoard = async (req, res) => {
+    try {
+        const today = await pool.query(`SELECT ${istToday()} ::text AS d`);
+        const day = today.rows[0].d;
+
+        const [employees, configs, holidays, leave, shifts] = await Promise.all([
+            // Administrators are employees too — they have shifts, leave and
+            // absences like anybody else, and leaving them out would make the
+            // headcount disagree with the employee list.
+            pool.query(`SELECT employee_id, role FROM employees`),
+            pool.query(`SELECT employee_id, shift_start, shift_end, weekly_offs,
+                               late_grace_minutes
+                          FROM employee_configs`),
+            pool.query(`SELECT to_char(holiday_date,'YYYY-MM-DD') AS d FROM holidays
+                         WHERE holiday_date = $1::date`, [day]),
+            pool.query(`SELECT employee_id, half_day FROM leave_requests
+                         WHERE status = 'APPROVED'
+                           AND $1::date BETWEEN start_date AND end_date`, [day]),
+            pool.query(
+                `SELECT a.employee_id,
+                        bool_or(a.logout_time IS NULL)                AS open,
+                        bool_or(a.logout_time IS NULL AND EXISTS (
+                            SELECT 1 FROM active_sessions ses
+                             WHERE ses.employee_id = a.employee_id
+                               AND ses.token IS NOT NULL
+                               AND ses.last_seen >
+                                   NOW() - INTERVAL '${HEARTBEAT_GRACE_MINUTES} minutes'
+                        ))                                            AS live,
+                        MIN(EXTRACT(HOUR FROM (a.login_time AT TIME ZONE 'UTC')
+                                    AT TIME ZONE 'Asia/Kolkata') * 60
+                          + EXTRACT(MINUTE FROM (a.login_time AT TIME ZONE 'UTC')
+                                    AT TIME ZONE 'Asia/Kolkata'))     AS first_login_minutes
+                   FROM attendance a
+                  WHERE ${istDate("a.login_time")} = $1::date
+                  GROUP BY a.employee_id`, [day]),
+        ]);
+
+        const configMap = new Map();
+        for (const row of configs.rows) configMap.set(row.employee_id, row);
+
+        const board = todayBoard({
+            employees: employees.rows,
+            configs: configMap,
+            holidays: new Set(holidays.rows.map((r) => r.d)),
+            leaveToday: new Map(leave.rows.map((r) => [r.employee_id, { half: r.half_day }])),
+            shifts: new Map(shifts.rows.map((r) => [r.employee_id, {
+                open: r.open,
+                live: r.live,
+                first_login_minutes: r.first_login_minutes === null
+                    ? null : Number(r.first_login_minutes),
+            }])),
+            today: day,
+        });
+
+        return res.json({ success: true, data: { ...board, date: day } });
+
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
