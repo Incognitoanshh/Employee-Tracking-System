@@ -62,6 +62,24 @@ async function annotateAttendance(rows) {
         );
         const holidays = new Set(holidayResult.rows.map((r) => r.d));
 
+        // APPROVED LEAVE, for the days these rows fall on.
+        //
+        // A day with leave AND a login is not a contradiction — somebody on
+        // half a day works the other half — so this does not replace the
+        // status, it is carried alongside it. What it does end is a day being
+        // called nothing at all when the reason for it is on record.
+        const leaveRows = await pool.query(
+            `SELECT l.employee_id, TO_CHAR(day::date,'YYYY-MM-DD') AS d,
+                    l.leave_type, l.half_day
+               FROM leave_requests l
+               CROSS JOIN LATERAL generate_series(l.start_date, l.end_date, '1 day') AS day
+              WHERE l.status = 'APPROVED'
+                AND l.employee_id = ANY($1)`,
+            [[...new Set(rows.map((r) => r.employee_id))]]);
+        const leaveByDay = new Map(
+            leaveRows.rows.map((r) => [`${r.employee_id}|${r.d}`,
+                                       { type: r.leave_type, half: r.half_day }]));
+
         return rows.map((row) => {
             const config = byEmployee.get(row.employee_id) || global;
             const shiftStart = config.shift_start ? String(config.shift_start) : null;
@@ -87,6 +105,7 @@ async function annotateAttendance(rows) {
                 };
             }
 
+
             const loginMinutes = Number(row.ist_minutes);
             const offset = shiftDayOffset(
                 loginMinutes,
@@ -95,6 +114,8 @@ async function annotateAttendance(rows) {
             );
             const shiftDay = offset === 0 ? row.ist_day : shiftIsoDate(row.ist_day, offset);
 
+            const leave = leaveByDay.get(`${row.employee_id}|${row.ist_day}`);
+
             const verdict = classifyLogin({
                 loginMinutes,
                 shiftStart,
@@ -102,6 +123,18 @@ async function annotateAttendance(rows) {
                 graceMinutes: config.late_grace_minutes ?? global.late_grace_minutes ?? 10,
                 isDayOff: isNonWorkingDay(shiftDay, config.weekly_offs ?? global.weekly_offs, holidays),
             });
+
+            // ON LEAVE OUTRANKS LATE. Somebody with approved half-day leave
+            // who signs in at two is not late — that was the arrangement.
+            if (leave) {
+                return {
+                    ...strip(row),
+                    status:       "leave",
+                    status_label: leave.half ? "Half day leave" : "On leave",
+                    leave_type:   leave.type,
+                    late_minutes: null,
+                };
+            }
 
             return {
                 ...strip(row),

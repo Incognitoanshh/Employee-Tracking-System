@@ -13,6 +13,7 @@ const adminRoutes      = require("./routes/admin.routes");
 const attendanceRoutes = require("./routes/attendance.routes");
 const chatRoutes       = require("./routes/chat.routes");
 const profileRoutes    = require("./routes/profile.routes");
+const leaveRoutes      = require("./routes/leave.routes");
 const { applyPendingMigrations, migrationStatus } = require("./utils/migrate");
 
 // Startup env validation
@@ -134,6 +135,7 @@ app.use("/api/chat",        verifyToken, chatRoutes);
 // Everything under here answers about the CALLER only — there is no employee
 // id in any of these routes to tamper with.
 app.use("/api/profile",     verifyToken, profileRoutes);
+app.use("/api/leave",       verifyToken, leaveRoutes);
 
 app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.url}` });

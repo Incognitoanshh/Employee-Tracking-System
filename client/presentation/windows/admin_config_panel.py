@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHeaderView,
+    QInputDialog,
     QSizePolicy
 )
 
@@ -114,6 +115,8 @@ PAGES = [
      "subtitle": "Teams, channels and membership. Conversations are readable only by a super admin, and every read is recorded."},
     {"key": "mychat",      "icon": "🗨️", "title": "My Chat",
      "subtitle": "The channels you are a member of. This is your own conversation — reading somebody else's is done from Teams & Chat, and is recorded."},
+    {"key": "leave",       "icon": "🌴", "title": "Leave",
+     "subtitle": "Requests waiting on a decision, and every one already decided. Approving or rejecting is recorded against whoever did it."},
     {"key": "reports",     "icon": "📈", "title": "Reports",
      "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
     {"key": "logs",        "icon": "📝", "title": "Audit Logs",
@@ -2752,6 +2755,214 @@ class _DashboardTab(QWidget):
             self._feed_count.setText(f"·  {shown} events")
         except Exception:
             pass
+
+
+class _LeaveTab(QWidget):
+    """Leave, from the deciding side.
+
+    THE QUEUE IS THE POINT. Pending requests sort to the top, because this
+    page is opened to answer them — a list ordered by date buries the thing
+    somebody is waiting on under three months of settled history.
+
+    Approve, reject and revoke each write to the audit log with who did it.
+    Leave is the part of this product closest to somebody's pay, and "who
+    approved that" is asked long after anybody remembers.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._workers: list = []
+        self._page = 1
+        self._rows: list[dict] = []
+        self._build_ui()
+        self._load()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 22, 28, 22)
+        root.setSpacing(14)
+
+        toolbar = _card()
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(18, 12, 18, 12)
+        bar.setSpacing(10)
+
+        bar.addWidget(_muted_label("Status"))
+        self._status_filter = QComboBox()
+        for label, value in (("Pending", "PENDING"), ("All", ""),
+                             ("Approved", "APPROVED"), ("Rejected", "REJECTED"),
+                             ("Cancelled", "CANCELLED"), ("Revoked", "REVOKED")):
+            self._status_filter.addItem(label, value)
+        self._status_filter.setFixedWidth(130)
+        self._status_filter.currentIndexChanged.connect(lambda _i: self._load(1))
+        bar.addWidget(self._status_filter)
+
+        bar.addWidget(_muted_label("Search"))
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("name, employee ID or reason")
+        self._search.setFixedWidth(240)
+        self._search.returnPressed.connect(lambda: self._load(1))
+        bar.addWidget(self._search)
+
+        find = _btn("🔍  Search", variant="primary", height=32, width=110)
+        find.clicked.connect(lambda: self._load(1))
+        bar.addWidget(find)
+
+        clear = _btn("✕ Clear", variant="secondary", height=32, width=90)
+        clear.clicked.connect(self._clear)
+        bar.addWidget(clear)
+
+        bar.addStretch()
+        self._count = _muted_label("")
+        bar.addWidget(self._count)
+        root.addWidget(toolbar)
+
+        self._table = _tune_table(QTableWidget(0, 8))
+        self._table.setHorizontalHeaderLabels(
+            ["ID", "Employee", "Type", "From", "To", "Days", "Status", "Actions"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.verticalHeader().setVisible(False)
+        root.addWidget(self._table, 1)
+
+        pager = QHBoxLayout()
+        self._prev = _btn("◀ Prev", variant="secondary", height=32, width=90)
+        self._prev.clicked.connect(lambda: self._load(self._page - 1))
+        self._next = _btn("Next ▶", variant="secondary", height=32, width=90)
+        self._next.clicked.connect(lambda: self._load(self._page + 1))
+        self._page_label = _muted_label("Page 1")
+        pager.addWidget(self._prev)
+        pager.addWidget(self._page_label)
+        pager.addWidget(self._next)
+        pager.addStretch()
+        self._status_line = _muted_label("")
+        pager.addWidget(self._status_line)
+        root.addLayout(pager)
+
+    def _clear(self):
+        self._search.clear()
+        self._status_filter.setCurrentIndex(0)
+        self._load(1)
+
+    def refresh(self):
+        self._load(self._page)
+
+    def _load(self, page: int = 1):
+        page = max(1, page)
+        self._page = page
+        params = {"page": page}
+        status = self._status_filter.currentData()
+        if status:
+            params["status"] = status
+        if self._search.text().strip():
+            params["search"] = self._search.text().strip()
+
+        worker = _FetchWorker(f"{API_BASE_URL}/admin/leave", params)
+        worker.result.connect(self._populate)
+        worker.error.connect(lambda e: self._status_line.setText(f"Error: {e}"))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _populate(self, data: dict):
+        rows = data.get("data") or []
+        self._rows = rows
+        self._page_label.setText(f"Page {self._page}  •  Total: {data.get('total', 0)}")
+        pending = data.get("pending", 0)
+        self._count.setText(
+            f"🕒  {pending} waiting" if pending else "Nothing waiting")
+
+        self._table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            self._table.setItem(i, 0, _cell(str(row.get("id", "")), mono=True, muted=True))
+            self._table.setItem(i, 1, _cell(
+                f"{row.get('employee_name', '')}  ·  {row.get('employee_id', '')}"))
+            self._table.setItem(i, 2, _cell(str(row.get("leave_type", "")).title()))
+            self._table.setItem(i, 3, _cell(row.get("start_date", ""), muted=True))
+            self._table.setItem(i, 4, _cell(row.get("end_date", ""), muted=True))
+            days = row.get("total_days")
+            self._table.setItem(i, 5, _cell(
+                f"{float(days):g}" if days is not None else "", align_right=True))
+
+            status = str(row.get("status", ""))
+            state = QTableWidgetItem(status.title())
+            state.setForeground(QColor({
+                "PENDING": C["warning"], "APPROVED": C["success"],
+                "REJECTED": C["danger"], "REVOKED": C["danger"],
+            }.get(status, C["text_muted"])))
+            font = state.font(); font.setBold(True); state.setFont(font)
+            if row.get("reason"):
+                state.setToolTip(f"Reason: {row['reason']}"
+                                 + (f"\n\nRemarks: {row['remarks']}"
+                                    if row.get("remarks") else ""))
+            self._table.setItem(i, 6, state)
+
+            actions = QWidget()
+            lay = QHBoxLayout(actions)
+            lay.setContentsMargins(6, 4, 6, 4)
+            lay.setSpacing(8)
+            # ONLY THE ACTIONS THAT APPLY. A pending request can be decided; a
+            # decided one can only be undone if it was an approval. Showing
+            # buttons that refuse is how people learn to distrust them.
+            if status == "PENDING":
+                yes = _btn("Approve", variant="primary", height=28, width=88)
+                yes.clicked.connect(lambda _=False, r=row: self._decide(r, "approve"))
+                no = _btn("Reject", variant="danger", height=28, width=80)
+                no.clicked.connect(lambda _=False, r=row: self._decide(r, "reject"))
+                lay.addWidget(yes)
+                lay.addWidget(no)
+            elif status == "APPROVED":
+                undo = _btn("Revoke", variant="secondary", height=28, width=88)
+                undo.clicked.connect(lambda _=False, r=row: self._decide(r, "revoke"))
+                lay.addWidget(undo)
+            lay.addStretch()
+            self._table.setCellWidget(i, 7, actions)
+
+    def _decide(self, row: dict, what: str):
+        who = row.get("employee_name") or row.get("employee_id")
+        span = (row.get("start_date") if row.get("start_date") == row.get("end_date")
+                else f"{row.get('start_date')} to {row.get('end_date')}")
+
+        # A REJECTION MUST CARRY A REASON — the server refuses one without,
+        # and the employee reads it. Asking here rather than failing there
+        # means the reason is typed once, by somebody who has the request in
+        # front of them.
+        remarks = ""
+        if what in ("reject", "revoke"):
+            remarks, ok = QInputDialog.getText(
+                self, f"{what.title()} leave",
+                f"{who} — {span}\n\n"
+                + ("Why is it being rejected? They will read this."
+                   if what == "reject"
+                   else "Why is the approval being withdrawn? They will read this."))
+            if not ok or not remarks.strip():
+                return
+        else:
+            answer = QMessageBox.question(
+                self, "Approve leave",
+                f"Approve {who}'s leave?\n\n{span}  ·  {row.get('total_days')} day(s)\n\n"
+                f"Reason given: {row.get('reason', '')}")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        worker = _PostWorker(f"{API_BASE_URL}/admin/leave/{row['id']}/{what}",
+                             {"remarks": remarks.strip()})
+
+        def done(data):
+            if data.get("success"):
+                self._status_line.setText(f"{what.title()}d.")
+                self._load(self._page)
+            else:
+                QMessageBox.warning(self, "Could not do that",
+                                    data.get("message") or "Unknown error")
+
+        worker.result.connect(done)
+        worker.error.connect(
+            lambda e: QMessageBox.warning(self, "Could not do that", str(e)))
+        _track_worker(self._workers, worker)
+        worker.start()
 
 
 class _LogsTab(QWidget):
@@ -5397,7 +5608,7 @@ class AdminConfigPanel(QMainWindow):
     TAB_ATTRS = (
         "_dashboard_tab", "_alerts_tab", "_config_tab", "_employees_tab",
         "_attendance_tab", "_screenshots_tab", "_teams_tab", "_mychat_tab",
-        "_reports_tab", "_logs_tab", "_profile_tab",
+        "_leave_tab", "_reports_tab", "_logs_tab", "_profile_tab",
     )
 
     def __init__(self):
@@ -5484,6 +5695,7 @@ class AdminConfigPanel(QMainWindow):
         # any page — not only from inside the one it arrived in.
         self._mychat_tab.unread_changed.connect(
             lambda total: self.sidebar.set_unread("mychat", total))
+        self._leave_tab       = _LeaveTab()
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
         from client.presentation.windows.profile_page import ProfilePage
@@ -5506,6 +5718,7 @@ class AdminConfigPanel(QMainWindow):
             self._screenshots_tab,
             self._teams_tab,
             self._mychat_tab,
+            self._leave_tab,
             self._reports_tab,
             self._logs_tab,
             self._profile_tab,

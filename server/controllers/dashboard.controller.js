@@ -96,8 +96,39 @@ exports.getAdminSummary = async (req, res) => {
             "SELECT COUNT(*) FROM activity_logs"
         );
 
+        // LEAVE AND ALERTS ON THE DASHBOARD.
+        //
+        // Pending leave is the only number here that somebody has to ACT on —
+        // everything else is a state of the world. It sits on the dashboard
+        // so a request does not wait three days because nobody opened the
+        // page it lives on.
+        const leave = await pool.query(
+            `SELECT
+                COUNT(*) FILTER (WHERE status = 'PENDING')::int AS pending,
+                COUNT(*) FILTER (
+                    WHERE status = 'APPROVED'
+                      AND ${istToday()} BETWEEN start_date AND end_date
+                )::int AS on_leave_today,
+                COUNT(*) FILTER (
+                    WHERE status = 'APPROVED'
+                      AND start_date >= DATE_TRUNC('month', ${istToday()})
+                )::int AS approved_this_month
+               FROM leave_requests`);
+
+        const mail = await pool.query(
+            `SELECT
+                COUNT(*) FILTER (WHERE status = 'sent')::int   AS sent,
+                COUNT(*) FILTER (WHERE status = 'failed')::int AS failed
+               FROM alert_emails
+              WHERE sent_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days'`);
+
         const payload = {
             total_employees: totalEmployees,
+            pending_leave:        leave.rows[0].pending,
+            on_leave_today:       leave.rows[0].on_leave_today,
+            approved_leave_month: leave.rows[0].approved_this_month,
+            alert_emails_sent:    mail.rows[0].sent,
+            alert_emails_failed:  mail.rows[0].failed,
             online_employees: onlineCount,
             offline_employees: offlineCount,
             total_screenshots: Number(screenshots.rows[0].count || 0),

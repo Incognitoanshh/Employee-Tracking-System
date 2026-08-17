@@ -171,6 +171,29 @@ exports.getAttendanceReport = async (req, res) => {
         );
         const holidays = new Set(holidayRows.rows.map((r) => r.d));
 
+        // ── approved leave, expanded to one entry per day ───────────────
+        //
+        // APPROVED ONLY. A pending request is not time off yet, and counting
+        // it would let anybody remove their own absences by asking for leave
+        // and never being answered.
+        //
+        // generate_series turns a range into its days here rather than in
+        // JavaScript, so a request spanning a month costs one row per day and
+        // no loop. The value is what that day COSTS — half a day of leave is
+        // 0.5, which is what payroll will read.
+        const leaveRows = await pool.query(
+            `SELECT l.employee_id,
+                    TO_CHAR(day::date, 'YYYY-MM-DD') AS d,
+                    CASE WHEN l.half_day THEN 0.5 ELSE 1 END AS cost
+               FROM leave_requests l
+               CROSS JOIN LATERAL generate_series(l.start_date, l.end_date, '1 day') AS day
+              WHERE l.status = 'APPROVED'
+                AND l.end_date >= $1::date AND l.start_date <= $2::date`,
+            [from, to]
+        );
+        const leaveByDay = new Map(
+            leaveRows.rows.map((r) => [`${r.employee_id}|${r.d}`, Number(r.cost)]));
+
         // ── walk the range ──────────────────────────────────────────────
         const rows = employees.rows.map((employee) => {
             const config = configByEmployee.get(employee.employee_id) || global;
@@ -180,6 +203,12 @@ exports.getAttendanceReport = async (req, res) => {
             const grace = config.late_grace_minutes ?? global.late_grace_minutes ?? 10;
 
             let working = 0, present = 0, absent = 0, late = 0, offDays = 0;
+            // APPROVED LEAVE IS NOT ABSENCE, and this is the number people
+            // are paid on. Before this a day off with permission and a day
+            // somebody simply did not turn up were the same figure, which
+            // made the column unusable the moment leave existed.
+            let leaveDays = 0;
+            const leaveDates = [];
             let lateMinutes = 0, seconds = 0;
             const absentDates = [];
 
@@ -199,6 +228,14 @@ exports.getAttendanceReport = async (req, res) => {
 
                 const record = days.get(`${employee.employee_id}|${day}`);
                 if (!record) {
+                    // Leave is counted BEFORE absence, and half a day of
+                    // leave with no login is still a day away from the desk.
+                    const onLeave = leaveByDay.get(`${employee.employee_id}|${day}`);
+                    if (onLeave) {
+                        leaveDays += Number(onLeave);
+                        leaveDates.push(day);
+                        continue;
+                    }
                     absent += 1;
                     absentDates.push(day);
                     continue;
@@ -234,6 +271,7 @@ exports.getAttendanceReport = async (req, res) => {
                 working_days:  working,
                 present_days:  present,
                 absent_days:   absent,
+                leave_days:    Number(leaveDays.toFixed(1)),
                 off_days:      offDays,
                 late_days:     late,
                 late_minutes:  lateMinutes,
@@ -253,6 +291,7 @@ exports.getAttendanceReport = async (req, res) => {
                 // Capped: the point is to show which days, not to ship an
                 // unbounded list into a table cell.
                 absent_dates:  absentDates.slice(0, 40),
+                leave_dates:   leaveDates.slice(0, 40),
                 shift:         shiftStart && shiftEnd
                     ? `${String(shiftStart).slice(0, 5)}–${String(shiftEnd).slice(0, 5)}`
                     : "—",

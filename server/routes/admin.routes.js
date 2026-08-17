@@ -5,6 +5,7 @@ const adminCtrl      = require("../controllers/admin.controller");
 const reportCtrl     = require("../controllers/report.controller");
 const teamCtrl       = require("../controllers/team.controller");
 const alertsCtrl     = require("../controllers/alerts.controller");
+const leaveCtrl      = require("../controllers/leave.controller");
 
 // Sab routes admin-only hain
 router.use(adminOnly);
@@ -31,6 +32,14 @@ router.get("/alerts/settings",  alertsCtrl.getSettings);
 router.post("/alerts/settings", alertsCtrl.saveSettings);
 // Alerts by email. Reading who they go to is an admin's business; changing
 // it is the owner's, and so is making one send.
+// Leave, from the deciding side. Any admin may approve or reject — the
+// owner's decision — so these sit behind adminOnly rather than superAdminOnly.
+router.get("/leave", leaveCtrl.list);
+router.get("/leave/on/:date", leaveCtrl.onDate);
+router.post("/leave/:id/approve", leaveCtrl.approve);
+router.post("/leave/:id/reject", leaveCtrl.reject);
+router.post("/leave/:id/revoke", leaveCtrl.revoke);
+
 router.get("/alerts/email", alertsCtrl.getEmailSettings);
 router.post("/alerts/email", superAdminOnly, alertsCtrl.saveEmailSettings);
 router.post("/alerts/email/run", superAdminOnly, alertsCtrl.runEmailsNow);

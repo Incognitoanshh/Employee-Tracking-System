@@ -35,6 +35,7 @@ from client.presentation.theme import (
     C, R, R_SM, app_style, button, table_style, scrollbar,
 )
 from client.presentation import theme as _theme
+from client.presentation.windows.leave_page import LeavePage
 from client.presentation.windows.profile_page import ProfilePage
 from client.presentation.widgets.avatar import Avatar, ClickableAvatar, forget as forget_avatar
 from client.presentation.widgets.panel_widgets import (
@@ -1176,6 +1177,7 @@ class EmployeePanel(QWidget):
             "attendance": AttendancePage(self),
             "logs": LogsPage(self),
             "screenshots": ScreenshotsPage(self),
+            "leave": LeavePage(self),
             "profile": ProfilePage(self),
             "settings": SettingsPage(self),
             "help": HelpPage(self),
@@ -1239,6 +1241,7 @@ class EmployeePanel(QWidget):
             ("attendance", "📅", "Attendance"),
             ("logs", "📋", "Activity Logs"),
             ("screenshots", "📷", "Screenshots"),
+            ("leave", "🌴", "My Leave"),
             ("profile", "👤", "My Profile"),
             ("settings", "⚙", "Settings"),
             ("help", "❓", "Help & Support"),
