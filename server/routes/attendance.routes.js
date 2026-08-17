@@ -20,4 +20,12 @@ router.post(
     attendanceController.logoutAttendance
 );
 
+// Correcting a shift by hand. Guarded inside the controller rather than by a
+// middleware here, because the rule is not "is an admin" alone — it is
+// whether this admin may act on THAT employee.
+router.patch(
+    "/:id/checkout",
+    attendanceController.setCheckout
+);
+
 module.exports = router;

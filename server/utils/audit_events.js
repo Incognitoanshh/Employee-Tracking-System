@@ -29,6 +29,10 @@ const AUDIT_PREFIXES = [
     "EMPLOYEE DELETED",
     "FORCE LOGOUT",
     "AUTOSTART DISABLED",
+    // Changing a shift's end time by hand. This one feeds payroll, so it has
+    // to outlive the short retention period by a long way: the question
+    // "why was this person paid for those hours" is asked months later.
+    "ATTENDANCE CHECKOUT SET",
     // Teams and chat. CHAT VIEWED is the one that matters most here: it is
     // the record of a super admin reading somebody else's conversation, and
     // it must outlive the short retention period by a long way.
