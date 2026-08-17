@@ -14,6 +14,7 @@ const attendanceRoutes = require("./routes/attendance.routes");
 const chatRoutes       = require("./routes/chat.routes");
 const profileRoutes    = require("./routes/profile.routes");
 const leaveRoutes      = require("./routes/leave.routes");
+const payrollRoutes    = require("./routes/payroll.routes");
 const { applyPendingMigrations, migrationStatus } = require("./utils/migrate");
 
 // Startup env validation
@@ -136,6 +137,7 @@ app.use("/api/chat",        verifyToken, chatRoutes);
 // id in any of these routes to tamper with.
 app.use("/api/profile",     verifyToken, profileRoutes);
 app.use("/api/leave",       verifyToken, leaveRoutes);
+app.use("/api/payroll",     verifyToken, payrollRoutes);
 
 app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.url}` });

@@ -115,6 +115,8 @@ PAGES = [
      "subtitle": "Teams, channels and membership. Conversations are readable only by a super admin, and every read is recorded."},
     {"key": "mychat",      "icon": "🗨️", "title": "My Chat",
      "subtitle": "The channels you are a member of. This is your own conversation — reading somebody else's is done from Teams & Chat, and is recorded."},
+    {"key": "payroll",     "icon": "💰", "title": "Payroll",
+     "subtitle": "Salaries, and a month's pay built from attendance and approved leave. A finalised month stops moving — anything after it is an adjustment, on the record."},
     {"key": "leave",       "icon": "🌴", "title": "Leave",
      "subtitle": "Requests waiting on a decision, and every one already decided. Approving or rejecting is recorded against whoever did it."},
     {"key": "reports",     "icon": "📈", "title": "Reports",
@@ -2755,6 +2757,391 @@ class _DashboardTab(QWidget):
             self._feed_count.setText(f"·  {shown} events")
         except Exception:
             pass
+
+
+class _PayrollTab(QWidget):
+    """Salaries, a month's run, and the decision to finalise it.
+
+    THE WORKFLOW IS DRAFT → REVIEW → FINALIZE, and the buttons say which
+    stage they are for. A draft can be regenerated as often as attendance is
+    corrected; once finalised the figures stop moving and the only way to
+    change the month is an adjustment, which stays on the record beside what
+    it changed.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._workers: list = []
+        self._month = ""
+        self._lines: list[dict] = []
+        self._status = "NONE"
+        self._build_ui()
+        self._set_default_month()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 22, 28, 22)
+        root.setSpacing(14)
+
+        toolbar = _card()
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(18, 12, 18, 12)
+        bar.setSpacing(10)
+
+        bar.addWidget(_muted_label("Month"))
+        self._month_box = QLineEdit()
+        self._month_box.setPlaceholderText("2026-08")
+        self._month_box.setFixedWidth(110)
+        self._month_box.returnPressed.connect(self._load)
+        bar.addWidget(self._month_box)
+
+        for text, slot, variant in (
+            ("Open", self._load, "secondary"),
+            ("Generate draft", self._generate, "primary"),
+            ("Finalize", self._finalize, "danger"),
+        ):
+            btn = _btn(text, variant=variant, height=32,
+                       width=130 if len(text) > 8 else 90)
+            btn.clicked.connect(slot)
+            bar.addWidget(btn)
+            if text == "Finalize":
+                self._finalize_btn = btn
+
+        bar.addStretch()
+        self._headline = _muted_label("")
+        bar.addWidget(self._headline)
+        root.addWidget(toolbar)
+
+        self._table = _tune_table(QTableWidget(0, 10))
+        self._table.setHorizontalHeaderLabels(
+            ["Employee", "Gross", "Days", "Present", "Leave", "Absent",
+             "Deductions", "Overtime", "Adjustments", "Net pay"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.verticalHeader().setVisible(False)
+        self._table.cellDoubleClicked.connect(self._row_menu)
+        root.addWidget(self._table, 1)
+
+        footer = QHBoxLayout()
+        self._totals = _muted_label("")
+        footer.addWidget(self._totals)
+        footer.addStretch()
+        salaries = _btn("Salaries…", variant="secondary", height=32, width=110)
+        salaries.clicked.connect(self._salary_dialog)
+        footer.addWidget(salaries)
+        hint = _muted_label("Double-click a row for overtime and adjustments")
+        footer.addWidget(hint)
+        root.addLayout(footer)
+
+    def _set_default_month(self):
+        # The month that has just ended is the one somebody is paying for.
+        today = QDate.currentDate()
+        previous = today.addMonths(-1)
+        self._month_box.setText(previous.toString("yyyy-MM"))
+        self._load()
+
+    def refresh(self):
+        self._load()
+
+    # ── reading ─────────────────────────────────────────────────────────
+    def _load(self):
+        month = self._month_box.text().strip()
+        if not month:
+            return
+        self._month = month
+        worker = _FetchWorker(f"{API_BASE_URL}/admin/payroll/{month}")
+        worker.result.connect(self._populate)
+        worker.error.connect(lambda e: self._headline.setText(f"Error: {e}"))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _populate(self, data: dict):
+        run = data.get("run")
+        lines = data.get("lines") or []
+        self._lines = lines
+        self._status = (run or {}).get("status", "NONE")
+
+        if not run:
+            self._headline.setText("Not generated yet")
+            self._table.setRowCount(0)
+            self._totals.setText("")
+            self._finalize_btn.setEnabled(False)
+            return
+
+        finalised = self._status == "FINALIZED"
+        self._headline.setText(
+            f"{run['month']}  ·  {'FINALISED' if finalised else 'DRAFT'}"
+            f"  ·  {run.get('working_days')} working days")
+        # A FINALISED MONTH CANNOT BE FINALISED AGAIN. The button goes rather
+        # than refusing — the same rule the leave page follows.
+        self._finalize_btn.setEnabled(not finalised)
+
+        self._table.setRowCount(len(lines))
+        for i, line in enumerate(lines):
+            def money(value):
+                try:
+                    return f"₹{float(value):,.2f}"
+                except (TypeError, ValueError):
+                    return "—"
+
+            deductions = (float(line.get("absent_deduction") or 0)
+                          + float(line.get("unpaid_deduction") or 0))
+            self._table.setItem(i, 0, _cell(
+                f"{line.get('employee_name', '')}  ·  {line.get('employee_id', '')}"))
+            self._table.setItem(i, 1, _cell(money(line.get("gross_monthly")),
+                                            align_right=True))
+            self._table.setItem(i, 2, _cell(f"{float(line.get('working_days') or 0):g}",
+                                            align_right=True))
+            self._table.setItem(i, 3, _cell(f"{float(line.get('present_days') or 0):g}",
+                                            align_right=True))
+            self._table.setItem(i, 4, _cell(
+                f"{float(line.get('paid_leave_days') or 0):g}"
+                + (f" (+{float(line.get('unpaid_leave_days') or 0):g} unpaid)"
+                   if float(line.get("unpaid_leave_days") or 0) else "")))
+            absent_cell = _cell(f"{float(line.get('absent_days') or 0):g}",
+                                align_right=True)
+            if float(line.get("absent_days") or 0):
+                absent_cell.setForeground(QColor(C["danger"]))
+            self._table.setItem(i, 5, absent_cell)
+            self._table.setItem(i, 6, _cell(money(deductions) if deductions else "—",
+                                            align_right=True))
+            self._table.setItem(i, 7, _cell(
+                money(line.get("overtime_amount"))
+                if float(line.get("overtime_amount") or 0) else "—", align_right=True))
+            adjustments = float(line.get("adjustments_total") or 0)
+            self._table.setItem(i, 8, _cell(money(adjustments) if adjustments else "—",
+                                            align_right=True))
+            net = _cell(money(line.get("net_pay")), align_right=True)
+            font = net.font(); font.setBold(True); net.setFont(font)
+            net.setForeground(QColor(C["success"]))
+            self._table.setItem(i, 9, net)
+
+        totals = data.get("totals") or {}
+        self._totals.setText(
+            f"{len(lines)} employees   ·   gross ₹{float(totals.get('gross', 0)):,.2f}"
+            f"   ·   deductions ₹{float(totals.get('deductions', 0)):,.2f}"
+            f"   ·   TOTAL PAYOUT ₹{float(totals.get('net', 0)):,.2f}")
+
+    # ── the workflow ────────────────────────────────────────────────────
+    def _generate(self):
+        month = self._month_box.text().strip()
+        if not month:
+            return
+        answer = QMessageBox.question(
+            self, "Generate payroll",
+            f"Build the draft for {month}?\n\n"
+            "It reads attendance and approved leave for the month. Running it "
+            "again replaces the figures but keeps any adjustments already "
+            "entered.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        worker = _PostWorker(f"{API_BASE_URL}/admin/payroll/generate", {"month": month})
+        worker.result.connect(lambda d: (
+            self._headline.setText("Draft generated") if d.get("success")
+            else QMessageBox.warning(self, "Could not generate",
+                                     d.get("message") or "Unknown error"),
+            self._load()))
+        worker.error.connect(
+            lambda e: QMessageBox.warning(self, "Could not generate", str(e)))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _finalize(self):
+        month = self._month_box.text().strip()
+        total = self._totals.text().split("TOTAL PAYOUT")[-1].strip() or "—"
+        answer = QMessageBox.warning(
+            self, "Finalize payroll",
+            f"Finalize {month}?\n\nTotal payout: {total}\n\n"
+            "After this the figures cannot be regenerated. Anything that needs "
+            "to change is entered as an adjustment, which stays on the record.\n\n"
+            "Everybody with an email address will be told their payslip is ready.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        worker = _PostWorker(f"{API_BASE_URL}/admin/payroll/{month}/finalize", {})
+        worker.result.connect(lambda d: (
+            QMessageBox.information(self, "Finalized",
+                                    f"{month} is finalised for "
+                                    f"{d.get('employees', 0)} employees.")
+            if d.get("success") else
+            QMessageBox.warning(self, "Could not finalize",
+                                d.get("message") or "Unknown error"),
+            self._load()))
+        worker.error.connect(
+            lambda e: QMessageBox.warning(self, "Could not finalize", str(e)))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _row_menu(self, row: int, _column: int):
+        if row >= len(self._lines):
+            return
+        line = self._lines[row]
+        menu = QMenu(self)
+        overtime = menu.addAction("Set overtime hours…")
+        adjust = menu.addAction("Add an adjustment…")
+        chosen = menu.exec(self._table.viewport().mapToGlobal(
+            self._table.visualItemRect(self._table.item(row, 0)).center()))
+        if chosen == overtime:
+            self._set_overtime(line)
+        elif chosen == adjust:
+            self._add_adjustment(line)
+
+    def _set_overtime(self, line: dict):
+        if self._status == "FINALIZED":
+            QMessageBox.information(
+                self, "Finalised",
+                "This month is finalised. Add an adjustment for the overtime "
+                "instead — it stays on the record beside the original figure.")
+            return
+        hours, ok = QInputDialog.getDouble(
+            self, "Overtime hours",
+            f"{line.get('employee_name')}\n\n"
+            f"Hours at ₹{float(line.get('overtime_rate') or 0):,.2f} per hour:",
+            float(line.get("overtime_hours") or 0), 0, 400, 2)
+        if not ok:
+            return
+        worker = _PostWorker(f"{API_BASE_URL}/admin/payroll/{self._month}/overtime",
+                             {"employee_id": line["employee_id"], "hours": hours})
+        worker.result.connect(lambda d: (
+            self._load() if d.get("success") else
+            QMessageBox.warning(self, "Could not save",
+                                d.get("message") or "Unknown error")))
+        worker.error.connect(lambda e: QMessageBox.warning(self, "Could not save", str(e)))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _add_adjustment(self, line: dict):
+        kinds = ["BONUS", "INCENTIVE", "REIMBURSEMENT", "ADVANCE", "FINE", "OTHER"]
+        kind, ok = QInputDialog.getItem(
+            self, "Adjustment", f"{line.get('employee_name')}\n\nWhat kind?",
+            [k.title() for k in kinds], 0, False)
+        if not ok:
+            return
+        kind = kind.upper()
+
+        amount, ok = QInputDialog.getDouble(
+            self, "Adjustment",
+            "Amount:\n\n"
+            + ("This will be taken OFF the pay." if kind in ("ADVANCE", "FINE")
+               else "This will be ADDED to the pay." if kind != "OTHER"
+               else "Positive adds, negative takes away."),
+            0, -10000000, 10000000, 2)
+        if not ok or amount == 0:
+            return
+
+        # THE REASON IS NOT OPTIONAL — the server refuses without one, and it
+        # is what somebody reads when they ask why their pay was different.
+        reason, ok = QInputDialog.getText(
+            self, "Adjustment", "Why? This appears on the payslip.")
+        if not ok or not reason.strip():
+            return
+
+        worker = _PostWorker(
+            f"{API_BASE_URL}/admin/payroll/{self._month}/adjustments",
+            {"employee_id": line["employee_id"], "kind": kind,
+             "amount": amount, "reason": reason.strip()})
+        worker.result.connect(lambda d: (
+            self._load() if d.get("success") else
+            QMessageBox.warning(self, "Could not add",
+                                d.get("message") or "Unknown error")))
+        worker.error.connect(lambda e: QMessageBox.warning(self, "Could not add", str(e)))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _salary_dialog(self):
+        """Who is on what, and setting it."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Salaries")
+        dialog.setMinimumSize(720, 460)
+        dialog.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        note = QLabel(
+            "A salary takes effect from a date, and the old one stays on the "
+            "record. A rise in June does not change May's payslip.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{C['text_muted']};font-size:12px;background:transparent;")
+        layout.addWidget(note)
+
+        table = _tune_table(QTableWidget(0, 5))
+        table.setHorizontalHeaderLabels(
+            ["Employee", "Monthly gross", "Overtime / hour", "From", ""])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        layout.addWidget(table, 1)
+
+        def fill(data: dict):
+            rows = data.get("data") or []
+            table.setRowCount(len(rows))
+            for i, row in enumerate(rows):
+                table.setItem(i, 0, _cell(
+                    f"{row.get('employee_name','')}  ·  {row.get('employee_id','')}"))
+                table.setItem(i, 1, _cell(
+                    f"₹{float(row['gross_monthly']):,.2f}" if row.get("gross_monthly")
+                    else "not set", align_right=True))
+                table.setItem(i, 2, _cell(
+                    f"₹{float(row['overtime_hourly']):,.2f}" if row.get("overtime_hourly")
+                    else "—", align_right=True))
+                table.setItem(i, 3, _cell(row.get("effective_from") or "—", muted=True))
+                edit = _btn("Set…", variant="secondary", height=28, width=70)
+                edit.clicked.connect(lambda _=False, r=row: set_salary(r))
+                holder = QWidget()
+                lay = QHBoxLayout(holder)
+                lay.setContentsMargins(6, 4, 6, 4)
+                lay.addWidget(edit)
+                lay.addStretch()
+                table.setCellWidget(i, 4, holder)
+
+        def load():
+            worker = _FetchWorker(f"{API_BASE_URL}/admin/payroll/salaries")
+            worker.result.connect(fill)
+            _track_worker(self._workers, worker)
+            worker.start()
+
+        def set_salary(row: dict):
+            gross, ok = QInputDialog.getDouble(
+                self, "Monthly gross", f"{row.get('employee_name')}\n\nMonthly gross:",
+                float(row.get("gross_monthly") or 0), 0, 100000000, 2)
+            if not ok:
+                return
+            overtime, ok = QInputDialog.getDouble(
+                self, "Overtime rate",
+                "Overtime, per hour (0 if none):",
+                float(row.get("overtime_hourly") or 0), 0, 100000, 2)
+            if not ok:
+                return
+            when, ok = QInputDialog.getText(
+                self, "From when",
+                "Effective from (YYYY-MM-DD).\n\n"
+                "Months already finalised are not affected.",
+                text=QDate.currentDate().toString("yyyy-MM-01"))
+            if not ok:
+                return
+
+            worker = _PostWorker(f"{API_BASE_URL}/admin/payroll/salaries", {
+                "employee_id": row["employee_id"], "gross_monthly": gross,
+                "overtime_hourly": overtime, "effective_from": when.strip()})
+            worker.result.connect(lambda d: (
+                load() if d.get("success") else
+                QMessageBox.warning(self, "Could not save",
+                                    d.get("message") or "Unknown error")))
+            worker.error.connect(lambda e: QMessageBox.warning(self, "Could not save", str(e)))
+            _track_worker(self._workers, worker)
+            worker.start()
+
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        load()
+        dialog.exec()
 
 
 class _LeaveTab(QWidget):
@@ -5608,7 +5995,7 @@ class AdminConfigPanel(QMainWindow):
     TAB_ATTRS = (
         "_dashboard_tab", "_alerts_tab", "_config_tab", "_employees_tab",
         "_attendance_tab", "_screenshots_tab", "_teams_tab", "_mychat_tab",
-        "_leave_tab", "_reports_tab", "_logs_tab", "_profile_tab",
+        "_payroll_tab", "_leave_tab", "_reports_tab", "_logs_tab", "_profile_tab",
     )
 
     def __init__(self):
@@ -5695,6 +6082,7 @@ class AdminConfigPanel(QMainWindow):
         # any page — not only from inside the one it arrived in.
         self._mychat_tab.unread_changed.connect(
             lambda total: self.sidebar.set_unread("mychat", total))
+        self._payroll_tab     = _PayrollTab()
         self._leave_tab       = _LeaveTab()
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
@@ -5718,6 +6106,7 @@ class AdminConfigPanel(QMainWindow):
             self._screenshots_tab,
             self._teams_tab,
             self._mychat_tab,
+            self._payroll_tab,
             self._leave_tab,
             self._reports_tab,
             self._logs_tab,

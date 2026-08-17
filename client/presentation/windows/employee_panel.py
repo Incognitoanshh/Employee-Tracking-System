@@ -36,6 +36,7 @@ from client.presentation.theme import (
 )
 from client.presentation import theme as _theme
 from client.presentation.windows.leave_page import LeavePage
+from client.presentation.windows.payroll_page import PayrollPage
 from client.presentation.windows.profile_page import ProfilePage
 from client.presentation.widgets.avatar import Avatar, ClickableAvatar, forget as forget_avatar
 from client.presentation.widgets.panel_widgets import (
@@ -1178,6 +1179,7 @@ class EmployeePanel(QWidget):
             "logs": LogsPage(self),
             "screenshots": ScreenshotsPage(self),
             "leave": LeavePage(self),
+            "payroll": PayrollPage(self),
             "profile": ProfilePage(self),
             "settings": SettingsPage(self),
             "help": HelpPage(self),
@@ -1242,6 +1244,7 @@ class EmployeePanel(QWidget):
             ("logs", "📋", "Activity Logs"),
             ("screenshots", "📷", "Screenshots"),
             ("leave", "🌴", "My Leave"),
+            ("payroll", "💰", "My Payroll"),
             ("profile", "👤", "My Profile"),
             ("settings", "⚙", "Settings"),
             ("help", "❓", "Help & Support"),

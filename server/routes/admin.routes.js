@@ -6,6 +6,7 @@ const reportCtrl     = require("../controllers/report.controller");
 const teamCtrl       = require("../controllers/team.controller");
 const alertsCtrl     = require("../controllers/alerts.controller");
 const leaveCtrl      = require("../controllers/leave.controller");
+const payrollCtrl    = require("../controllers/payroll.controller");
 
 // Sab routes admin-only hain
 router.use(adminOnly);
@@ -32,6 +33,20 @@ router.get("/alerts/settings",  alertsCtrl.getSettings);
 router.post("/alerts/settings", alertsCtrl.saveSettings);
 // Alerts by email. Reading who they go to is an admin's business; changing
 // it is the owner's, and so is making one send.
+// Payroll. Generating and finalising a month is an admin's, and the
+// controller checks it again — a route is a door, not a guarantee.
+router.get("/payroll", payrollCtrl.listRuns);
+router.get("/payroll/salaries", payrollCtrl.listSalaries);
+router.post("/payroll/salaries", payrollCtrl.setSalary);
+router.get("/payroll/salaries/:employee_id", payrollCtrl.salaryHistory);
+router.post("/payroll/generate", payrollCtrl.generate);
+router.delete("/payroll/adjustments/:id", payrollCtrl.removeAdjustment);
+router.get("/payroll/:month", payrollCtrl.getRun);
+router.get("/payroll/:month/summary", payrollCtrl.summary);
+router.post("/payroll/:month/finalize", payrollCtrl.finalize);
+router.post("/payroll/:month/adjustments", payrollCtrl.addAdjustment);
+router.post("/payroll/:month/overtime", payrollCtrl.setOvertime);
+
 // Leave, from the deciding side. Any admin may approve or reject — the
 // owner's decision — so these sit behind adminOnly rather than superAdminOnly.
 router.get("/leave", leaveCtrl.list);
