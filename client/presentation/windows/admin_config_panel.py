@@ -195,6 +195,34 @@ def _fmt_ts(ts, fallback="—") -> str:
     return dt.astimezone(IST).strftime("%d %b %Y %I:%M:%S %p")
 
 
+def _fmt_date_only(ts, fallback="—") -> str:
+    """17 Aug 2026. Split from the time because one column showing both is
+    what forced the login and logout columns to be twice as wide as they
+    needed to be."""
+    dt = _parse_server_ts(ts)
+    if dt is None:
+        return fallback
+    return dt.astimezone(IST).strftime("%d %b %Y")
+
+
+def _fmt_time_only(ts, fallback="—") -> str:
+    """07:37 PM."""
+    dt = _parse_server_ts(ts)
+    if dt is None:
+        return fallback
+    return dt.astimezone(IST).strftime("%I:%M %p")
+
+
+def _fmt_elapsed(seconds) -> str:
+    """9420 -> "02:37:00". Zero-padded so a running clock does not change
+    width as it ticks, which makes the whole column jitter."""
+    try:
+        total = max(0, int(float(seconds)))
+    except (TypeError, ValueError):
+        return "—"
+    return f"{total // 3600:02}:{(total % 3600) // 60:02}:{total % 60:02}"
+
+
 def _fmt_relative(ts) -> str:
     """'Just now' / '5 min ago' / absolute date."""
     dt = _parse_server_ts(ts)
@@ -897,6 +925,44 @@ class _PostWorker(QThread):
             self.result.emit(r.json())
         except Exception as e:
             self.error.emit(str(e))
+
+class _RequestWorker(QThread):
+    """Any method, off the UI thread, returning whatever the server said.
+
+    _PostWorker above is POST-only. Rather than adding a near-identical
+    _PatchWorker, this takes the method — the next one of these needs no new
+    class at all.
+
+    IT DOES NOT RAISE ON A 4xx. The server answers a refused edit with a
+    sentence explaining which rule was broken, and that sentence is the whole
+    value of the response — turning it into a generic transport error would
+    throw away the only useful part.
+    """
+    result = Signal(dict)
+    error  = Signal(str)
+
+    def __init__(self, method: str, url: str, body: dict | None = None):
+        super().__init__()
+        self._method = method
+        self._url = url
+        self._body = body or {}
+
+    def run(self):
+        try:
+            r = _http.request(
+                self._method,
+                self._url,
+                json=self._body,
+                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                timeout=15,
+            )
+            try:
+                self.result.emit(r.json())
+            except ValueError:
+                self.error.emit(f"The server replied with {r.status_code}.")
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 class _ExportWorker(QThread):
     """
@@ -2313,6 +2379,11 @@ class _ScreenshotsTab(QWidget):
         self._user_searched = False
         self._emp_filter.clear()
         self._date_filter.setDate(QDate.currentDate())
+        # Clear means clear. Leaving the dropdown set was how a "no results"
+        # page looked like a broken list rather than an active filter.
+        self._status_filter.blockSignals(True)
+        self._status_filter.setCurrentIndex(0)
+        self._status_filter.blockSignals(False)
         self._load(page=1)
         
     def _prev_page(self): self._load(self._page - 1)
@@ -2478,6 +2549,37 @@ class _DashboardTab(QWidget):
             tiles.addWidget(tl)
         root.addLayout(tiles)
 
+        # ── Today, for everybody ─────────────────────────────────────────
+        #
+        # ABOVE the older cards on purpose. Those answer "how many people and
+        # how much data"; these answer "who is at work today", which is the
+        # question somebody opens this page to ask. Online/Offline is a fact
+        # about network sessions and was standing in for attendance because
+        # nothing else was available.
+        today_header = QLabel("Today")
+        today_header.setStyleSheet(
+            f"color:{C['text_primary']};font-weight:700;font-size:15px;"
+            f"background:transparent;")
+        root.addWidget(today_header)
+
+        today_grid = QGridLayout()
+        today_grid.setSpacing(14)
+        # The same colours the attendance page uses for the same words, so
+        # the two screens cannot teach different meanings for one green.
+        self._card_present  = StatCard("Present",     ACCENTS["green"],  "✅", sparkline=False)
+        self._card_active   = StatCard("Active Now",  ACCENTS["green"],  "🟢", sparkline=False)
+        self._card_leave    = StatCard("On Leave",    ACCENTS["violet"], "🌴", sparkline=False)
+        self._card_absent   = StatCard("Absent",      ACCENTS["red"],    "⛔", sparkline=False)
+        self._card_late     = StatCard("Late",        ACCENTS["amber"],  "⏰", sparkline=False)
+        self._card_day_off  = StatCard("Day Off",     ACCENTS["slate"],  "🗓", sparkline=False)
+        for i, c in enumerate([
+            self._card_present, self._card_active, self._card_leave,
+            self._card_absent, self._card_late, self._card_day_off,
+        ]):
+            today_grid.addWidget(c, 0, i)
+            today_grid.setColumnStretch(i, 1)
+        root.addLayout(today_grid)
+
         # ── Legacy stat cards (existing feature — hataya nahi) ───────────
         grid = QGridLayout()
         grid.setSpacing(14)
@@ -2609,8 +2711,45 @@ class _DashboardTab(QWidget):
     def _load_light(self):
         """Sirf cards + feed — charts apne alag (slow) timer pe chalte hain."""
         self._load_summary()
+        self._load_today()
         self._load_feed()
         self._load_own_shots()
+
+    def _load_today(self):
+        """Today's counts, from the one endpoint that works them all out.
+
+        NOT SIX SEPARATE REQUESTS. The whole value of these cards is that
+        they add up to the headcount, and figures fetched separately can be
+        taken a second apart — long enough for somebody to sign in between
+        two of them and for the row of cards to stop adding up in front of
+        the person reading it.
+        """
+        worker = _FetchWorker(f"{API_BASE_URL}/dashboard/today", {})
+
+        def fill(data):
+            board = (data or {}).get("data") or {}
+            if not board:
+                return
+            self._card_present.set_value(str(board.get("present", 0)))
+            self._card_present.set_subtitle(
+                f"of {board.get('headcount', 0)} people")
+            self._card_active.set_value(str(board.get("active", 0)))
+            self._card_leave.set_value(str(board.get("on_leave", 0)))
+            self._card_absent.set_value(str(board.get("absent", 0)))
+            self._card_late.set_value(str(board.get("late", 0)))
+            self._card_late.set_subtitle("of those present")
+            self._card_day_off.set_value(str(board.get("day_off", 0)))
+            self._card_day_off.set_subtitle("weekly off or holiday")
+            # The one number that is a job rather than a fact: open shifts
+            # with nobody in them, waiting to be closed.
+            stale = board.get("not_signed_out", 0)
+            self._card_active.set_subtitle(
+                f"{stale} not signed out" if stale else "at work now")
+
+        worker.result.connect(fill)
+        worker.error.connect(lambda _e: None)
+        _track_worker(self._workers, worker)
+        worker.start()
 
     def _load_own_shots(self):
         """The admin's own "Screenshots Today", read from the local database.
@@ -4145,6 +4284,19 @@ class _AttendanceTab(QWidget):
         self._refresh_timer.timeout.connect(lambda: self._load(self._page))
         self._refresh_timer.start()
 
+        # THE RUNNING CLOCK, ticking between those refreshes.
+        #
+        # Separate from the refresh above on purpose: fetching the whole page
+        # once a second to move a number would be thirty times the queries
+        # for the same result. This adds a second to what the server last
+        # said, and every refresh puts it back in step with the server — so
+        # drift cannot accumulate past thirty seconds even on a machine whose
+        # own clock is wrong.
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(1000)
+        self._tick_timer.timeout.connect(self._tick_running_clocks)
+        self._tick_timer.start()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
@@ -4167,6 +4319,32 @@ class _AttendanceTab(QWidget):
         self._date_filter.setFixedWidth(130)
         filter_row.addWidget(self._date_filter)
 
+        # THE RECORD'S STATE ONLY.
+        #
+        # "Still open, nobody there" is the one an administrator hunts for —
+        # those are the rows that need closing, and finding them by eye
+        # through pages of history is how they get left for weeks.
+        #
+        # Late is deliberately NOT here. It is worked out per employee
+        # against their own shift, in one place; a filter for it would have
+        # to repeat that rule in SQL, and a Late filter that disagreed with
+        # the Late column would be worse than no filter at all.
+        filter_row.addWidget(_muted_label("Show"))
+        self._status_filter = QComboBox()
+        self._status_filter.setFixedWidth(150)
+        for _label, _value in (("All records", ""),
+                               ("Active now", "active"),
+                               ("Not signed out", "incomplete"),
+                               ("Completed", "completed")):
+            self._status_filter.addItem(_label, _value)
+        # NOT _on_search_clicked. That marks the page as "the user searched",
+        # which switches the date filter on — so picking "Not signed out"
+        # would also silently restrict the list to today, and the shifts left
+        # open days ago (the ones being hunted for) would not appear at all.
+        self._status_filter.currentIndexChanged.connect(
+            lambda _i: self._load(page=1))
+        filter_row.addWidget(self._status_filter)
+
         search_btn = _btn("🔍  Search", variant="primary", height=34, width=110)
         search_btn.clicked.connect(self._on_search_clicked)
         filter_row.addWidget(search_btn)
@@ -4182,22 +4360,48 @@ class _AttendanceTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = _tune_table(QTableWidget(0, 6))
+        # ID, Employee, Name, Date, Shift, Check In, Check Out, Hours,
+        # Attendance, Shift status.
+        #
+        # The name is here because an attendance list nobody can read without
+        # memorising employee ids is not a list. The shift window is here
+        # because "Late 1h 49m" is an accusation, and the reader is entitled
+        # to see what it was measured against without opening another screen.
+        self._table = _tune_table(QTableWidget(0, 10))
         self._table.setHorizontalHeaderLabels(
-            ["ID", "Employee", "Login Time", "Logout Time", "Total Hours", "Status"])
-        self._table.horizontalHeader().setStretchLastSection(False)
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(0, 80)
-        self._table.setColumnWidth(1, 110)
-        self._table.setColumnWidth(4, 120)
-        self._table.setColumnWidth(5, 130)
+            ["ID", "Employee", "Name", "Date", "Shift", "Check In",
+             "Check Out", "Hours", "Attendance", "Shift"])
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in range(10):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+        # THE NAME STRETCHES, AND HAS A FLOOR.
+        #
+        # Stretch alone is not enough: nine fixed columns took almost the
+        # whole width and left the name about fifty pixels, so every person
+        # in the list read "S…", "R…", "A…" — a Name column that shows no
+        # names. A minimum section size keeps it legible, and the table
+        # scrolls sideways on a narrow window instead of crushing it.
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(72)
+        self._table.setColumnWidth(0, 52)
+        self._table.setColumnWidth(1, 108)
+        # "17 Aug 2026" in full. It was 100 and elided to "17 Aug 2…", which
+        # is a date column that cannot be trusted at a glance.
+        self._table.setColumnWidth(3, 116)
+        self._table.setColumnWidth(4, 104)
+        self._table.setColumnWidth(5, 92)
+        self._table.setColumnWidth(6, 92)
+        self._table.setColumnWidth(8, 104)
+        # Wider than the rest: this one carries "Overtime 2h 15m".
+        self._table.setColumnWidth(9, 140)
+        # A running clock has to be monospaced or the row twitches sideways
+        # every second as the digits change width.
+        self._table.setColumnWidth(7, 96)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.itemDoubleClicked.connect(self._row_detail)
+        self._table.setToolTip("Double-click a row for the whole shift.")
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
@@ -4220,6 +4424,11 @@ class _AttendanceTab(QWidget):
         self._user_searched = False
         self._emp_filter.clear()
         self._date_filter.setDate(QDate.currentDate())
+        # Clear means clear. Leaving the dropdown set was how a "no results"
+        # page looked like a broken list rather than an active filter.
+        self._status_filter.blockSignals(True)
+        self._status_filter.setCurrentIndex(0)
+        self._status_filter.blockSignals(False)
         self._load(page=1)
 
     def _prev_page(self): self._load(self._page - 1)
@@ -4237,6 +4446,11 @@ class _AttendanceTab(QWidget):
             params["employee_id"] = emp
         if self._user_searched:
             params["date"] = self._date_filter.date().toString("yyyy-MM-dd")
+        # Sent to the server rather than applied here, so the page numbers
+        # and the total count describe the rows actually being shown.
+        state = self._status_filter.currentData()
+        if state:
+            params["status"] = state
         w = _FetchWorker(f"{API_BASE_URL}/attendance/all", params)
         w.result.connect(self._populate)
         w.error.connect(lambda e: print("Attendance error:", e))
@@ -4247,65 +4461,277 @@ class _AttendanceTab(QWidget):
         rows = data.get("data", [])
         total = data.get("total", 0)
         self._attendance = rows
-        self._page_label.setText(f"Page {self._page}  •  Total: {total}")
+        # AN EMPTY LIST SAYS WHY IT IS EMPTY. A filter that matches nothing
+        # and a page that failed to load look identical otherwise, and the
+        # filter is by far the likelier of the two.
+        if not rows:
+            chosen = self._status_filter.currentText()
+            self._page_label.setText(
+                f"Nothing matches “{chosen}”."
+                if self._status_filter.currentData()
+                else "No attendance records here.")
+        else:
+            self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 50 < total)
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             self._table.setItem(i, 0, _cell(str(row.get("id", "")), mono=True, muted=True))
             self._table.setItem(i, 1, _cell(row.get("employee_id", ""), mono=True))
-            self._table.setItem(i, 2, _cell(_fmt_ts(row.get("login_time")), muted=True))
+            self._table.setItem(i, 2, _cell(row.get("employee_name") or "—"))
+            self._table.setItem(i, 3, _cell(
+                _fmt_date_only(row.get("login_time")), muted=True))
+            self._table.setItem(i, 4, _cell(
+                row.get("shift_window") or "—", mono=True, muted=True))
+            self._table.setItem(i, 5, _cell(
+                _fmt_time_only(row.get("login_time")), mono=True))
 
-            if row.get("logout_time"):
-                self._table.setItem(i, 3, _cell(_fmt_ts(row.get("logout_time")), muted=True))
-            elif row.get("session_live"):
-                # Abhi chal raha session — emoji ki jagah rang, jo baaki
-                # status indicators se match karta hai.
-                active = _cell("● ACTIVE")
-                active.setForeground(QColor(C["success"]))
-                self._table.setItem(i, 3, active)
+            # A TIME, OR NOTHING. This column used to say "● ACTIVE" or "Not
+            # signed out" — both of which are the record's state, which now
+            # has a column of its own. Saying it in two places at once is
+            # what made a row look self-contradictory: "Not signed out" here
+            # beside "Signed in again" there.
+            self._table.setItem(i, 6, _cell(
+                _fmt_time_only(row.get("logout_time")) if row.get("logout_time") else "—",
+                mono=True, muted=True))
+
+            # A RUNNING CLOCK FOR AN OPEN SHIFT, a fixed total for a closed
+            # one. This cell used to show a dash for anybody currently at
+            # work — the one row where the number is most wanted.
+            #
+            # The seconds come from the SERVER at each fetch and are counted
+            # up locally from there. Working it out from login_time on this
+            # machine would put the laptop's own clock into a payroll-facing
+            # number, and laptops are wrong by minutes all the time.
+            hours = _cell("", mono=True, align_right=True)
+            if row.get("attendance_status") == "active" \
+                    and row.get("elapsed_seconds") is not None:
+                hours.setText(_fmt_elapsed(row["elapsed_seconds"]))
+                hours.setForeground(QColor(C["success"]))
+                hours.setToolTip("Still running — counted from the server's clock.")
             else:
-                # OPEN, BUT NOBODY IS THERE.
-                #
-                # This column said ACTIVE for any row without a logout time
-                # and asked nothing else — so an app closed without signing
-                # out read as somebody at their desk, for up to sixteen hours,
-                # until the abandoned-shift sweep reached it. The employee
-                # list, which asks presence, said "Offline · 11 hr ago" about
-                # the same person at the same moment.
-                #
-                # Now it says what is actually true: the shift was never
-                # closed. Amber, because it is neither working nor a finished
-                # shift — it is a row waiting to be tidied up.
-                stale = _cell("Not signed out")
-                stale.setForeground(QColor(C["warning"]))
-                stale.setToolTip(
+                hours.setText(self._hours_for(row))
+            self._table.setItem(i, 7, hours)
+
+            # TWO COLUMNS, BECAUSE THEY ANSWER TWO QUESTIONS.
+            #
+            # This was one "Status" cell carrying both, and beside a Logout
+            # column reading "Not signed out" it produced a row that looked
+            # like it contradicted itself — reported as exactly that. What
+            # happened to the record and how the shift went are now separate,
+            # and neither borrows the other's words.
+            record_status = row.get("attendance_status")
+            record = _cell(("● " if record_status == "active" else "")
+                           + (row.get("attendance_label") or "—"))
+            record.setForeground(QColor({
+                "active":     C["success"],
+                "completed":  C["text_secondary"],
+                "incomplete": C["warning"],
+            }.get(record_status, C["text_muted"])))
+            if record_status == "incomplete":
+                record.setToolTip(
                     "This shift was never closed — the app was shut down "
                     "without signing out, or the machine went offline.\n\n"
-                    "It is closed automatically once the session has been "
-                    "gone long enough, at the last moment the person was "
-                    "seen. They are not counted as working in the meantime.")
-                self._table.setItem(i, 3, stale)
+                    "It closes automatically once the session has been gone "
+                    "long enough, at the last moment the person was seen.")
+            self._table.setItem(i, 8, record)
 
-            # Duration right-align — numbers ko align hona chahiye, warna
-            # column me zigzag dikhta hai.
-            self._table.setItem(i, 4, _cell(
-                self._format_total_hours(row.get("total_hours")),
-                mono=True, align_right=True))
-
-            # Computed by the server against the shift the employee has now,
-            # so a corrected shift fixes the history with it. Older servers do
-            # not send these fields at all — fall back to a dash rather than
-            # showing every row as on time.
-            status = row.get("status")
-            cell = _cell(row.get("status_label") or "—")
-            cell.setForeground(QColor({
+            # Older servers send neither field. A dash is the honest answer
+            # there — better than colouring every row as if it were on time.
+            shift_status = row.get("shift_status") or row.get("status")
+            shift = _cell(row.get("shift_label") or row.get("status_label") or "—")
+            shift.setForeground(QColor({
                 "late":          C["danger"],
+                "early_exit":    C["warning"],
+                "overtime":      C["accent"],
                 "on_time":       C["success"],
+                "half_day":      C["accent"],
+                "on_leave":      C["accent"],
                 "day_off":       C["text_muted"],
+                "extra":         C["text_muted"],
                 "outside_shift": C["warning"],
-            }.get(status, C["text_muted"])))
-            self._table.setItem(i, 5, cell)
+            }.get(shift_status, C["text_muted"])))
+            # Late AND left early: the headline is lateness, but the rest is
+            # not thrown away — it is here, where somebody looking into a
+            # particular row will find it.
+            notes = row.get("shift_notes") or []
+            if notes:
+                shift.setToolTip("Also: " + ", ".join(str(n) for n in notes))
+            self._table.setItem(i, 9, shift)
+
+    def _row_detail(self, item):
+        """One shift, opened out — and the only place it can be corrected.
+
+        THE CORRECTION LIVES HERE RATHER THAN IN A BUTTON ON THE ROW. A column
+        of buttons beside fifty rows is a column of things to hit by accident,
+        and this one rewrites the hours somebody is paid for. Two deliberate
+        actions — open the row, then say why — is the right amount of friction
+        for that.
+        """
+        row = self._attendance[item.row()] if item.row() < len(self._attendance) else None
+        if not row:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Shift #{row.get('id')} — {row.get('employee_id')}")
+        dialog.setMinimumWidth(520)
+        dialog.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        facts = [
+            ("Employee", f"{row.get('employee_name') or '—'}  ({row.get('employee_id')})"),
+            ("Date", _fmt_date_only(row.get("login_time"))),
+            ("Shift", row.get("shift_window") or "No shift set"),
+            ("Check in", _fmt_ts(row.get("login_time"))),
+            ("Check out", _fmt_ts(row.get("logout_time")) if row.get("logout_time")
+                          else "Not signed out"),
+            # .get, not [..]. A server that does not send elapsed_seconds is
+            # not hypothetical — it is every server until this deploy lands,
+            # and a KeyError here would take the whole dialog down.
+            ("Hours",
+             f"{_fmt_elapsed(row.get('elapsed_seconds'))}  (still running)"
+             if row.get("attendance_status") == "active"
+             and row.get("elapsed_seconds") is not None
+             else self._format_total_hours(row.get("total_hours"))),
+            ("Attendance", row.get("attendance_label") or "—"),
+            ("Shift status", row.get("shift_label") or "—"),
+        ]
+        if row.get("shift_notes"):
+            facts.append(("Also", ", ".join(str(n) for n in row["shift_notes"])))
+        if row.get("leave_type"):
+            facts.append(("Approved leave", str(row["leave_type"])))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(7)
+        for line, (name, value) in enumerate(facts):
+            key = QLabel(name)
+            key.setStyleSheet(
+                f"color:{C['text_muted']};font-size:12px;background:transparent;")
+            val = QLabel(str(value))
+            val.setWordWrap(True)
+            val.setStyleSheet(
+                f"color:{C['text_primary']};font-size:12px;background:transparent;")
+            grid.addWidget(key, line, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(val, line, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        note = QLabel(
+            "Correcting the end time changes the hours this shift is paid for. "
+            "The change, its previous value and your reason are written to the "
+            "audit log.")
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+        layout.addWidget(note)
+
+        edit_row = QHBoxLayout()
+        when = QLineEdit()
+        when.setPlaceholderText("Leave empty to close it at this moment")
+        when.setText("" if not row.get("logout_time")
+                     else _parse_server_ts(row["logout_time"]).astimezone(IST)
+                          .strftime("%Y-%m-%d %H:%M"))
+        why = QLineEdit()
+        why.setPlaceholderText("Reason (required)")
+        edit_row.addWidget(QLabel("End (IST)"))
+        edit_row.addWidget(when, 1)
+        layout.addLayout(edit_row)
+        layout.addWidget(why)
+
+        message = QLabel("")
+        message.setWordWrap(True)
+        message.setStyleSheet(
+            f"color:{C['warning']};font-size:11px;background:transparent;")
+        layout.addWidget(message)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        apply_btn = _btn("Save end time", variant="primary", height=32, width=140)
+        close_btn = _btn("Close", variant="secondary", height=32, width=90)
+        close_btn.clicked.connect(dialog.reject)
+        buttons.addWidget(close_btn)
+        buttons.addWidget(apply_btn)
+        layout.addLayout(buttons)
+
+        def save():
+            reason = why.text().strip()
+            if len(reason) < 3:
+                message.setText("A reason is required.")
+                return
+            apply_btn.setEnabled(False)
+            message.setStyleSheet(
+                f"color:{C['text_muted']};font-size:11px;background:transparent;")
+            message.setText("Saving…")
+
+            worker = _RequestWorker(
+                "PATCH", f"{API_BASE_URL}/attendance/{row.get('id')}/checkout",
+                {"logout_time": when.text().strip(), "reason": reason})
+
+            def done(result):
+                if result.get("success"):
+                    dialog.accept()
+                    self._load(self._page)
+                else:
+                    apply_btn.setEnabled(True)
+                    message.setStyleSheet(
+                        f"color:{C['danger']};font-size:11px;background:transparent;")
+                    # The server's own words. It knows which rule was broken —
+                    # repeating them here would let the two drift apart.
+                    message.setText(result.get("message") or "That could not be saved.")
+
+            worker.result.connect(done)
+            worker.error.connect(lambda e: (apply_btn.setEnabled(True),
+                                            message.setText(str(e))))
+            _track_worker(self._workers, worker)
+            worker.start()
+
+        apply_btn.clicked.connect(save)
+        dialog.exec()
+
+    def _tick_running_clocks(self):
+        """Advance the Hours cell of every shift that is still open.
+
+        Touches only those cells. Redrawing the table would fight whatever
+        the administrator is doing — a selection, a scroll position, a column
+        being dragged — once a second, all day.
+        """
+        for i, row in enumerate(self._attendance):
+            if row.get("attendance_status") != "active":
+                continue
+            if row.get("elapsed_seconds") is None:
+                continue
+            row["elapsed_seconds"] = row["elapsed_seconds"] + 1
+            item = self._table.item(i, 7)
+            # The table can be shorter than the data for a moment while a
+            # page is being replaced.
+            if item is not None:
+                item.setText(_fmt_elapsed(row["elapsed_seconds"]))
+
+    def _hours_for(self, row) -> str:
+        """The shift's length — from total_hours, or from its own two ends.
+
+        A ROW WITH A CHECK-IN, A CHECK-OUT AND A DASH FOR THE HOURS IS THE
+        PAGE CALLING ITSELF A LIAR. It happens whenever total_hours was never
+        filled in: rows written before the server started computing it, rows
+        imported by hand, rows repaired directly in the database. The two
+        timestamps are right there and their difference is not a guess — it
+        is the same subtraction the server does.
+
+        Still a dash for an open shift with no live session, because there
+        genuinely is no end to subtract from.
+        """
+        formatted = self._format_total_hours(row.get("total_hours"))
+        if formatted != "—":
+            return formatted
+
+        start = _parse_server_ts(row.get("login_time"))
+        end = _parse_server_ts(row.get("logout_time"))
+        if start is None or end is None or end < start:
+            return "—"
+        return _fmt_elapsed((end - start).total_seconds())
 
     def _format_total_hours(self, value):
         """Backend may send None, an HH:MM:SS string, or a dict-like
@@ -5975,6 +6401,7 @@ class _TopHeader(QFrame):
     export_clicked  = Signal()
     sync_clicked    = Signal()
     theme_clicked   = Signal()
+    profile_clicked = Signal()
 
     def __init__(self):
         super().__init__()
@@ -6042,12 +6469,22 @@ class _TopHeader(QFrame):
         cl = QHBoxLayout(chip)
         cl.setContentsMargins(12, 7, 16, 7)
         cl.setSpacing(11)
-        avatar = QLabel("👤")
-        avatar.setFixedSize(32, 32)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet(
-            f"background:{C['bg_elevated']};border-radius:16px;font-size:15px;border:none;"
-        )
+        # THE SAME AVATAR WIDGET THE SIDEBAR USES, not a 👤 drawn here. This
+        # chip used to be a fixed emoji, so the one place an administrator
+        # looks at their own account showed a stranger's outline while their
+        # photograph sat in the sidebar directly below it.
+        avatar = ClickableAvatar(32)
+        # full_name. NOT employee_name, which does not exist on SessionManager
+        # — getattr returned None and the avatar drew a "?" where the person's
+        # initials belong. The same shape of mistake as SessionManager.token,
+        # which is not a thing either, and which cost this panel its
+        # photographs once already.
+        avatar.show_person(getattr(SessionManager, "employee_id", None),
+                           getattr(SessionManager, "full_name", None)
+                           or getattr(SessionManager, "employee_id", None) or "")
+        avatar.setToolTip("My Profile")
+        avatar.clicked.connect(self.profile_clicked.emit)
+        self._chip_avatar = avatar
         who = QVBoxLayout(); who.setSpacing(0)
         self._chip_id = QLabel(getattr(SessionManager, "employee_id", None) or "—")
         self._chip_id.setStyleSheet(
@@ -6295,9 +6732,12 @@ class AdminConfigPanel(QMainWindow):
             )
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
-        self.sidebar.profile_clicked.connect(
-            lambda: self.sidebar.select(
-                next(i for i, page in enumerate(PAGES) if page["key"] == "profile")))
+        def _open_profile():
+            self.sidebar.select(
+                next(i for i, page in enumerate(PAGES) if page["key"] == "profile"))
+
+        self.sidebar.profile_clicked.connect(_open_profile)
+        self.header.profile_clicked.connect(_open_profile)
         self.sidebar.logout_btn.clicked.connect(self.logout)
         self.sidebar.password_btn.clicked.connect(self._change_own_password)
         self.header.refresh_clicked.connect(self._refresh_current_page)
