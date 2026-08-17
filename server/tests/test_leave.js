@@ -208,6 +208,55 @@ async function main() {
         check("approving twice is refused rather than silently repeated",
             res.status === 409, `HTTP ${res.status}`);
 
+        console.log("\nNOBODY DECIDES THEIR OWN LEAVE");
+        // An administrator is an employee too and takes leave like anybody
+        // else. What must not happen is that the same person asks and grants:
+        // an approval is somebody ELSE agreeing, and this was open — an admin
+        // could apply and approve in two clicks, with their own id in
+        // approved_by.
+        res = await api("POST", "/leave", { token: admin, body: {
+            leave_type: "CASUAL", reason: "My own holiday",
+            start_date: dayFromNow(30), end_date: dayFromNow(31) } });
+        check("an admin can apply for leave like anybody else",
+            res.status === 201, `HTTP ${res.status}`);
+        const own = res.body.leave.id;
+
+        res = await api("POST", `/admin/leave/${own}/approve`, { token: admin });
+        check("but cannot approve it themselves", res.status === 403,
+            `HTTP ${res.status}`);
+        check("and is told to ask somebody else",
+            /another administrator/i.test(res.body.message || ""), res.body.message);
+        check("it is still waiting",
+            psql(`SELECT status FROM leave_requests WHERE id=${own}`) === "PENDING");
+        res = await api("POST", `/admin/leave/${own}/reject`,
+            { token: admin, body: { remarks: "changed my mind" } });
+        check("nor reject it", res.status === 403, `HTTP ${res.status}`);
+
+        console.log("\nAN ADMIN'S LEAVE IS THE SUPER ADMIN'S TO DECIDE");
+        // The same hierarchy the rest of the product enforces: an admin
+        // manages employees, and only the super admin manages admins.
+        psql(`INSERT INTO employees (employee_id, username, password, role,
+                                     full_name, created_at)
+              VALUES ('A002','admin2','${hash}','admin','Second Admin',
+                      (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days'),
+                     ('SA01','owner','${hash}','super_admin','The Owner',
+                      (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')`);
+        const admin2 = await login("admin2", "admin2-machine");
+        const owner = await login("owner", "owner-machine");
+
+        res = await api("POST", "/leave", { token: admin2, body: {
+            leave_type: "CASUAL", reason: "A break",
+            start_date: dayFromNow(40), end_date: dayFromNow(41) } });
+        const adminLeave = res.body.leave.id;
+        check("an admin's request is created", res.status === 201, `HTTP ${res.status}`);
+
+        res = await api("POST", `/admin/leave/${adminLeave}/approve`, { token: admin });
+        check("ANOTHER ADMIN CANNOT DECIDE IT", res.status === 403, `HTTP ${res.status}`);
+        check("and is told why",
+            /admin/i.test(res.body.message || ""), res.body.message);
+        res = await api("POST", `/admin/leave/${adminLeave}/approve`, { token: owner });
+        check("the super admin can", res.status === 200, `HTTP ${res.status}`);
+
         console.log("\nAn employee cannot take back an approved one");
         res = await api("POST", `/leave/${second}/cancel`, { token: rajesh });
         check("cancelling approved leave is refused", res.status === 409,

@@ -126,6 +126,14 @@ PAGES = [
     # An administrator is an account like any other, and asked for it in
     # those words: "admin ka bhi profile hona chahiye". The same page the
     # employee panel shows — one screen, so a change to it reaches everybody.
+    # AN ADMIN IS AN EMPLOYEE TOO. They take leave and they are on payroll —
+    # the same pages the employee panel shows, because it is the same person
+    # asking the same questions about themselves. Without these an admin could
+    # approve everybody's leave and had nowhere to ask for their own.
+    {"key": "myleave",     "icon": "🏖️", "title": "My Leave",
+     "subtitle": "Your own time off. An administrator cannot decide their own request — a super admin does."},
+    {"key": "mypayroll",   "icon": "🧾", "title": "My Payroll",
+     "subtitle": "Your own payslips, once a month has been finalised."},
     {"key": "profile",     "icon": "👤", "title": "My Profile",
      "subtitle": "Your account, your devices and your week."},
 ]
@@ -5995,7 +6003,8 @@ class AdminConfigPanel(QMainWindow):
     TAB_ATTRS = (
         "_dashboard_tab", "_alerts_tab", "_config_tab", "_employees_tab",
         "_attendance_tab", "_screenshots_tab", "_teams_tab", "_mychat_tab",
-        "_payroll_tab", "_leave_tab", "_reports_tab", "_logs_tab", "_profile_tab",
+        "_payroll_tab", "_leave_tab", "_reports_tab", "_logs_tab",
+        "_myleave_tab", "_mypayroll_tab", "_profile_tab",
     )
 
     def __init__(self):
@@ -6086,6 +6095,10 @@ class AdminConfigPanel(QMainWindow):
         self._leave_tab       = _LeaveTab()
         self._reports_tab     = _ReportsTab()
         self._logs_tab        = _LogsTab()
+        from client.presentation.windows.leave_page import LeavePage
+        self._myleave_tab     = LeavePage(self)
+        from client.presentation.windows.payroll_page import PayrollPage
+        self._mypayroll_tab   = PayrollPage(self)
         from client.presentation.windows.profile_page import ProfilePage
         self._profile_tab     = ProfilePage(self)
 
@@ -6110,6 +6123,8 @@ class AdminConfigPanel(QMainWindow):
             self._leave_tab,
             self._reports_tab,
             self._logs_tab,
+            self._myleave_tab,
+            self._mypayroll_tab,
             self._profile_tab,
         ):
             self.stack.addWidget(tab)

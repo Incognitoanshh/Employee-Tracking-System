@@ -28,6 +28,8 @@ const pool = require("../config/db");
 const { istToday } = require("../utils/ist_sql");
 const { isNonWorkingDay } = require("../utils/attendance_status");
 const mailer = require("../utils/mailer");
+// One definition of "who may act on whom", shared with admin.controller.
+const { canManage } = require("../middleware/admin.middleware");
 
 const TYPES = ["CASUAL", "SICK", "UNPAID"];
 const OPEN = "PENDING";
@@ -357,7 +359,8 @@ exports.list = async (req, res) => {
 async function loadRequest(id) {
     return (await pool.query(
         `SELECT l.*, l.start_date::text AS start_date, l.end_date::text AS end_date,
-                COALESCE(e.full_name, e.username) AS employee_name, e.email
+                COALESCE(e.full_name, e.username) AS employee_name, e.email,
+                e.role
            FROM leave_requests l
            JOIN employees e ON e.employee_id = l.employee_id
           WHERE l.id = $1`, [id])).rows[0] || null;
@@ -382,6 +385,42 @@ async function decide(req, res, { to, from, verb, past }) {
     try {
         const existing = await loadRequest(id);
         if (!existing) return fail(res, 404, "No such leave request.");
+
+        // NOBODY DECIDES THEIR OWN LEAVE.
+        //
+        // An administrator is an employee too — they take leave like anybody
+        // else, and the apply route does not ask about roles. What it must
+        // not become is a button that grants it: an approval is somebody
+        // ELSE agreeing, and an approval by the person asking is not a
+        // decision, it is a formality with a name on it.
+        //
+        // Left open, this was real: an admin applied and approved in two
+        // clicks, and approved_by carried their own id.
+        //
+        // The super admin is not exempt. They are the owner, and the owner
+        // taking leave is a thing they can simply do — but if it goes through
+        // this system it is recorded as a decision, and a decision needs two
+        // people.
+        if (existing.employee_id === me(req)) {
+            return fail(res, 403,
+                "You cannot decide your own leave request — ask another "
+                + "administrator.");
+        }
+
+        // AN ADMIN'S LEAVE IS THE SUPER ADMIN'S TO DECIDE.
+        //
+        // The owner's rule, and the same hierarchy the rest of the product
+        // already enforces: an admin manages employees, and only the super
+        // admin manages admins. canManage is that rule, in one place, so
+        // leave cannot drift from what an admin may do everywhere else.
+        //
+        // The corner worth naming: with only ONE super admin, their own leave
+        // has nobody to approve it — they are blocked by the self-check
+        // above. That is not an oversight to work around here; it is what
+        // having one owner means. A second super admin can decide the first's.
+        const denial = canManage(req.employee, existing.employee_id, existing.role);
+        if (denial) return fail(res, 403, denial);
+
         if (!from.includes(existing.status)) {
             return fail(res, 409,
                 `That request is ${existing.status.toLowerCase()}, so it cannot be ${past}.`);
