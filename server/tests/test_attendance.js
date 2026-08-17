@@ -139,10 +139,126 @@ async function main() {
         check(`ten rounds leave exactly ONE row open every time`,
             worstOpen === 1,
             `one round left ${worstOpen} open — every extra one is a shift that never ends`);
+        // AND THEY LEAVE ONE ROW ALTOGETHER, not eight.
+        //
+        // This check used to require exactly 8 — one row per call, seven of
+        // them closed the instant they opened. That was the behaviour, so the
+        // test agreed with it, and the customer's own attendance list showed
+        // what it produced: one morning split into four and five pieces of
+        // half an hour each, with 00:00:00 rows between them.
+        //
+        // A shift that is still alive is now RESUMED, so eight simultaneous
+        // starts are one shift, which is what eight simultaneous starts
+        // actually are.
         const total = Number(psql(DB,
             `SELECT COUNT(*) FROM attendance WHERE employee_id = 'E001'`));
-        check("and the ones they replaced were closed, not deleted",
-            total === 8, `${total} rows from the last round`);
+        check("and the eight calls leave ONE shift, not eight fragments",
+            total === 1, `${total} rows from the last round`);
+        const empty = Number(psql(DB,
+            `SELECT COUNT(*) FROM attendance
+              WHERE employee_id = 'E001' AND total_hours < INTERVAL '1 second'`));
+        check("with no zero-length rows left behind", empty === 0,
+            `${empty} rows of 00:00:00 — the litter this used to make`);
+
+        console.log("\nSigning in twice while plainly still at work");
+        // THE LINE BETWEEN RESUMING AND STARTING AGAIN, tested from both
+        // sides, because getting it wrong in either direction is a real cost:
+        // resume too eagerly and the gap somebody was away is billed as work;
+        // resume too rarely and every day fragments into unreadable pieces.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        const first = await api("POST", "/attendance/login",
+            { token: employee, body: {} });
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','KEYBOARD', (NOW() AT TIME ZONE 'UTC'))`);
+        const second = await api("POST", "/attendance/login",
+            { token: employee, body: {} });
+        check("the second start returns the SAME shift",
+            second.body.id === first.body.id,
+            `${first.body.id} then ${second.body.id} — a new id is a new row`);
+        check("and says so, so the client is not guessing",
+            second.body.resumed === true, util.inspect(second.body));
+        check("one row, still open",
+            Number(psql(DB, `SELECT COUNT(*) FROM attendance
+                              WHERE employee_id = 'E001'`)) === 1);
+
+        // The other side: away long enough that the shift is genuinely over.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '6 hours')`);
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','KEYBOARD',
+                          (NOW() AT TIME ZONE 'UTC') - INTERVAL '5 hours')`);
+        const afterGap = await api("POST", "/attendance/login",
+            { token: employee, body: {} });
+        check("a shift gone quiet for hours is NOT resumed",
+            afterGap.body.resumed !== true, util.inspect(afterGap.body));
+        const billed = Number(psql(DB,
+            `SELECT round(EXTRACT(EPOCH FROM total_hours)/3600)
+               FROM attendance
+              WHERE employee_id = 'E001' AND logout_time IS NOT NULL
+              ORDER BY id DESC LIMIT 1`));
+        check("and it is closed at the last evidence, not at this login",
+            billed === 1,
+            `${billed} hours — 6 would be the whole gap, which nobody worked`);
+
+        console.log("\nFiltering by the record's state");
+        // The filter runs in SQL, so the total and the page numbers describe
+        // the rows actually shown. Filtering after the fetch would page over
+        // the unfiltered set — "Page 1, Total: 33" above four visible rows.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        // THE HEARTBEAT IS MOVED, THE SESSION ROW IS LEFT ALONE.
+        //
+        // The first version of this deleted the session and inserted one with
+        // a made-up token — which invalidated the employee's real token, so
+        // every later request came back 401 "Logged in from another device"
+        // and two checks thirty lines below failed for a reason that had
+        // nothing to do with them. Aging last_seen tests the same thing and
+        // breaks nothing.
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() - INTERVAL '1 hour'
+                   WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time, logout_time, total_hours)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '9 hours',
+                                  (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour',
+                                  INTERVAL '8 hours')`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 hours')`);
+
+        const byState = async (state) => {
+            const r = await api("GET",
+                `/attendance/all?employee_id=E001${state ? `&status=${state}` : ""}`,
+                { token: admin });
+            return { rows: (r.body.data || []).length, total: r.body.total };
+        };
+
+        let all = await byState("");
+        check("both rows are there unfiltered", all.rows === 2, JSON.stringify(all));
+        let done = await byState("completed");
+        check("completed finds only the closed one", done.rows === 1, JSON.stringify(done));
+        check("and the TOTAL follows the filter, so paging is honest",
+            done.total === 1, `total said ${done.total} for 1 row`);
+        let abandoned = await byState("incomplete");
+        check("not-signed-out finds the abandoned one", abandoned.rows === 1,
+            JSON.stringify(abandoned));
+        let live = await byState("active");
+        check("active finds neither — no live session", live.rows === 0,
+            JSON.stringify(live));
+
+        psql(DB, `UPDATE active_sessions SET last_seen = NOW() WHERE employee_id = 'E001'`);
+        live = await byState("active");
+        check("and finds it once the heartbeat is there", live.rows === 1,
+            JSON.stringify(live));
+        abandoned = await byState("incomplete");
+        check("which stops it being counted as abandoned", abandoned.rows === 0,
+            JSON.stringify(abandoned));
+        const junk = await byState("'; DROP TABLE attendance; --");
+        check("an unknown filter value is ignored, not interpolated",
+            junk.rows === 2,
+            "anything else here would be a way into the query");
+        check("and the table is still there",
+            Number(psql(DB, `SELECT COUNT(*) FROM attendance`)) >= 2);
+
 
         console.log("\nA shift left open by a crash");
         // Nothing closes a row when an app is killed. The next login must,
