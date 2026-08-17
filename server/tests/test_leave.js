@@ -304,9 +304,15 @@ async function main() {
               VALUES ('E001', '${leaveFrom} 04:00:00', '${leaveFrom} 06:00:00')`);
         const list = await api("GET", "/attendance/all", { token: admin });
         const row = (list.body.data || []).find((r) => r.employee_id === "E001");
-        check("an attendance row on a leave day says On leave",
-            row && row.status === "leave" && /leave/i.test(row.status_label),
-            JSON.stringify(row && { s: row.status, l: row.status_label }));
+        check("an attendance row on a leave day says On Leave",
+            row && row.shift_status === "on_leave" && /leave/i.test(row.shift_label),
+            JSON.stringify(row && { s: row.shift_status, l: row.shift_label }));
+        // The record's own state is a separate question, and answering it
+        // has to keep working: this shift was closed, so it is Completed —
+        // being on leave that day does not change what happened to the row.
+        check("and the record itself still reads Completed",
+            row && row.attendance_status === "completed",
+            JSON.stringify(row && row.attendance_label));
 
         console.log("\nThe dashboard counts what needs doing");
         const dash = await api("GET", "/dashboard/summary", { token: admin });

@@ -174,15 +174,22 @@ async function main() {
             onTime?.status === "on_time", JSON.stringify(onTime?.status_label));
 
         const reconnect = find("2026-08-05 08:00");
-        check("a second sign-in the same day is not judged at all",
-            reconnect?.status === "reconnect", JSON.stringify(reconnect?.status_label));
+        check("a second shift the same day is not judged at all",
+            reconnect?.shift_status === "extra",
+            JSON.stringify(reconnect?.shift_label));
         // AND IT SAYS WHICH KIND OF "not judged" IT IS. A dash here read
         // identically to "no shift configured", so the same person on the
         // same morning saw "On time" on one row and "—" on the next, a
         // minute apart, and reported it as a bug. Two meanings, one symbol.
         check("and it says so in words rather than a dash",
-            reconnect?.status_label === "Signed in again",
-            JSON.stringify(reconnect?.status_label));
+            reconnect?.shift_label === "Extra Session",
+            JSON.stringify(reconnect?.shift_label));
+        // AND IT BORROWS NO WORDS FROM THE COLUMN BESIDE IT. "Signed in
+        // again" sat next to "Not signed out" and the two were read as one
+        // contradictory sentence — which is what split these columns apart.
+        check("using none of the words the record column uses",
+            !/sign/i.test(reconnect?.shift_label || ""),
+            JSON.stringify(reconnect?.shift_label));
         check("no row is left showing a bare dash",
             !(res.body.data || []).some((r) => (r.status_label || "").trim() === "—"),
             JSON.stringify((res.body.data || []).map((r) => r.status_label)));
