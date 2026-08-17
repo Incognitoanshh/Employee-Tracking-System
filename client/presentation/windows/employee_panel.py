@@ -1672,8 +1672,8 @@ class EmployeePanel(QWidget):
 
     def _refresh_current(self):
         if SessionManager.is_token_expired():
-            LoggerService.log("LOGOUT")
-            self.logout()
+            # Named, so this is never confused with somebody closing the app.
+            self.logout("the session had expired")
             return
         page = self._stack.currentWidget()
         if hasattr(page, "refresh"):
@@ -1840,8 +1840,22 @@ class EmployeePanel(QWidget):
 
         # LOGOUT clear_session() se PEHLE log hota hai — warna employee_id
         # None ho jaata hai aur LoggerService chup-chaap drop kar deta hai.
+        #
+        # AND IT SAYS WHICH WAY IT HAPPENED.
+        #
+        # It used to log the bare word "LOGOUT" from four different paths: the
+        # button, the tray's Exit, a session the server had ended, and the
+        # token expiring. On the server they are indistinguishable, and the
+        # lines that would have told them apart — "ChatManager: stopped" and
+        # the rest — are logged AFTER this one and never reach the server,
+        # because the app stops before the queue is uploaded.
+        #
+        # So an administrator seeing a LOGOUT a minute after a LOGIN has no
+        # way to tell "they closed it" from "it signed itself out", which is
+        # exactly the question that came up and could not be answered from
+        # three days of logs.
         try:
-            LoggerService.log("LOGOUT")
+            LoggerService.log(f"LOGOUT : {reason or 'signed out from the panel'}")
         except Exception:
             pass
         for fn in (SessionLogManager.end_session, ShiftManager.end_shift):

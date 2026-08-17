@@ -149,7 +149,9 @@ class SystemTray(QSystemTrayIcon):
         except Exception as error:
             print("[LOGOUT API FAILED]", error)
 
-        LoggerService.log("LOGOUT")
+        # Named: see employee_panel._do_logout. A bare "LOGOUT" from four
+        # different paths cannot be told apart on the server.
+        LoggerService.log("LOGOUT : the app was quit from the menu bar")
         SessionLogManager.end_session()
         ShiftManager.end_shift()
         SessionManager.clear_session()

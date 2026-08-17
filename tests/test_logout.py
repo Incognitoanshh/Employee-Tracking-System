@@ -284,6 +284,39 @@ def main():
               "and the token is dead — calling with it is a wasted round trip "
               "while somebody waits")
 
+    print("\nEvery LOGOUT says which way it happened")
+    # A BARE "LOGOUT" WAS WRITTEN FROM FOUR PATHS: this button, the tray's
+    # Exit, a session the server had ended, and the token expiring. On the
+    # server they are indistinguishable — and the lines that would tell them
+    # apart ("ChatManager: stopped" and the rest) are logged AFTER it and
+    # never arrive, because the app stops before the queue is uploaded.
+    #
+    # A LOGOUT one minute after a LOGIN therefore could not be explained from
+    # three days of production logs. That question came up for real, and the
+    # only honest answer was "the log cannot tell you".
+    #
+    # Checked in the source rather than by driving four different shutdowns:
+    # what matters is that no path can write the bare word again.
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    offenders = []
+    named = []
+    for source in root.joinpath("client").rglob("*.py"):
+        for number, line in enumerate(source.read_text().splitlines(), 1):
+            # Comments talk ABOUT this line; they do not write it.
+            if line.strip().startswith("#"):
+                continue
+            if re.search(r'LoggerService\.log\(\s*[fr]?"LOGOUT"\s*\)', line):
+                offenders.append(f"{source.relative_to(root)}:{number}")
+            # Either a literal reason, or the fallback inside an f-string:
+            #   LoggerService.log(f"LOGOUT : {reason or 'signed out from …'}")
+            named += re.findall(r'"LOGOUT : ([a-z][^"{]*)', line)
+            named += re.findall(r"or '([^']+)'\}", line) if "LOGOUT :" in line else []
+    check("no path logs a bare LOGOUT", not offenders, ", ".join(offenders))
+    check("and every named one says something a person can read",
+          bool(named) and all(len(n.strip()) > 8 for n in named), str(named))
+
     print()
     if failures:
         print(f"{failures} failure(s)")
