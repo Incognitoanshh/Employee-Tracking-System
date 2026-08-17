@@ -699,13 +699,15 @@ class _DirectRow(QPushButton):
         row.setSpacing(8)
 
         person = direct.get("with") or {}
-        initial = QLabel((person.get("name") or "?")[:1].upper())
-        initial.setFixedSize(24, 24)
-        initial.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        initial.setStyleSheet(
-            f"background:{C.PRIMARY};color:{C.ON_ACCENT};border-radius:12px;"
-            f"font-size:11px;font-weight:700;border:none;")
-        row.addWidget(initial)
+        # THE FACE, here too. This row drew its own initials circle and never
+        # asked for a photograph, so the conversation list showed a blue "A"
+        # for somebody whose picture was on every message inside it. The
+        # shared widget does both — the photo when there is one, the initials
+        # until then — and one place decides how a person looks.
+        face = Avatar(24)
+        face.show_person(person.get("employee_id"),
+                         person.get("name") or person.get("username") or "")
+        row.addWidget(face)
 
         column = QVBoxLayout()
         column.setSpacing(0)
