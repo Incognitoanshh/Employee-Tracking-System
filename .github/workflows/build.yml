@@ -6,7 +6,7 @@ name: Build Cross-Platform Desktop Apps
 # is already deployed. This build exists to carry the label into the final
 # round of testing. Still no tag, so the release job below does not run and
 # nothing is published.
-run-name: v1.0.0
+run-name: v1.0.1
 # THE ARTIFACT NAMES NO LONGER CARRY A LABEL, deliberately.
 #
 # They used to ("test-5-Windows-Installer"), and twice a run was renamed
@@ -70,13 +70,17 @@ jobs:
             pip install -r req_win.txt
           )
 
+      # THE ADDRESS BELOW HAS A TWIN in the macOS job, written in a different
+      # shell. Both must say the same thing: if only one is changed, Windows
+      # and Mac talk to different servers, and closing the plain port later
+      # would break exactly one of them — with nothing to explain why.
       - name: Create client .env file
         run: |
           echo APP_NAME=Amaze Connect > client\.env
           echo SCREENSHOT_MIN_INTERVAL=300 >> client\.env
           echo SCREENSHOT_MAX_INTERVAL=600 >> client\.env
           echo IDLE_THRESHOLD=60 >> client\.env
-          echo API_BASE_URL=http://65.21.212.85:8000/api >> client\.env
+          echo API_BASE_URL=https://connect.amazeinternet.com/api >> client\.env
           echo SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }} >> client\.env
 
       - name: Build Windows EXE
@@ -223,7 +227,7 @@ jobs:
           echo "SCREENSHOT_MIN_INTERVAL=300" >> client/.env
           echo "SCREENSHOT_MAX_INTERVAL=600" >> client/.env
           echo "IDLE_THRESHOLD=60" >> client/.env
-          echo "API_BASE_URL=http://65.21.212.85:8000/api" >> client/.env
+          echo "API_BASE_URL=https://connect.amazeinternet.com/api" >> client/.env
           echo "SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }}" >> client/.env
 
       - name: Build Mac Executable

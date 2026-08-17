@@ -155,9 +155,14 @@ curl -fsS "https://$DOMAIN/api/health" && echo
 echo
 echo "═══ NOT DONE YET — REBUILD THE CLIENTS ═══"
 echo
-echo "  Every installed client has the old address compiled into it and is"
-echo "  now talking to a port that is closed. Until they are rebuilt and"
-echo "  reinstalled, nobody can sign in."
+echo "  Every installed client has the old address compiled into it."
+if [ "$KEEP_PLAIN" = "1" ]; then
+    echo "  They go on working for now — 8000 was left open — but over plain"
+    echo "  HTTP, which is what the certificate was meant to end."
+else
+    echo "  They are now talking to a port that is closed. Until they are"
+    echo "  rebuilt and reinstalled, nobody can sign in."
+fi
 echo
 echo "  1. Edit .github/workflows/build.yml, both jobs:"
 echo "       API_BASE_URL=https://$DOMAIN/api"
