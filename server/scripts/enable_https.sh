@@ -90,6 +90,23 @@ sudo nginx -t
 sudo systemctl reload nginx
 echo "  nginx serving $DOMAIN on port 80"
 
+# THE FIREWALL IS OPENED HERE, NOT IN STEP 6 — and that ordering is the whole
+# point of this block.
+#
+# Certbot proves the domain by serving a file over PLAIN HTTP on port 80 and
+# having Let's Encrypt fetch it. If ufw is running and 80 is not allowed, that
+# fetch times out and the certificate is never issued:
+#
+#   Detail: Fetching http://…/.well-known/acme-challenge/…:
+#           Timeout during connect (likely firewall problem)
+#
+# That is exactly what happened the first time this script was run for real.
+# Step 6 below opened 80 and 443 — two steps too late to be of any use.
+if command -v ufw >/dev/null 2>&1; then
+    sudo ufw allow 80,443/tcp >/dev/null 2>&1 || true
+    echo "  80 and 443 allowed through the firewall (certbot needs 80 now)"
+fi
+
 echo
 echo "═══ 4/6  ISSUING THE CERTIFICATE ═══"
 sudo certbot --nginx -d "$DOMAIN" --agree-tos -m "$EMAIL" --redirect --non-interactive
@@ -113,7 +130,6 @@ echo "  TRUST_PROXY=1, server restarted"
 echo
 echo "═══ 6/6  CLOSING THE PLAIN PORT ═══"
 if [ "$KEEP_PLAIN" = "1" ]; then
-    sudo ufw allow 80,443/tcp >/dev/null 2>&1 || true
     echo "  SKIPPED — 8000 is still open, so the clients already installed go on"
     echo "  working while the new build is made and handed out."
     echo
@@ -126,7 +142,7 @@ else
 # reachable from outside, so nobody can bypass TLS by using the old
 # address. Do this LAST — an existing client talking to :8000 breaks here,
 # which is exactly why the rebuild below is not optional.
-sudo ufw allow 80,443/tcp >/dev/null
+# 80 and 443 were opened in step 3, before certbot needed them.
 sudo ufw deny 8000/tcp >/dev/null
 sudo ufw --force enable >/dev/null
 sudo ufw status | head -8
