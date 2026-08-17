@@ -2837,6 +2837,9 @@ class _PayrollTab(QWidget):
         self._totals = _muted_label("")
         footer.addWidget(self._totals)
         footer.addStretch()
+        summary = _btn("Summary…", variant="secondary", height=32, width=110)
+        summary.clicked.connect(self._summary_dialog)
+        footer.addWidget(summary)
         salaries = _btn("Salaries…", variant="secondary", height=32, width=110)
         salaries.clicked.connect(self._salary_dialog)
         footer.addWidget(salaries)
@@ -3060,6 +3063,95 @@ class _PayrollTab(QWidget):
         worker.error.connect(lambda e: QMessageBox.warning(self, "Could not add", str(e)))
         _track_worker(self._workers, worker)
         worker.start()
+
+    def _summary_dialog(self):
+        """The month totalled, and the two things somebody asks about it.
+
+        "What did this month cost" is the first question; "who lost pay, and
+        why" is the second. Both come from one request, so the totals and the
+        breakdown cannot disagree — two queries for the same month is how a
+        report ends up arguing with itself.
+        """
+        month = self._month_box.text().strip()
+        if not month:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Payroll summary — {month}")
+        dialog.setMinimumSize(640, 520)
+        dialog.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        headline = QLabel("Loading…")
+        headline.setWordWrap(True)
+        headline.setStyleSheet(
+            f"color:{C['text_primary']};font-size:13px;background:transparent;")
+        layout.addWidget(headline)
+
+        leave_table = _tune_table(QTableWidget(0, 3))
+        leave_table.setHorizontalHeaderLabels(["Employee", "Unpaid days", "Deducted"])
+        leave_table.horizontalHeader().setStretchLastSection(True)
+        leave_table.verticalHeader().setVisible(False)
+        leave_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        overtime_table = _tune_table(QTableWidget(0, 3))
+        overtime_table.setHorizontalHeaderLabels(["Employee", "Hours", "Paid"])
+        overtime_table.horizontalHeader().setStretchLastSection(True)
+        overtime_table.verticalHeader().setVisible(False)
+        overtime_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        for title, table in (("LOST TO UNPAID LEAVE", leave_table),
+                             ("OVERTIME PAID", overtime_table)):
+            caption = _muted_label(title)
+            layout.addWidget(caption)
+            layout.addWidget(table, 1)
+
+        def fill(data: dict):
+            if not data.get("success"):
+                headline.setText(data.get("message") or "Could not read the summary.")
+                return
+            totals = data.get("totals") or {}
+            headline.setText(
+                f"<b>{month}</b> · {data.get('status', '').title()} · "
+                f"{totals.get('employees', 0)} employees · "
+                f"{data.get('working_days')} working days<br><br>"
+                f"Gross ₹{float(totals.get('gross', 0)):,.2f}"
+                f" · unpaid leave −₹{float(totals.get('unpaid_leave_deduction', 0)):,.2f}"
+                f" · absence −₹{float(totals.get('absent_deduction', 0)):,.2f}"
+                f" · overtime +₹{float(totals.get('overtime_amount', 0)):,.2f}"
+                f" · adjustments ₹{float(totals.get('adjustments', 0)):,.2f}"
+                f"<br><br><b>TOTAL PAYROLL COST: "
+                f"₹{float(totals.get('net', 0)):,.2f}</b>")
+
+            rows = data.get("leave_deductions") or []
+            leave_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                leave_table.setItem(i, 0, _cell(f"{r['name']}  ·  {r['employee_id']}"))
+                leave_table.setItem(i, 1, _cell(f"{float(r['days']):g}", align_right=True))
+                leave_table.setItem(i, 2, _cell(f"₹{float(r['amount']):,.2f}",
+                                                align_right=True))
+
+            rows = data.get("overtime") or []
+            overtime_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                overtime_table.setItem(i, 0, _cell(f"{r['name']}  ·  {r['employee_id']}"))
+                overtime_table.setItem(i, 1, _cell(f"{float(r['hours']):g}",
+                                                   align_right=True))
+                overtime_table.setItem(i, 2, _cell(f"₹{float(r['amount']):,.2f}",
+                                                   align_right=True))
+
+        worker = _FetchWorker(f"{API_BASE_URL}/admin/payroll/{month}/summary")
+        worker.result.connect(fill)
+        worker.error.connect(lambda e: headline.setText(f"Could not read: {e}"))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
 
     def _salary_dialog(self):
         """Who is on what, and setting it."""
@@ -3664,11 +3756,15 @@ class _AlertsTab(QWidget):
 
 class _ReportsTab(QWidget):
 
+    # LEAVE IS ITS OWN COLUMN, beside Absent rather than inside it. They are
+    # different facts about a day and were the same number until leave
+    # existed — which is what made the absence figure unusable for anything
+    # somebody is paid on.
     COLUMNS = [
         ("Employee",    150), ("Shift",       110), ("Working",  80),
-        ("Present",      80), ("Absent",       80), ("Late",     70),
-        ("Late time",   100), ("Total hours", 100), ("Avg/day",  90),
-        ("Idle",         90), ("Screenshots", 100),
+        ("Present",      80), ("Leave",        80), ("Absent",   80),
+        ("Late",         70), ("Late time",   100), ("Total hours", 100),
+        ("Avg/day",      90), ("Idle",         90), ("Screenshots", 100),
     ]
 
     def __init__(self):
@@ -3920,6 +4016,14 @@ class _ReportsTab(QWidget):
             present.setForeground(QColor(C["success"]))
             self._table.setItem(i, 3, present)
 
+            leave_days = row.get("leave_days", 0)
+            leave = _cell(f"{float(leave_days or 0):g}", mono=True, align_right=True)
+            leave.setForeground(QColor(C["accent"] if leave_days else C["text_muted"]))
+            leave_dates = row.get("leave_dates") or []
+            if leave_dates:
+                leave.setToolTip("Approved leave on:\n" + "\n".join(leave_dates))
+            self._table.setItem(i, 4, leave)
+
             absent_days = row.get("absent_days", 0)
             absent = _cell(str(absent_days), mono=True, align_right=True)
             absent.setForeground(QColor(C["danger"] if absent_days else C["text_muted"]))
@@ -3927,18 +4031,18 @@ class _ReportsTab(QWidget):
             if dates:
                 # The count alone prompts "which days?" every single time.
                 absent.setToolTip("Absent on:\n" + "\n".join(dates))
-            self._table.setItem(i, 4, absent)
+            self._table.setItem(i, 5, absent)
 
             late_days = row.get("late_days", 0)
             late = _cell(str(late_days), mono=True, align_right=True)
             late.setForeground(QColor(C["warning"] if late_days else C["text_muted"]))
-            self._table.setItem(i, 5, late)
+            self._table.setItem(i, 6, late)
 
-            self._table.setItem(i, 6, _cell(
-                _fmt_minutes(row.get("late_minutes", 0)), mono=True, align_right=True))
             self._table.setItem(i, 7, _cell(
-                f"{row.get('total_hours', 0):.2f}", mono=True, align_right=True))
+                _fmt_minutes(row.get("late_minutes", 0)), mono=True, align_right=True))
             self._table.setItem(i, 8, _cell(
+                f"{row.get('total_hours', 0):.2f}", mono=True, align_right=True))
+            self._table.setItem(i, 9, _cell(
                 f"{row.get('avg_hours', 0):.2f}", mono=True, align_right=True))
 
             # Only meaningful once every present day has reported one. An
@@ -3957,9 +4061,9 @@ class _ReportsTab(QWidget):
                     idle_cell.setToolTip(
                         f"Partial — {reported} of {present} present day(s) "
                         f"reported idle time.")
-            self._table.setItem(i, 9, idle_cell)
+            self._table.setItem(i, 10, idle_cell)
 
-            self._table.setItem(i, 10, _cell(
+            self._table.setItem(i, 11, _cell(
                 str(row.get("screenshots", 0)), mono=True, align_right=True))
 
         span = data.get("days", 0)
@@ -3981,14 +4085,19 @@ class _ReportsTab(QWidget):
         if not path:
             return
 
+        # LEAVE IS EXPORTED SEPARATELY TOO. The CSV is what somebody opens in
+        # a spreadsheet to work out a month, so it has to draw the same line
+        # the table does — approved leave is not absence.
         headers = ["Employee ID", "Name", "Shift", "Working days", "Present",
+                   "Leave", "Leave dates",
                    "Absent", "Absent dates", "Late days", "Late minutes",
                    "Total hours", "Avg hours per present day",
                    "Idle hours", "Idle days reported", "Screenshots"]
         rows = [[
             r.get("employee_id", ""), r.get("full_name", ""), r.get("shift", ""),
-            r.get("working_days", 0), r.get("present_days", 0), r.get("absent_days", 0),
-            " ".join(r.get("absent_dates") or []),
+            r.get("working_days", 0), r.get("present_days", 0),
+            r.get("leave_days", 0), " ".join(r.get("leave_dates") or []),
+            r.get("absent_days", 0), " ".join(r.get("absent_dates") or []),
             r.get("late_days", 0), r.get("late_minutes", 0),
             f"{r.get('total_hours', 0):.2f}", f"{r.get('avg_hours', 0):.2f}",
             f"{r.get('idle_hours', 0):.2f}", r.get("idle_days_reported", 0),

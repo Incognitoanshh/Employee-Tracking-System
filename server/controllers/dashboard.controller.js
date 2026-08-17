@@ -115,6 +115,34 @@ exports.getAdminSummary = async (req, res) => {
                 )::int AS approved_this_month
                FROM leave_requests`);
 
+        // PAYROLL ON THE DASHBOARD. Two numbers, and the second is the one
+        // that matters: a month generated and never finalised is a month
+        // nobody has been paid for, and it is invisible until somebody
+        // remembers to open the payroll page.
+        const payroll = await pool.query(
+            `SELECT
+                COUNT(*) FILTER (WHERE status = 'FINALIZED')::int AS finalized,
+                COUNT(*) FILTER (WHERE status = 'DRAFT')::int     AS drafts,
+                -- The most recently finalised month's total payout.
+                --
+                -- GROUP BY r2.id, and that is not decoration: without it the
+                -- correlated sum of adjustments refers to a column the outer
+                -- query has not grouped, and Postgres refuses the whole
+                -- statement — which took the dashboard down to NaN rather
+                -- than to an error anybody could see.
+                COALESCE((
+                    SELECT SUM(l.net_before_adjustments)
+                         + COALESCE((SELECT SUM(a.amount) FROM payroll_adjustments a
+                                      WHERE a.run_id = r2.id), 0)
+                      FROM payroll_runs r2
+                      JOIN payroll_lines l ON l.run_id = r2.id
+                     WHERE r2.status = 'FINALIZED'
+                       AND r2.month = (SELECT MAX(month) FROM payroll_runs
+                                        WHERE status = 'FINALIZED')
+                     GROUP BY r2.id
+                ), 0) AS last_payout
+               FROM payroll_runs`);
+
         const mail = await pool.query(
             `SELECT
                 COUNT(*) FILTER (WHERE status = 'sent')::int   AS sent,
@@ -127,6 +155,9 @@ exports.getAdminSummary = async (req, res) => {
             pending_leave:        leave.rows[0].pending,
             on_leave_today:       leave.rows[0].on_leave_today,
             approved_leave_month: leave.rows[0].approved_this_month,
+            payroll_finalized:    payroll.rows[0].finalized,
+            payroll_drafts:       payroll.rows[0].drafts,
+            last_payroll_payout:  Number(payroll.rows[0].last_payout),
             alert_emails_sent:    mail.rows[0].sent,
             alert_emails_failed:  mail.rows[0].failed,
             online_employees: onlineCount,
