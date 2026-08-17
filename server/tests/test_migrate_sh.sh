@@ -44,7 +44,21 @@ echo
 mkdir -p "$WORK/server/scripts" "$WORK/server/migrations"
 cp "$ROOT/server/scripts/migrate.sh" "$WORK/server/scripts/"
 cp "$ROOT/server/migrations/"*.sql "$WORK/server/migrations/"
-printf 'DB_NAME=%s\n' "$DB" > "$WORK/server/.env"
+# A .env SHAPED LIKE THE REAL ONE, which is to say with values that would
+# break a shell if the file were sourced. The mail settings did exactly that
+# the evening they were added:
+#
+#     ./.env: line 15: qlqm: command not found
+#     ./.env: line 16: syntax error near unexpected token `newline'
+#
+# backup.sh and migrate.sh both stopped working, on a file whose only change
+# was an unrelated setting. So the test writes those values in.
+{
+    printf 'DB_NAME=%s\n' "$DB"
+    printf 'SMTP_PASS=abcd efgh ijkl mnop\n'
+    printf 'SMTP_FROM=Amaze Connect <no-reply@example.com>\n'
+    printf 'JWT_SECRET=a secret with spaces & symbols $(not-a-command)\n'
+} > "$WORK/server/.env"
 
 # Ek AppleDouble, waise hi jaise macOS chhodta hai — binary, aur .sql jaisa
 # dikhta hai.
@@ -55,7 +69,7 @@ psql -d postgres -q -c "CREATE DATABASE $DB" >/dev/null
 # Sirf base schema — migrations wahi hain jo script ko lagani hain.
 psql -d "$DB" -q -v ON_ERROR_STOP=1 -f "$ROOT/ets.sql" >/dev/null 2>&1
 
-echo "Ek directory jiske naam me space hai"
+echo "A .env whose values would break a shell that sourced it"
 out="$(cd "$WORK/server" && MIGRATE_NO_SUDO=1 bash scripts/migrate.sh 2>&1)"
 code=$?
 

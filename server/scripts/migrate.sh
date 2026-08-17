@@ -32,12 +32,39 @@ if [ ! -f "$APP_DIR/.env" ]; then
     echo "ERROR: $APP_DIR/.env nahi mili — kya ye sahi jagah se chal raha hai?" >&2
     exit 1
 fi
-set -a
-# shellcheck disable=SC1091
-. "$APP_DIR/.env"
-set +a
+# READ .env, DO NOT SOURCE IT.
+#
+# `set -a; . .env` runs the file as shell. Any value containing a space
+# becomes a command:
+#
+#     SMTP_PASS=vxbh qlqm dtrq cgal
+#       -> ./.env: line 15: qlqm: command not found
+#     SMTP_FROM=Amaze Connect <connect@example.com>
+#       -> ./.env: line 16: syntax error near unexpected token `newline'
+#
+# That is not hypothetical — adding the mail settings broke backup.sh and
+# migrate.sh the same evening, and a backup that fails on the day somebody
+# edits an unrelated line is the worst kind of fragile.
+#
+# Reading the line instead means a value can contain spaces, quotes, angle
+# brackets or anything else without this script caring. It also means the
+# database password and the JWT secret are never put into this shell's
+# environment, which healthcheck.sh has always been careful about.
+env_value() {
+    local key="$1" file="$2" line
+    line="$(grep -m1 -E "^[[:space:]]*${key}=" "$file" 2>/dev/null || true)"
+    [ -n "$line" ] || return 0
+    line="${line#*=}"
+    line="${line%$'\r'}"
+    # Strip one layer of surrounding quotes, if the value has them.
+    case "$line" in
+        \"*\") line="${line#\"}"; line="${line%\"}" ;;
+        \'*\') line="${line#\'}"; line="${line%\'}" ;;
+    esac
+    printf '%s' "$line"
+}
 
-DB="${DB_NAME:-}"
+DB="$(env_value DB_NAME "$APP_DIR/.env")"
 if [ -z "$DB" ]; then
     echo "ERROR: .env me DB_NAME nahi hai." >&2
     exit 1
