@@ -4610,7 +4610,12 @@ class _ReportsTab(QWidget):
         toolbar = _card()
         bar = QHBoxLayout(toolbar)
         bar.setContentsMargins(16, 12, 16, 12)
-        bar.setSpacing(12)
+        # EIGHT, NOT TWELVE. Ten controls on one line — two dates, two
+        # dropdowns, their labels and two buttons — and every gap between
+        # them is paid for nine times. At twelve this row alone pushed the
+        # page past the width of a normal laptop window, and the controls on
+        # the right went behind a horizontal scrollbar.
+        bar.setSpacing(8)
 
         today = QDate.currentDate()
         self._from = QDateEdit(); self._from.setCalendarPopup(True)
@@ -4626,7 +4631,10 @@ class _ReportsTab(QWidget):
 
         self._emp = QComboBox()
         self._emp.setFixedHeight(36)
-        self._emp.setMinimumWidth(200)
+        # 160 is enough for "All employees" and for a name; a combo
+        # elides what does not fit and opens to full width anyway. The extra
+        # forty pixels were bought at the cost of the row fitting at all.
+        self._emp.setMinimumWidth(160)
         self._emp.addItem("All employees", "all")
 
         # Two reports, one page. Attendance answers "how did people do";
