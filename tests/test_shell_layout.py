@@ -214,9 +214,29 @@ print("\nNo page is wider than the window it lives in")
 # 1160 is the content width of a 1440px window beside a 270px sidebar, which
 # is a normal laptop. Anything that overflows THAT overflows for everybody.
 from PySide6.QtCore import QThread  # noqa: E402
+from PySide6.QtGui import QFontMetrics  # noqa: E402
 from PySide6.QtWidgets import QApplication, QScrollArea  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
+
+# THE BUDGET SCALES WITH THE FONT, AND IT HAS TO.
+#
+# These pages are as wide as the text in them, and text is not the same width
+# everywhere: the same tab measured 1124px on macOS and 1204px on the Linux
+# runner, purely because DejaVu is wider than the system font here. Hard-coding
+# 1160 therefore tested "is this Linux?" on CI and "does it fit?" locally,
+# and the first CI run failed on a layout no user will ever see — employees
+# run macOS and Windows.
+#
+# So the budget is 1160 in the font it was calibrated in, adjusted by how much
+# wider or narrower THIS environment draws the same string. The question the
+# check asks stays exactly what it was: does a normal laptop window show every
+# control without a horizontal scrollbar.
+_RULER = "Screenshots per day — every employee, 0123456789"
+_CALIBRATED_RULER_WIDTH = 312      # measured on the machine 1160 came from
+_BUDGET = round(1160 * QFontMetrics(_app.font()).horizontalAdvance(_RULER)
+                / _CALIBRATED_RULER_WIDTH)
+print(f"  (window budget here: {_BUDGET}px — 1160 adjusted for this font)")
 
 
 def _stop_workers(widget):
@@ -252,12 +272,12 @@ for tab_name in ("_ConfigTab", "_AlertsTab", "_ReportsTab"):
         check(f"{tab_name} builds", False, repr(error))
         continue
     tab.setStyleSheet(panel._global_stylesheet())
-    tab.resize(1160, 800)
+    tab.resize(_BUDGET, 800)
     tab.show()
     _app.processEvents()
     scroll = tab.findChild(QScrollArea)
     if scroll is None:
-        check(f"{tab_name} fits its width", tab.sizeHint().width() <= 1160,
+        check(f"{tab_name} fits its width", tab.sizeHint().width() <= _BUDGET,
               f"wants {tab.sizeHint().width()}px")
     else:
         wanted = scroll.widget().sizeHint().width()
