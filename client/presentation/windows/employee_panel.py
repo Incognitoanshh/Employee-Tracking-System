@@ -18,10 +18,10 @@ freeze nahi hoti, chahe server slow ho ya down.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from client.core import http as _http
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, QDate
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QDate, QSize
 from PySide6.QtGui import QCursor, QColor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout,
@@ -30,15 +30,19 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QAbstractItemView, QDialog,
 )
 
-from client.core.config import API_BASE_URL, STORAGE_DIR, APP_VERSION
+from client.core.config import (
+    API_BASE_URL, STORAGE_DIR, APP_VERSION, server_label)
 from client.presentation.theme import (
-    C, R, R_SM, app_style, button, table_style, scrollbar,
+    C, R, R_SM, Radius, Space, Type, Weight,
+    app_style, button, table_style, scrollbar,
 )
 from client.presentation import theme as _theme
+from client.presentation.widgets import icons as _icons
+from client.presentation.widgets.brand import BrandLockup as _BrandLockup
 from client.presentation.windows.leave_page import LeavePage
 from client.presentation.windows.payroll_page import PayrollPage
 from client.presentation.windows.profile_page import ProfilePage
-from client.presentation.widgets.avatar import Avatar, ClickableAvatar, forget as forget_avatar
+from client.presentation.widgets.avatar import ClickableAvatar
 from client.presentation.widgets.panel_widgets import (
     ActivityRow, Card, NavButton, PageHeader, StatCard,
 )
@@ -211,13 +215,13 @@ class DashboardPage(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(14)
-        self.c_tracking = StatCard("🎯", "Tracking Status", C.GREEN, C.GREEN_BG)
-        self.c_activity = StatCard("🖥", "Activity Status", C.BLUE, C.BLUE_BG)
-        self.c_internet = StatCard("🌐", "Internet Status", C.CYAN, C.CYAN_BG)
-        self.c_upload   = StatCard("☁️", "Upload Status", C.PURPLE, C.PURPLE_BG)
-        self.c_session  = StatCard("⏱", "Session Duration", C.AMBER, C.AMBER_BG,
+        self.c_tracking = StatCard("crosshair", "Tracking Status", C.GREEN, C.GREEN_BG)
+        self.c_activity = StatCard("activity", "Activity Status", C.BLUE, C.BLUE_BG)
+        self.c_internet = StatCard("globe", "Internet Status", C.CYAN, C.CYAN_BG)
+        self.c_upload   = StatCard("cloud-upload", "Upload Status", C.PURPLE, C.PURPLE_BG)
+        self.c_session  = StatCard("timer", "Session Duration", C.AMBER, C.AMBER_BG,
                                    sparkline=False)
-        self.c_shots    = StatCard("📸", "Screenshots Today", C.AMBER, C.AMBER_BG)
+        self.c_shots    = StatCard("camera", "Screenshots Today", C.AMBER, C.AMBER_BG)
         for i, card in enumerate((self.c_tracking, self.c_activity, self.c_internet,
                                   self.c_upload, self.c_session, self.c_shots)):
             grid.addWidget(card, i // 3, i % 3)
@@ -234,7 +238,7 @@ class DashboardPage(QWidget):
         head = QHBoxLayout()
         head.setContentsMargins(18, 15, 14, 12)
         title = QLabel("Recent Activity")
-        title.setStyleSheet(f"color:{C.TEXT};font-size:15px;font-weight:700;border:none;")
+        title.setStyleSheet(f"color:{C.TEXT};font-size:16px;font-weight:700;border:none;")
         self._count = QLabel("")
         self._count.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
         view_all = QPushButton("View All")
@@ -435,10 +439,13 @@ class _TablePage(QWidget):
 
         pager = QHBoxLayout()
         pager.setSpacing(10)
-        self._prev = QPushButton("← Prev")
+        self._prev = QPushButton("  Prev")
+        self._prev.setIcon(_icons.icon("chevron-left", 15, C.TEXT))
         self._prev.setStyleSheet(button("secondary"))
         self._prev.clicked.connect(lambda: self.load(self._page - 1))
-        self._next = QPushButton("Next →")
+        self._next = QPushButton("Next  ")
+        self._next.setIcon(_icons.icon("chevron-right", 15, C.TEXT))
+        self._next.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._next.setStyleSheet(button("secondary"))
         self._next.clicked.connect(lambda: self.load(self._page + 1))
         self._page_label = QLabel("")
@@ -567,7 +574,8 @@ class AttendancePage(_TablePage):
                 self._table.setItem(i, 2, QTableWidgetItem(
                     logout.astimezone(IST).strftime("%I:%M:%S %p")))
             else:
-                active = QTableWidgetItem("● ACTIVE")
+                active = QTableWidgetItem("  ACTIVE")
+                active.setIcon(_icons.icon("dot", 10, C.GREEN))
                 active.setForeground(QColor(C.GREEN))
                 self._table.setItem(i, 2, active)
 
@@ -739,7 +747,11 @@ class ScreenshotsPage(_TablePage):
         for i, row in enumerate(rows):
             self._table.setItem(i, 0, QTableWidgetItem(fmt_ist(row.get("created_at"))))
             self._table.setItem(i, 1, QTableWidgetItem(str(row.get("file_name", ""))[:44]))
-            status = QTableWidgetItem("● Encrypted")
+            # The mark is an ICON on the cell, not a character in its text:
+            # a table item's font is the table's, so "●" was drawn at whatever
+            # size the row happened to use.
+            status = QTableWidgetItem("  Encrypted")
+            status.setIcon(_icons.icon("dot", 10, C.GREEN))
             status.setForeground(QColor(C.GREEN))
             self._table.setItem(i, 2, status)
 
@@ -828,7 +840,7 @@ class SettingsPage(QWidget):
 
         heading = QLabel(title.upper())
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:700;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:700;"
             f"letter-spacing:1px;border:none;"
         )
         layout.addWidget(heading)
@@ -864,7 +876,7 @@ class SettingsPage(QWidget):
         if note:
             hint = QLabel(note)
             hint.setWordWrap(True)
-            hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+            hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
             layout.addWidget(hint)
         return card
 
@@ -1001,7 +1013,7 @@ class SettingsPage(QWidget):
             base = label.styleSheet()
             label.setStyleSheet(
                 f"color:{C.GREEN};font-size:13px;font-weight:700;"
-                f"background:{C.GREEN_BG};border-radius:4px;padding:1px 6px;"
+                f"background:{C.GREEN_BG};border-radius:12px;padding:1px 6px;"
             )
             QTimer.singleShot(2500, lambda l=label, s=base: l.setStyleSheet(s))
 
@@ -1061,7 +1073,7 @@ class HelpPage(QWidget):
             layout.setContentsMargins(18, 14, 18, 14)
             layout.setSpacing(6)
             q = QLabel(question)
-            q.setStyleSheet(f"color:{C.TEXT};font-size:14px;font-weight:700;border:none;")
+            q.setStyleSheet(f"color:{C.TEXT};font-size:13px;font-weight:700;border:none;")
             a = QLabel(answer)
             a.setWordWrap(True)
             a.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:13px;border:none;")
@@ -1074,7 +1086,7 @@ class HelpPage(QWidget):
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(6)
         heading = QLabel("Need help?")
-        heading.setStyleSheet(f"color:{C.TEXT};font-size:14px;font-weight:700;border:none;")
+        heading.setStyleSheet(f"color:{C.TEXT};font-size:13px;font-weight:700;border:none;")
         text = QLabel(
             "Contact your system administrator for anything related to your shift "
             "timings, monitoring settings or account access. Include your Employee "
@@ -1208,51 +1220,59 @@ class EmployeePanel(QWidget):
         col.setContentsMargins(16, 22, 16, 16)
         col.setSpacing(6)
 
+        # The same lock-up the admin console shows, from widgets/brand.py.
+        # This was a flat blue tile with a shield glyph in it; the glyph went
+        # out with the emoji and left an empty blue square, which is a fair
+        # description of what it had always been.
         brand = QHBoxLayout()
-        brand.setSpacing(12)
-        logo = QLabel("🛡")
-        logo.setFixedSize(44, 44)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet(
-            f"background:{C.PRIMARY_DIM};border-radius:12px;font-size:20px;border:none;"
-        )
-        names = QVBoxLayout()
-        names.setSpacing(0)
-        title = QLabel("AMAZE")
-        title.setStyleSheet(
-            f"color:{C.PRIMARY};font-size:19px;font-weight:800;"
-            f"letter-spacing:1px;border:none;"
-        )
-        sub = QLabel("CONNECT")
-        sub.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:9px;font-weight:700;"
-            f"letter-spacing:1.4px;border:none;"
-        )
-        names.addWidget(title)
-        names.addWidget(sub)
-        brand.addWidget(logo)
-        brand.addLayout(names)
-        brand.addStretch()
+        brand.setContentsMargins(0, 0, 0, 0)
+        brand.addWidget(_BrandLockup("Employee Panel", 40))
         col.addLayout(brand)
         col.addSpacing(24)
 
+        # GROUPED, THE SAME WAY THE ADMIN CONSOLE IS.
+        #
+        # Ten entries in one column with nothing between them made Attendance
+        # (what the company records about you) sit next to Activity Logs
+        # (what the software recorded on your machine) with no hint that they
+        # are different kinds of thing. The headings do that work.
+        #
+        # The order is what an employee opens most: their own day first, the
+        # record of it next, the team after that, and the account last.
         self._nav: dict[str, NavButton] = {}
-        for key, icon, label in (
-            ("dashboard", "🏠", "Dashboard"),
-            ("team", "💬", "Team"),
-            ("attendance", "📅", "Attendance"),
-            ("logs", "📋", "Activity Logs"),
-            ("screenshots", "📷", "Screenshots"),
-            ("leave", "🌴", "My Leave"),
-            ("payroll", "💰", "My Payroll"),
-            ("profile", "👤", "My Profile"),
-            ("settings", "⚙", "Settings"),
-            ("help", "❓", "Help & Support"),
+        for heading, entries in (
+            ("MY WORK", (
+                ("dashboard", "layout-dashboard", "Dashboard"),
+                ("attendance", "calendar-days", "Attendance"),
+                ("leave", "umbrella", "My Leave"),
+                ("payroll", "wallet", "My Payroll"),
+            )),
+            ("MY ACTIVITY", (
+                ("logs", "clipboard-list", "Activity Logs"),
+                ("screenshots", "camera", "Screenshots"),
+            )),
+            ("TEAM", (
+                ("team", "messages-square", "Team"),
+            )),
+            ("ACCOUNT", (
+                ("profile", "user", "My Profile"),
+                ("settings", "settings", "Settings"),
+                ("help", "circle-help", "Help & Support"),
+            )),
         ):
-            btn = NavButton(icon, label)
-            btn.clicked.connect(lambda _=False, k=key: self.go(k))
-            col.addWidget(btn)
-            self._nav[key] = btn
+            label = QLabel(heading)
+            label.setStyleSheet(
+                f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;"
+                f"font-weight:{Weight.BOLD};letter-spacing:0.8px;"
+                f"background:transparent;border:none;")
+            label.setContentsMargins(6, 0, 0, 2)
+            col.addSpacing(Space.SM)
+            col.addWidget(label)
+            for key, icon, text in entries:
+                btn = NavButton(icon, text)
+                btn.clicked.connect(lambda _=False, k=key: self.go(k))
+                col.addWidget(btn)
+                self._nav[key] = btn
 
         col.addStretch()
 
@@ -1266,16 +1286,24 @@ class EmployeePanel(QWidget):
         fl.setSpacing(7)
         ver = QLabel(f"ETS Client v{APP_VERSION}")
         ver.setStyleSheet(f"color:{C.TEXT};font-size:12px;font-weight:700;border:none;")
-        self._srv_label = QLabel("● Connected to Server")
-        self._srv_label.setStyleSheet(f"color:{C.GREEN};font-size:11px;border:none;")
-        enc = QLabel("🔒 AES-256 GCM Encrypted")
-        enc.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+        # THE HOST, NOT A REASSURANCE. This said "Connected to Server"
+        # whatever it was connected to; an employee on a test build and one
+        # on production read the same line. Shared with the admin console so
+        # the two cannot describe the same setup differently.
+        self._srv_label = QLabel(server_label())
+        self._srv_label.setToolTip(API_BASE_URL)
+        self._srv_label.setStyleSheet(
+            f"color:{C.GREEN};font-size:{Type.MICRO}px;border:none;")
+        enc = QLabel(" AES-256 GCM Encrypted")
+        enc.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
         fl.addWidget(ver)
         fl.addWidget(self._srv_label)
         fl.addWidget(enc)
         col.addWidget(footer)
 
-        logout = QPushButton("  ⏻   Logout")
+        logout = QPushButton("   Logout")
+        logout.setIcon(_icons.icon("log-out", 16, C.RED))
+        logout.setIconSize(QSize(16, 16))
         logout.setStyleSheet(button("danger"))
         logout.setCursor(Qt.CursorShape.PointingHandCursor)
         logout.setFixedHeight(42)
@@ -1308,7 +1336,7 @@ class EmployeePanel(QWidget):
         who.setSpacing(2)
         self._name = QLabel(getattr(SessionManager, "full_name", None)
                             or SessionManager.employee_id or "Employee")
-        self._name.setStyleSheet(f"color:{C.TEXT};font-size:21px;font-weight:800;")
+        self._name.setStyleSheet(f"color:{C.TEXT};font-size:24px;font-weight:800;")
         designation = getattr(SessionManager, "designation", None) or "Employee"
         self._sub = QLabel(f"{SessionManager.employee_id}  ·  {designation}")
         self._sub.setStyleSheet(f"color:{C.PRIMARY};font-size:13px;font-weight:600;")
@@ -1335,7 +1363,7 @@ class EmployeePanel(QWidget):
         )
 
         self._theme_btn = QPushButton()
-        self._theme_btn.setFixedSize(56, 56)
+        self._theme_btn.setFixedSize(44, 44)
         self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._paint_theme_button()
         self._theme_btn.clicked.connect(self._toggle_theme)
@@ -1352,14 +1380,25 @@ class EmployeePanel(QWidget):
 
     # ── theme ───────────────────────────────────────────────────────────
     def _paint_theme_button(self):
+        """Show the theme you would GET, not the one you are on.
+
+        It was a ☾ / ☀ character. Those are emoji on macOS — drawn by the
+        system's colour font, at its weight, not the interface's — and they
+        were removed along with every other one. The icon name is also what
+        the tests read now, which is more honest than reading a glyph.
+        """
         light = _theme.is_light()
-        self._theme_btn.setText("☀" if light else "☾")
+        self._theme_icon = "moon" if light else "sun"
+        self._theme_btn.setText("")
+        self._theme_btn.setIcon(_icons.icon(self._theme_icon, 18, C.TEXT_MUTED))
+        self._theme_btn.setIconSize(QSize(18, 18))
         self._theme_btn.setToolTip(
             "Switch to the dark theme" if light else "Switch to the light theme")
         self._theme_btn.setStyleSheet(
             f"QPushButton {{ background:{C.CARD};border:1px solid {C.BORDER};"
-            f"border-radius:{R_SM}px;font-size:20px;color:{C.TEXT}; }}"
-            f"QPushButton:hover {{ border-color:{C.PRIMARY}; }}")
+            f"border-radius:{Radius.CONTROL}px; }}"
+            f"QPushButton:hover {{ background:{C.HOVER};"
+            f"border-color:{C.PRIMARY}; }}")
 
     def _toggle_theme(self):
         """Switch palette, then build the whole panel again.
@@ -1370,11 +1409,37 @@ class EmployeePanel(QWidget):
         """
         current = self._stack.currentWidget()
         page_key = next((k for k, v in self.pages.items() if v is current), "dashboard")
+
+        # THE CHAT'S OWN STATE, CARRIED ACROSS THE REBUILD.
+        #
+        # The page was already preserved; what was inside it was not. Reported
+        # from use: a conversation was open, the theme was switched, and the
+        # chat closed — taking a half-typed message with it. Which channel was
+        # open and what had been typed are the two things a person notices
+        # losing, so they are the two things that travel.
+        chat_state = None
+        page = self.pages.get("team")
+        if page is not None and hasattr(page, "snapshot"):
+            try:
+                chat_state = page.snapshot()
+            except Exception:
+                chat_state = None
+
         _theme.toggle_theme()
+        # The icons are pixmaps baked at one colour, so the cache holds the
+        # OLD theme's glyphs until it is dropped.
+        _icons.clear_cache()
         self.setStyleSheet(app_style())
         self._teardown_pages()
         self._build()
         self.go(page_key)
+
+        fresh = self.pages.get("team")
+        if chat_state and fresh is not None and hasattr(fresh, "restore"):
+            try:
+                fresh.restore(chat_state)
+            except Exception:
+                pass
 
         # Repaint the cards the TIMERS own, rather than leaving them blank
         # until the next tick.
@@ -1644,10 +1709,14 @@ class EmployeePanel(QWidget):
 
     def mark_server(self, ok: bool):
         self._server_ok = ok
-        self._srv_label.setText("● Connected to Server" if ok else "● Server unreachable")
+        # THE HOST EITHER WAY. Unreachable is about the connection, not about
+        # which server — and "● Server unreachable" left somebody unable to
+        # tell whether the wrong address had been configured or the right one
+        # was down.
+        self._srv_label.setText(
+            server_label() if ok else f"{server_label()}  ·  unreachable")
         self._srv_label.setStyleSheet(
-            f"color:{C.GREEN if ok else C.RED};font-size:11px;border:none;"
-        )
+            f"color:{C.GREEN if ok else C.RED};font-size:{Type.MICRO}px;border:none;")
         card = self.pages["dashboard"].c_upload
         if ok:
             card.set_value("SYNCED", C.PURPLE)
@@ -1662,7 +1731,13 @@ class EmployeePanel(QWidget):
         tracking = getattr(self, "scheduler", None) is not None
         online = self._online and self._server_ok
         colour = C.GREEN if online else C.AMBER
-        text = "● ONLINE\nTracking Active" if online else "● OFFLINE\nBuffering locally"
+        # NO DOT IN FRONT. It was "● ONLINE", a character from the text font
+        # sitting on the baseline of the first of two lines — never level
+        # with the word beside it. The chip is ALREADY coloured green or
+        # amber and already says the word, so the dot was a third telling of
+        # the same thing. (A QLabel cannot carry an icon, so drawing one here
+        # would have meant a second widget for no gain.)
+        text = "ONLINE\nTracking Active" if online else "OFFLINE\nBuffering locally"
         chip = getattr(self, "_status_chip", None)
         if chip is not None:
             chip.setText(text)

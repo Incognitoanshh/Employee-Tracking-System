@@ -114,15 +114,15 @@ class ScreenshotPreviewWindow(BaseWindow):
         layout.addLayout(meta_layout)
 
         controls = QHBoxLayout()
-        zoom_in = QPushButton("➕ Zoom In")
-        zoom_out = QPushButton("➖ Zoom Out")
+        zoom_in = QPushButton(" Zoom In")
+        zoom_out = QPushButton(" Zoom Out")
         zoom_in.clicked.connect(self.zoom_in)
         zoom_out.clicked.connect(self.zoom_out)
         controls.addWidget(zoom_in)
         controls.addWidget(zoom_out)
         controls.addStretch()
 
-        close_btn = QPushButton("✕ Close")
+        close_btn = QPushButton(" Close")
         close_btn.clicked.connect(self.close)
         controls.addWidget(close_btn)
         layout.addLayout(controls)

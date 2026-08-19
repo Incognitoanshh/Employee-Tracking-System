@@ -72,15 +72,28 @@ def stylesheets(root: QWidget) -> str:
 # Colours unique to one theme — the ones whose presence proves a widget was
 # built under it. Shared values (pure white, the accents that appear in both)
 # are excluded, or every check would trip on a legitimate match.
-DARK_ONLY = ["#0a0e1a", "#0d1220", "#111827", "#1a2337", "#e8edf7", "#0a0e16"]
-LIGHT_ONLY = ["#e7edf5", "#0f172a", "#f4f7fb", "#c8d4e4", "#e2e9f3"]
+# DERIVED FROM THE PALETTES THEMSELVES, not typed out here.
+#
+# These were six hard-coded hex values from the palette as it stood the day
+# the test was written. The design system was then rebuilt against a new
+# brief and every one of them changed, so the test failed while the code was
+# correct — the worst kind of failure, because the obvious fix is to weaken
+# the test. Reading the palettes means the markers cannot go stale.
+#
+# Only opaque hex values are usable as markers: an rgba() wash appears in
+# both palettes at different alphas and proves nothing.
+def _hexes(palette):
+    return {v.lower() for v in palette.values()
+            if isinstance(v, str) and v.startswith("#") and len(v) == 7}
 
-# Sanity: a colour in both palettes proves nothing and would make the
-# checks below fail for the wrong reason. #0f172a was in both — the dark
-# console's alternate surface and the light panel's text — until the
-# former was changed.
-for _shared in set(DARK_ONLY) & set(LIGHT_ONLY):
-    raise SystemExit(f"{_shared} is in both palettes; pick another marker")
+_dark_hexes = _hexes(theme._DARK) | _hexes(theme._ADMIN_DARK)
+_light_hexes = _hexes(theme._LIGHT) | _hexes(theme._ADMIN_LIGHT)
+
+DARK_ONLY = sorted(_dark_hexes - _light_hexes)
+LIGHT_ONLY = sorted(_light_hexes - _dark_hexes)
+
+if not DARK_ONLY or not LIGHT_ONLY:
+    raise SystemExit("the two palettes share every colour; nothing to test")
 
 
 def strays(text: str, colours: list) -> list:
@@ -100,10 +113,12 @@ def main():
     check("and the admin one moves with it",
           ADMIN["bg_app"] != dark_admin, f"{ADMIN['bg_app']} vs {dark_admin}")
 
+    # Compared against the palettes, not against two hex values typed here.
+    # The literals went stale the moment the design system was rebuilt.
     check("light text is dark, and dark text is light",
-          C.TEXT == "#0f172a", C.TEXT)
+          C.TEXT == theme._LIGHT["TEXT"], C.TEXT)
     theme.set_theme("dark")
-    check("and back again", C.TEXT == "#e8edf7", C.TEXT)
+    check("and back again", C.TEXT == theme._DARK["TEXT"], C.TEXT)
 
     # A dict rebound instead of mutated would leave admin_config_panel — which
     # binds `C = ADMIN` at import — pointing at the previous colours forever.
@@ -112,7 +127,7 @@ def main():
           ADMIN_C is ADMIN)
     theme.set_theme("light")
     check("so switching reaches it without re-importing anything",
-          ADMIN_C["bg_app"] == "#e7edf5", ADMIN_C["bg_app"])
+          ADMIN_C["bg_app"] == theme._ADMIN_LIGHT["bg_app"], ADMIN_C["bg_app"])
     theme.set_theme("dark")
 
     # ── the trap that started this ──────────────────────────────────────
@@ -121,13 +136,24 @@ def main():
     # imported — so every scrollbar would keep the dark background for the
     # life of the process no matter how many times the theme changed.
     theme.set_theme("light")
+    # Against the palettes rather than against literals, for the reason
+    # written above DARK_ONLY.
+    # NOT theme._DARK["BG"] as the marker. The light theme's TEXT is
+    # #09090b and so is the dark theme's BG — near-black is near-black — so
+    # that value proves nothing about which palette is in force. The derived
+    # DARK_ONLY list holds only values that appear in one palette and not
+    # the other, which is the whole point of computing it.
+    _light_bg = theme._LIGHT["BG"]
     check("scrollbar() with no argument follows the current theme",
-          "#0a0e1a" not in theme.scrollbar(), theme.scrollbar()[:70])
+          strays([theme.scrollbar()], DARK_ONLY) == [], theme.scrollbar()[:70])
     check("and app_style() does too",
-          "#0a0e1a" not in theme.app_style() and "#e7edf5" in theme.app_style())
+          strays([theme.app_style()], DARK_ONLY) == []
+          and _light_bg in theme.app_style(),
+          str(strays([theme.app_style()], DARK_ONLY)))
     theme.set_theme("dark")
     check("in the other direction as well",
-          "#0a0e1a" in theme.scrollbar())
+          strays([theme.scrollbar()], LIGHT_ONLY) == [],
+          str(strays([theme.scrollbar()], LIGHT_ONLY)))
 
     # ── a real panel, walked end to end ─────────────────────────────────
     print("\nA whole panel, widget by widget")
@@ -181,12 +207,36 @@ def main():
           f"{panel.layout().count() if panel.layout() else 0} items, "
           f"{panel._stack.count()} pages")
 
+    # BY ICON NAME, NOT BY GLYPH. It was ☾ / ☀ — emoji, drawn by the system
+    # font, and removed with the rest of them. The name the button asked for
+    # is a better thing to assert than the character it happened to contain.
     check("the button offers the theme you are not on",
-          panel._theme_btn.text() == "☾", panel._theme_btn.text())
+          panel._theme_icon == "sun", panel._theme_icon)
     panel._toggle_theme()
-    check("and flips when you take it", panel._theme_btn.text() == "☀",
-          panel._theme_btn.text())
+    check("and flips when you take it", panel._theme_icon == "moon",
+          panel._theme_icon)
     panel._toggle_theme()
+
+    print("\nThe chat survives the switch")
+    # REPORTED FROM USE: a conversation was open, the theme was switched, and
+    # the chat closed — with a half-typed message in it. The page was already
+    # preserved; what was inside it was not, and the two things a person
+    # notices losing are the open channel and the draft.
+    chat_page = panel.pages.get("team")
+    if chat_page is not None and hasattr(chat_page, "snapshot"):
+        chat_page._channel_id = 4242
+        chat_page._composer.setPlainText("half typed, not sent")
+        panel._toggle_theme()
+        after = panel.pages.get("team")
+        check("the channel that was open is open again",
+              after._channel_id == 4242, str(after._channel_id))
+        check("and the draft is still there",
+              after._composer.toPlainText() == "half typed, not sent",
+              repr(after._composer.toPlainText()))
+        panel._toggle_theme()
+    else:
+        check("the chat page exposes snapshot/restore", False,
+              "without them a theme switch discards the conversation")
 
     # ── what a rebuild must not break ───────────────────────────────────
     print("\nWhat survives the rebuild")

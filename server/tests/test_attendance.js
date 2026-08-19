@@ -260,6 +260,113 @@ async function main() {
             Number(psql(DB, `SELECT COUNT(*) FROM attendance`)) >= 2);
 
 
+        console.log("\nSearching by name, and over a range of days");
+        // A NAME IS WHAT PEOPLE KNOW. The box matched an exact employee id
+        // only, so an administrator who knew somebody as "Rajesh" had to
+        // leave the page, find the id, and come back.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time, logout_time)
+                  VALUES ('E001','2026-07-02 04:00:00','2026-07-02 12:00:00'),
+                         ('E001','2026-07-10 04:00:00','2026-07-10 12:00:00'),
+                         ('E001','2026-08-01 04:00:00','2026-08-01 12:00:00')`);
+
+        const search = async (query) =>
+            ((await api("GET", `/attendance/all?${query}`, { token: admin }))
+                .body.total);
+
+        check("a full name finds the rows", await search("employee_id=Rajesh") === 3,
+            String(await search("employee_id=Rajesh")));
+        check("so does part of it, in any case",
+            await search("employee_id=raj") === 3);
+        check("and the id still works exactly",
+            await search("employee_id=E001") === 3);
+        check("a name nobody has finds nothing rather than everything",
+            await search("employee_id=zzz") === 0,
+            "an unmatched filter that returns the whole table is worse than "
+            + "an empty page");
+
+        // THE RANGE. One day at a time made "last week" seven searches.
+        check("a range covers both its ends",
+            await search("from=2026-07-01&to=2026-07-31&employee_id=E001") === 2,
+            String(await search("from=2026-07-01&to=2026-07-31&employee_id=E001")));
+        check("the ends are inclusive",
+            await search("from=2026-07-02&to=2026-07-02&employee_id=E001") === 1);
+        check("an open start means everything up to a day",
+            await search("to=2026-07-05&employee_id=E001") === 1);
+        check("an open end means everything since one",
+            await search("from=2026-07-05&employee_id=E001") === 2);
+        check("and the total follows the range, so paging stays honest",
+            await search("from=2026-08-01&to=2026-08-01&employee_id=E001") === 1);
+
+        console.log("\nYesterday's shift does not become today's");
+        // REPORTED FROM THE RUNNING APP. An admin's panel was left open
+        // overnight, so activity kept arriving; the shift opened at 18:19 was
+        // still open the next morning and the page read "Active, 15:39:18".
+        // One row across two days, and fifteen hours that payroll would have
+        // treated as worked.
+        //
+        // Resuming was judged on recent evidence alone. A shift belongs to
+        // the day it started.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        // Opened yesterday evening, with activity a minute ago — the exact
+        // shape of an app that was never closed.
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', ((NOW() AT TIME ZONE 'Asia/Kolkata')::date
+                                   - INTERVAL '1 day' + INTERVAL '18 hours')
+                                  AT TIME ZONE 'Asia/Kolkata')`);
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','KEYBOARD',
+                          (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 minute')`);
+
+        const overnight = await api("POST", "/attendance/login",
+            { token: employee, body: {} });
+        check("it is NOT resumed", overnight.body.resumed !== true,
+            util.inspect(overnight.body));
+        // AND IT IS NOT CLOSED AT THIS MORNING'S ACTIVITY EITHER.
+        //
+        // Reported from the running app: the shift was closed correctly, at
+        // the newest evidence — which was 11:13 the NEXT day, because the
+        // panel had been left running overnight writing idle and active
+        // rows. It recorded 15:56:17, and that goes to payroll as worked.
+        // Tomorrow cannot say when somebody stopped yesterday.
+        const overnightHours = Number(psql(DB,
+            `SELECT COALESCE(round(EXTRACT(EPOCH FROM total_hours)/3600), 0)
+               FROM attendance
+              WHERE employee_id = 'E001' AND logout_time IS NOT NULL
+              ORDER BY id DESC LIMIT 1`));
+        check("and yesterday's shift is not billed into this morning",
+            overnightHours <= 6,
+            `${overnightHours} hours recorded for an evening shift`);
+        check("yesterday's row is closed",
+            Number(psql(DB, `SELECT COUNT(*) FROM attendance
+                              WHERE employee_id = 'E001'
+                                AND logout_time IS NULL`)) === 1,
+            "exactly one open row, and it must be today's");
+        const today = psql(DB,
+            `SELECT to_char((login_time AT TIME ZONE 'UTC')
+                            AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')
+               FROM attendance
+              WHERE employee_id = 'E001' AND logout_time IS NULL`);
+        const nowDay = psql(DB,
+            `SELECT to_char(NOW() AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')`);
+        check("and the open one started today", today === nowDay,
+            `${today} vs ${nowDay}`);
+        const spanned = Number(psql(DB,
+            `SELECT COUNT(*) FROM attendance
+              WHERE employee_id = 'E001' AND total_hours > INTERVAL '14 hours'`));
+        check("no row spans the night", spanned === 0,
+            `${spanned} row(s) longer than fourteen hours`);
+
+        // CLEAN UP AFTER THIS BLOCK. The minute-old activity row above is
+        // what makes the shift look alive, and the force-logout checks below
+        // close a shift AT ITS LAST EVIDENCE — they would find this one and
+        // close two-day-old shifts at "now". A section that leaves state
+        // behind breaks a section thirty lines away, which is the hardest
+        // kind of failure to read.
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+
         console.log("\nA shift left open by a crash");
         // Nothing closes a row when an app is killed. The next login must,
         // or presence starts calling a working employee abandoned.
@@ -440,6 +547,17 @@ async function main() {
         // app was CLOSED, and only then did the administrator press the
         // button. The heartbeat counts as evidence too, so it has to be old
         // for the activity line to be the last thing known.
+        // THE SLATE IS CLEARED FIRST, and this is not tidiness.
+        //
+        // An earlier block leaves an activity row at NOW - 2 days. This block
+        // pins its own evidence to a FIXED date, 2026-08-16, and asserts the
+        // shift closes there. The two only collide when "two days ago"
+        // happens to BE 2026-08-16 — so this test passed every day except
+        // one, and failed on that day for a reason nothing in it explains.
+        //
+        // Found while chasing a different bug, on the one day it could
+        // appear.
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
         psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
                   VALUES ('E001','USER ACTIVE','2026-08-16 04:00:00')`);
         psql(DB, `UPDATE active_sessions SET last_seen = '2026-08-16 03:30:00+00'

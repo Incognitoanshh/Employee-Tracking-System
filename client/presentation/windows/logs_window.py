@@ -1,7 +1,7 @@
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QHeaderView, QAbstractItemView, QMessageBox, QLineEdit,
@@ -14,6 +14,11 @@ from client.application.managers.session_manager import SessionManager
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 
 from client.core.time_ist import IST  # single source of truth
+from client.presentation.theme import C, Space, Type, button, input_style, table_style
+from client.presentation.widgets import icons as _icons
+# USED TWICE IN THIS FILE AND NEVER IMPORTED — opening the Logs window
+# raised NameError inside setup_ui, so the window never appeared.
+from client.presentation.widgets.panel_widgets import fit_columns
 
 def _sort_key(ts) -> datetime:
     """
@@ -103,7 +108,7 @@ class _LoadLogsWorker(QObject):
                     continue
                 if self._employee_filter and emp_id != self._employee_filter:
                     continue
-                total_logs.append([emp_id, "📸 SCREENSHOT", timestamp, None])
+                total_logs.append([emp_id, " SCREENSHOT", timestamp, None])
 
             # BUG FIX: pehle `key=lambda x: str(x[2])` tha — yaani timestamps
             # ko STRING ki tarah sort kiya jaata tha. idle_logs aur
@@ -149,17 +154,31 @@ class LogsWindow(BaseWindow):
 
     def setup_ui(self):
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(Space.LG, Space.LG, Space.LG, Space.LG)
+        main_layout.setSpacing(Space.MD)
 
         title = QLabel("Employee Activity Logs")
-        title.setStyleSheet("font-size: 32px; font-weight: bold; color: white; margin-bottom: 20px;")
+        # ON THE SCALE, LIKE EVERY OTHER PAGE TITLE. This was 32px bold in
+        # plain white with a 20px margin — a size the type scale does not
+        # have, a colour the palette does not name, and a margin nothing else
+        # uses. It was the last window still drawing itself.
+        title.setStyleSheet(
+            f"font-size:{Type.TITLE}px;font-weight:700;color:{C.TEXT};"
+            f"background:transparent;")
 
         filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(Space.SM)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("🔍 Search logs...")
+        self.search_box.setPlaceholderText("Search logs…")
+        # The inputs took whatever Qt gives on a dark window — a light field
+        # with a black native arrow. input_style() is what every other filter
+        # row in the product uses.
+        self.search_box.setStyleSheet(input_style())
 
         self.filter_box = QComboBox()
         self.filter_box.addItems(["All", "Screenshots", "Idle", "Active"])
+        self.filter_box.setStyleSheet(input_style())
 
         filter_layout.addWidget(self.search_box)
         filter_layout.addWidget(self.filter_box)
@@ -167,13 +186,17 @@ class LogsWindow(BaseWindow):
         # Admin ke liye employee filter
         if self._role in ("admin", "super_admin"):
             self.emp_filter_box = QComboBox()
+            self.emp_filter_box.setStyleSheet(input_style())
             self.emp_filter_box.addItem("All Employees", None)
             # Employees load honge logs ke saath
             filter_layout.addWidget(QLabel("Employee:"))
             filter_layout.addWidget(self.emp_filter_box)
             self.emp_filter_box.currentIndexChanged.connect(self._on_employee_filter_changed)
 
-        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn = QPushButton("  Refresh")
+        refresh_btn.setIcon(_icons.icon("refresh-cw", 15, C.TEXT))
+        refresh_btn.setStyleSheet(button("secondary"))
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self.load_logs)
         filter_layout.addWidget(refresh_btn)
 
@@ -182,17 +205,10 @@ class LogsWindow(BaseWindow):
         self.logs_table.setHorizontalHeaderLabels(["Employee ID", "Status / Screenshot", "Timestamp"])
         self.logs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.logs_table.verticalHeader().setVisible(False)
-        self.logs_table.setAlternatingRowColors(True)
+        self.logs_table.setAlternatingRowColors(False)  # zebra striping competes with the data
         self.logs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.logs_table.setShowGrid(False)
-        self.logs_table.setStyleSheet("""
-            QTableWidget { background-color: rgba(17,24,39,0.85); border: 1px solid #2b3448;
-                border-radius: 16px; color: white; padding: 8px; }
-            QHeaderView::section { background-color: rgba(30,41,59,0.95); color: white;
-                border: none; padding: 14px; font-size: 14px; font-weight: bold; }
-            QTableWidget::item { padding: 12px; }
-            QTableWidget::item:selected { background-color: #2563eb; color: white; }
-        """)
+        self.logs_table.setStyleSheet(table_style())
 
         self.load_logs()
         self.logs_table.cellDoubleClicked.connect(self.open_screenshot)
@@ -230,6 +246,8 @@ class LogsWindow(BaseWindow):
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.start()
+        # Sized to the content, after it exists — see fit_columns.
+        fit_columns(self.logs_table)
 
     @Slot(object, object)
     def _on_logs_loaded(self, total_logs, screenshot_paths):
@@ -344,3 +362,5 @@ class LogsWindow(BaseWindow):
             display = [str(entry[0]), str(entry[1]), to_ist(entry[2])]
             for col, value in enumerate(display):
                 self.logs_table.setItem(row, col, QTableWidgetItem(value))
+        # Sized to the content, after it exists — see fit_columns.
+        fit_columns(self.logs_table)

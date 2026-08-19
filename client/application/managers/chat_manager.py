@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Optional
 
 import requests
 from client.core import http as _http
@@ -49,8 +49,30 @@ from client.security.crypto_engine import CryptoEngine
 
 # How often to ask, by what the employee is doing.
 INTERVAL_ACTIVE_CHAT = 3
-INTERVAL_APP_OPEN = 15
-INTERVAL_BACKGROUND = 60
+INTERVAL_APP_OPEN = 5
+# NOT 15. This is the app sitting in front of somebody on a page that is not
+# the chat — the dashboard, attendance, payroll — and it is the case that
+# decides how fast a message "arrives", because the sender is watching the
+# clock and the receiver is not on the chat page.
+#
+# At fifteen seconds a message sent from one panel took up to that long to
+# raise the badge on the other, and was reported as "message 10 sec baad ja
+# raha hai, instant nahi". The message reaches the server immediately; it was
+# the READING that was slow, so the interval is where the fix belongs.
+#
+# Five seconds against a handful of desktops is nothing: the poll is one
+# indexed cursor query, and it already runs at three seconds whenever a
+# conversation is on screen.
+# NOT 60. It was, and that is backwards: a message matters most when nobody
+# is looking at the window, because then the desktop notification is the ONLY
+# way anybody learns about it. At a minute's cadence somebody switches to the
+# other window, sees nothing, and concludes notifications do not work —
+# reported in exactly those words.
+#
+# Fifteen seconds is the same rate the app already polls at when it is open
+# and no conversation is showing, so this costs nothing that was not already
+# considered acceptable.
+INTERVAL_BACKGROUND = 15
 
 # Backoff when the server cannot be reached. Capped: an employee who opens
 # their laptop after a long outage should not wait ten minutes for their first
@@ -524,7 +546,30 @@ class ChatManager(QObject):
         if arrived:
             self.messages.emit(arrived)
         if alerts:
+            # ANNOUNCED, THEN MARKED READ — in that order, and here rather
+            # than in the panels.
+            #
+            # /chat/updates returns every UNREAD notification, so anything not
+            # marked comes back on the next poll, and the one after that. The
+            # method to mark them existed and nothing ever called it: an
+            # announcement therefore repeated every few seconds for the rest
+            # of the session. Reported as "ruk hi nahi raha".
+            #
+            # This runs in the poll thread, which is already where the reply
+            # was read, and it is deliberately NOT the panels' job: there are
+            # two of them and one would have been forgotten.
             self.notifications.emit(alerts)
+
+            fresh = [n.get("id") for n in alerts if n.get("id")]
+            if fresh:
+                try:
+                    ChatManager.mark_notifications_read(fresh)
+                except Exception as error:
+                    # A failure here means the same announcement arrives
+                    # again — annoying, not harmful, and never worth killing
+                    # the poll for.
+                    LoggerService.log_verbose(
+                        f"ChatManager: could not mark notifications read — {error}")
         if withdrawn:
             self.deletions.emit([int(seq) for seq in withdrawn])
 
@@ -689,6 +734,105 @@ class ChatManager(QObject):
         return dest_path
 
     # ── pins ────────────────────────────────────────────────────────────
+
+    @classmethod
+    def ping_typing(cls, channel_id: int) -> None:
+        """Say "I am typing here" — throttled by the caller, not here.
+
+        FAILURES ARE SWALLOWED ON PURPOSE. This runs off a keystroke. If the
+        network is down the person still has a message to write, and an error
+        box in the middle of typing is a worse outcome than a colleague not
+        seeing the three dots.
+        """
+        try:
+            _http.post(
+                f"{API_BASE_URL}/chat/channels/{int(channel_id)}/typing",
+                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+    @classmethod
+    def stop_typing(cls, channel_id: int) -> None:
+        """"I have stopped" — after Send, or when the box is emptied."""
+        try:
+            _http.delete(
+                f"{API_BASE_URL}/chat/channels/{int(channel_id)}/typing",
+                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+    @classmethod
+    def who_is_typing(cls, channel_id: int) -> list:
+        """Everybody typing in this channel except you."""
+        response = _http.get(
+            f"{API_BASE_URL}/chat/channels/{int(channel_id)}/typing",
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+            timeout=8,
+        )
+        if response.status_code != 200:
+            return []
+        return list(response.json().get("typing") or [])
+
+    @classmethod
+    def thread(cls, seq: int) -> dict:
+        """A message and its replies. Opening a reply opens the same thread."""
+        response = _http.get(
+            f"{API_BASE_URL}/chat/messages/{int(seq)}/thread",
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            message = f"HTTP {response.status_code}"
+            try:
+                message = response.json().get("message", message)
+            except Exception:
+                pass
+            raise RuntimeError(message)
+        return response.json()
+
+    @classmethod
+    def reaction_choices(cls) -> list:
+        """What the server will accept. Asked once, per run.
+
+        The client could hold its own list, and then the day somebody adds an
+        emoji server-side the two disagree and a button starts returning 400
+        — which looks like a broken feature rather than a stale constant.
+        """
+        response = _http.get(
+            f"{API_BASE_URL}/chat/reactions",
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return []
+        return list(response.json().get("reactions") or [])
+
+    @classmethod
+    def react(cls, seq: int, emoji: str) -> dict:
+        """Add or remove your reaction — the same call does both.
+
+        Returns the message's reactions as they now stand, so the caller can
+        redraw one bubble instead of reloading the channel.
+        """
+        response = _http.post(
+            f"{API_BASE_URL}/chat/messages/{seq}/reactions",
+            json={"emoji": emoji},
+            headers={"Authorization": f"Bearer {SessionManager.auth_token}",
+                     "Content-Type": "application/json"},
+            timeout=12,
+        )
+        if response.status_code != 200:
+            message = f"HTTP {response.status_code}"
+            try:
+                message = response.json().get("message", message)
+            except Exception:
+                pass
+            raise RuntimeError(message)
+        return response.json()
 
     @classmethod
     def set_pinned(cls, seq: int, pinned: bool) -> None:

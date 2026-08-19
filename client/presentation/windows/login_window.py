@@ -172,10 +172,10 @@ class LoginWindow(BaseWindow):
         QLineEdit {{
             background-color: {C.BG};
             border: 1px solid {C.BORDER};
-            border-radius: 10px;
+            border-radius:12px;
             padding: 12px 14px;
             color: {C.TEXT};
-            font-size: 14px;
+            font-size:13px;
         }}
         QLineEdit:focus {{
             border: 1px solid {C.PRIMARY};
@@ -250,10 +250,10 @@ class LoginWindow(BaseWindow):
             QPushButton {{
                 background-color: {C.PRIMARY};
                 border: none;
-                border-radius: 10px;
+                border-radius:12px;
                 color: {C.ON_ACCENT};
                 font-weight: 700;
-                font-size: 14px;
+                font-size:13px;
                 letter-spacing: 0.3px;
             }}
             QPushButton:hover {{ background-color: {C.PRIMARY_DIM}; }}
@@ -286,7 +286,7 @@ class LoginWindow(BaseWindow):
         version_label = QLabel(f"v{APP_VERSION}  ·  {_os}  ·  IST")
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version_label.setStyleSheet(
-            f"color: {C.TEXT_DIM}; font-size: 11px; background: transparent;"
+            f"color: {C.TEXT_DIM}; font-size:12px; background: transparent;"
         )
         card_layout.addWidget(version_label)
 
@@ -296,7 +296,7 @@ class LoginWindow(BaseWindow):
             QFrame#loginCard {{
                 background-color: {C.CARD};
                 border: 1px solid {C.BORDER};
-                border-radius: 18px;
+                border-radius:16px;
             }}
             """
         )
@@ -316,7 +316,7 @@ class LoginWindow(BaseWindow):
             self.status_label.setStyleSheet(
                 f"color: {C.AMBER}; font-size: 13px; background: transparent;"
             )
-            self.status_label.setText("⚠  Please enter username and password.")
+            self.status_label.setText("Please enter username and password.")
             self.login_button.setEnabled(True)
             self.login_button.setText("Sign In")
             return
@@ -386,7 +386,7 @@ class LoginWindow(BaseWindow):
                     self.status_label.setStyleSheet(
                         f"color: {C.AMBER}; font-size: 13px; background: transparent;"
                     )
-                    self.status_label.setText("⚠  You must set a new password to continue.")
+                    self.status_label.setText("You must set a new password to continue.")
                     self.login_button.setEnabled(True)
                     self.login_button.setText("Sign In")
                     return
@@ -404,7 +404,7 @@ class LoginWindow(BaseWindow):
             self.status_label.setStyleSheet(
                 f"color: {C.RED}; font-size: 13px; background: transparent;"
             )
-            self.status_label.setText(f"✕  {result.get('message', 'Login failed')}")
+            self.status_label.setText(f"{result.get('message', 'Login failed')}")
             self.login_button.setEnabled(True)
             self.login_button.setText("Sign In")
 

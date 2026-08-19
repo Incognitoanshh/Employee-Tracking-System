@@ -367,10 +367,25 @@ async function loadRun(month) {
     if (!run) return null;
 
     const lines = (await pool.query(
-        `SELECT l.*, COALESCE(e.full_name, e.username) AS employee_name,
-                e.designation
+        // LEFT JOIN, AND A FALLBACK NAME.
+        //
+        // An inner join here meant that the moment somebody left the company
+        // their line vanished from a run that was already finalised — the row
+        // survives now (see the migration that dropped the cascade), so the
+        // read has to survive too, or the total on screen stops matching the
+        // total in the table.
+        //
+        // retired_employee_ids holds the name against the retired id. This is
+        // the same answer the chat gives for a message from somebody who has
+        // left: show who it was, and say they are gone.
+        `SELECT l.*,
+                COALESCE(e.full_name, e.username, r.full_name, l.employee_id)
+                    AS employee_name,
+                e.designation,
+                (e.employee_id IS NULL) AS former_employee
            FROM payroll_lines l
-           JOIN employees e ON e.employee_id = l.employee_id
+           LEFT JOIN employees e ON e.employee_id = l.employee_id
+           LEFT JOIN retired_employee_ids r ON r.employee_id = l.employee_id
           WHERE l.run_id = $1
           ORDER BY l.employee_id`, [run.id])).rows;
 
@@ -487,6 +502,9 @@ exports.finalize = async (req, res) => {
         // same reasoning.
         if (mailer.isConfigured()) {
             const people = (await pool.query(
+                // This one stays an INNER JOIN on purpose: it is the list of
+                // people to EMAIL a payslip to, and somebody who has left the
+                // company has no account and no address to send to.
                 `SELECT e.email, COALESCE(e.full_name, e.username) AS name,
                         l.net_before_adjustments
                    FROM payroll_lines l JOIN employees e ON e.employee_id = l.employee_id

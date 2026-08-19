@@ -28,8 +28,7 @@ from __future__ import annotations
 import os
 import re
 
-from PySide6.QtCore import Qt, QThread, Signal, QSize
-from PySide6.QtGui import QPixmap, QPainter, QPainterPath
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QFileDialog, QMessageBox, QComboBox,
@@ -42,7 +41,7 @@ from client.application.managers.session_manager import SessionManager
 from client.services.settings_service import SettingsService
 from client.services.logger_service import LoggerService
 from client.presentation import theme as _theme
-from client.presentation.theme import C, R_SM, button, scrollbar
+from client.presentation.theme import C, button, scrollbar
 from client.presentation.widgets.avatar import Avatar, forget as forget_avatar
 from client.presentation.widgets.panel_widgets import Card, PageHeader, Sparkline
 
@@ -146,7 +145,7 @@ class ProfilePage(QWidget):
     def _toast(self, message: str, ok: bool = True):
         """One line under the header. Not a modal — saving a phone number
         should not need dismissing."""
-        self._status.setText(("✓  " if ok else "⚠  ") + str(message))
+        self._status.setText(("" if ok else "") + str(message))
         self._status.setStyleSheet(
             f"color:{C.GREEN if ok else C.AMBER};font-size:12px;border:none;"
             f"background:transparent;")
@@ -288,7 +287,7 @@ class ProfilePage(QWidget):
 
         heading = QLabel(title.upper())
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:700;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:700;"
             f"letter-spacing:1px;border:none;")
         layout.addWidget(heading)
 
@@ -325,7 +324,7 @@ class ProfilePage(QWidget):
         if note:
             hint = QLabel(note)
             hint.setWordWrap(True)
-            hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+            hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
             layout.addWidget(hint)
         return card
 
@@ -354,7 +353,7 @@ class ProfilePage(QWidget):
                 ("shots", "Screenshots  ·  last 7 days", C.BLUE))):
             caption_label = QLabel(caption)
             caption_label.setStyleSheet(
-                f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+                f"color:{C.TEXT_DIM};font-size:12px;border:none;")
             spark = Sparkline(colour, points=7)
             self._charts[key] = spark
             charts.addWidget(caption_label, 0, column)
@@ -372,7 +371,7 @@ class ProfilePage(QWidget):
         layout = card.layout()
         heading = QLabel("SIGNED IN ON")
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:700;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:700;"
             f"letter-spacing:1px;border:none;")
         layout.addSpacing(8)
         layout.addWidget(heading)
@@ -406,7 +405,7 @@ class ProfilePage(QWidget):
         layout.setSpacing(10)
         heading = QLabel("NOTIFICATIONS & APPEARANCE")
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:700;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:700;"
             f"letter-spacing:1px;border:none;")
         layout.addWidget(heading)
 
@@ -438,7 +437,7 @@ class ProfilePage(QWidget):
         layout.addLayout(theme_row)
 
         hint = QLabel("These are settings for this machine, and are kept on it.")
-        hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+        hint.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
         layout.addWidget(hint)
         return card
 
@@ -449,7 +448,7 @@ class ProfilePage(QWidget):
         layout.setSpacing(10)
         heading = QLabel("RECENT SIGN-INS")
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:700;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:700;"
             f"letter-spacing:1px;border:none;")
         layout.addWidget(heading)
         self._history_box = QVBoxLayout()
@@ -606,7 +605,7 @@ class ProfilePage(QWidget):
             self._verify_btn.hide()
             return
         if verified:
-            self._email_state.setText("✓ Verified")
+            self._email_state.setText(" Verified")
             self._email_state.setStyleSheet(
                 f"color:{C.GREEN};font-size:12px;font-weight:600;"
                 "border:none;background:transparent;")

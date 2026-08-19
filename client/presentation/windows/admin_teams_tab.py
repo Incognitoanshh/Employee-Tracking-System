@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import requests
 from client.core import http as _http
-from PySide6.QtCore import Qt, QSize, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
     QLineEdit, QWidget,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from client.core.config import API_BASE_URL
+from client.presentation import theme as _theme
 from client.application.managers.session_manager import SessionManager
 from client.presentation.windows.admin_config_panel import (
     C, _btn, _card, _cell, _divider, _fmt_ts, _muted_label, _track_worker,
@@ -122,7 +123,7 @@ def _humanise(message: str) -> str:
 def _section(title: str) -> QLabel:
     label = QLabel(title)
     label.setStyleSheet(
-        f"color:{C['text_primary']};font-size:14px;font-weight:700;"
+        f"color:{C['text_primary']};font-size:13px;font-weight:700;"
         f"background:transparent;border:none;")
     return label
 
@@ -157,7 +158,8 @@ class _PeoplePicker(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.setStyleSheet(
             f"QLineEdit{{background:{C['bg_surface_alt']};border:1px solid {C['border']};"
-            f"border-radius:8px;color:{C['text_primary']};font-size:12px;padding:6px 10px;}}")
+            f"border-radius:{_theme.Radius.CONTROL}px;color:{C['text_primary']};"
+            f"font-size:{_theme.Type.SMALL}px;padding:6px 10px;}}")
         column.addWidget(self.search)
 
         self.listing = _checkable_list(self, people, preselected)
@@ -165,7 +167,7 @@ class _PeoplePicker(QWidget):
 
         self.counter = QLabel("")
         self.counter.setStyleSheet(
-            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+            f"color:{C['text_muted']};font-size:12px;background:transparent;")
         column.addWidget(self.counter)
 
         self.search.textChanged.connect(self._filter)
@@ -213,7 +215,7 @@ def _checkable_list(parent, people: list[dict], preselected: set | None = None) 
     listing = QListWidget(parent)
     listing.setStyleSheet(
         f"QListWidget{{background:{C['bg_surface_alt']};border:1px solid {C['border']};"
-        f"border-radius:8px;color:{C['text_primary']};font-size:12px;padding:4px;}}"
+        f"border-radius:12px;color:{C['text_primary']};font-size:12px;padding:4px;}}"
         f"QListWidget::item{{padding:5px 6px;}}")
     for person in people:
         item = QListWidgetItem(
@@ -249,7 +251,7 @@ def _people_rows(parent, height: int = 170):
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     area.setStyleSheet(
         f"QScrollArea{{background:{C['bg_surface_alt']};"
-        f"border:1px solid {C['border']};border-radius:8px;}}")
+        f"border:1px solid {C['border']};border-radius:12px;}}")
     host = _cell_holder()
     column = QVBoxLayout(host)
     column.setContentsMargins(6, 6, 6, 6)
@@ -319,12 +321,19 @@ class _BaseDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(width)
+        # THE BACKGROUND IS NOT SET HERE. Every other dialog in the console
+        # takes it from the panel's own QDialog rule; these two set
+        # bg_surface, a shade lighter than the rest, which nobody chose — it
+        # was simply written twice, differently.
+        #
+        # The fields follow the console's own controls for the same reason.
         self.setStyleSheet(
-            f"QDialog{{background:{C['bg_surface']};}}"
-            f"QLabel{{color:{C['text_secondary']};font-size:12px;background:transparent;}}"
+            f"QLabel{{color:{C['text_secondary']};"
+            f"font-size:{_theme.Type.SMALL}px;background:transparent;}}"
             f"QLineEdit,QPlainTextEdit,QComboBox{{background:{C['bg_surface_alt']};"
             f"color:{C['text_primary']};border:1px solid {C['border']};"
-            f"border-radius:8px;padding:8px 10px;font-size:13px;}}")
+            f"border-radius:{_theme.Radius.CONTROL}px;padding:8px 10px;"
+            f"font-size:{_theme.Type.BODY}px;}}")
         self.body = QVBoxLayout(self)
         self.body.setContentsMargins(22, 20, 22, 18)
         self.body.setSpacing(10)
@@ -520,7 +529,7 @@ class _TranscriptDialog(QDialog):
         channel = payload.get("channel", {})
         self.setWindowTitle(f"{channel.get('team_name', '')} / {channel.get('name', '')}")
         self.setMinimumSize(720, 620)
-        self.setStyleSheet(f"QDialog{{background:{C['bg_surface']};}}")
+        # Inherits the console's QDialog rule, like every other dialog.
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 16)
@@ -528,7 +537,7 @@ class _TranscriptDialog(QDialog):
 
         head = QLabel(f"{channel.get('team_name', '')} / {channel.get('name', '')}")
         head.setStyleSheet(
-            f"color:{C['text_primary']};font-size:15px;font-weight:700;background:transparent;")
+            f"color:{C['text_primary']};font-size:16px;font-weight:700;background:transparent;")
         root.addWidget(head)
         root.addWidget(_muted_label("This read has been recorded in the access log."))
         root.addWidget(_divider())
@@ -558,7 +567,7 @@ class _TranscriptDialog(QDialog):
                 name += "  (Former Employee)"
             who = QLabel(f"{name}   ·   {_fmt_ts(message.get('created_at'))}")
             who.setStyleSheet(
-                f"color:{C['text_secondary']};font-size:11px;font-weight:700;"
+                f"color:{C['text_secondary']};font-size:12px;font-weight:700;"
                 f"background:transparent;")
             body = QLabel(str(message.get("body") or ""))
             body.setWordWrap(True)
@@ -577,7 +586,7 @@ class _TranscriptDialog(QDialog):
                 old.setWordWrap(True)
                 old.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 old.setStyleSheet(
-                    f"color:{C['warning']};font-size:11px;font-style:italic;"
+                    f"color:{C['warning']};font-size:12px;font-style:italic;"
                     f"background:transparent;")
                 block.addWidget(old)
 
@@ -630,7 +639,7 @@ class _TeamsTab(QWidget):
         head = QHBoxLayout()
         head.addWidget(_section("Teams"))
         head.addStretch()
-        new_team = _btn("+ New", "primary", height=32, width=80)
+        new_team = _btn("+ New", "primary", height=36, width=80)
         new_team.clicked.connect(self._new_team)
         head.addWidget(new_team)
         left_col.addLayout(head)
@@ -639,7 +648,7 @@ class _TeamsTab(QWidget):
         self._team_list.setStyleSheet(
             f"QListWidget{{background:transparent;border:none;color:{C['text_secondary']};"
             f"font-size:13px;}}"
-            f"QListWidget::item{{padding:9px 8px;border-radius:8px;}}"
+            f"QListWidget::item{{padding:9px 8px;border-radius:12px;}}"
             f"QListWidget::item:selected{{background:{C['accent_soft']};"
             f"color:{C['text_primary']};}}")
         self._team_list.currentRowChanged.connect(self._on_team_selected)
@@ -676,7 +685,7 @@ class _TeamsTab(QWidget):
         channels_head = QHBoxLayout()
         channels_head.addWidget(_section("Channels"))
         channels_head.addStretch()
-        self._new_channel_btn = _btn("+ Channel", "secondary", height=30, width=104)
+        self._new_channel_btn = _btn("+ Channel", "secondary", height=36, width=104)
         self._new_channel_btn.clicked.connect(self._new_channel)
         self._new_channel_btn.hide()
         channels_head.addWidget(self._new_channel_btn)
@@ -702,7 +711,7 @@ class _TeamsTab(QWidget):
         members_head = QHBoxLayout()
         members_head.addWidget(_section("Members"))
         members_head.addStretch()
-        self._add_members_btn = _btn("+ Members", "secondary", height=30, width=110)
+        self._add_members_btn = _btn("+ Members", "secondary", height=36, width=110)
         self._add_members_btn.clicked.connect(self._add_members)
         self._add_members_btn.hide()
         members_head.addWidget(self._add_members_btn)
@@ -835,7 +844,7 @@ class _TeamsTab(QWidget):
             if channel.get("is_default"):
                 name += "  (default)"
             if channel.get("is_private"):
-                name = "🔒 " + name
+                name = " " + name
             self._channels.setItem(row, 0, _cell(name))
             self._channels.setItem(row, 1, _cell(
                 "Announcement" if channel["type"] == "ANNOUNCEMENT" else "Standard",
@@ -849,7 +858,7 @@ class _TeamsTab(QWidget):
             line.setSpacing(6)
 
             if channel["type"] == "ANNOUNCEMENT" and not archived:
-                post = _btn("Post", "primary", height=32, width=76)
+                post = _btn("Post", "primary", height=36, width=76)
                 post.clicked.connect(lambda _=False, c=channel: self._announce(c))
                 line.addWidget(post)
 
@@ -861,7 +870,7 @@ class _TeamsTab(QWidget):
             # differs by channel: everything can be renamed and described,
             # and the people list appears only where it means something.
             if not archived:
-                who = _btn("Edit", "secondary", height=32, width=74)
+                who = _btn("Edit", "secondary", height=36, width=74)
                 who.setToolTip("Rename, describe, and choose who can see it")
                 who.clicked.connect(lambda _=False, c=channel: self._edit_channel(c))
                 line.addWidget(who)
@@ -869,7 +878,7 @@ class _TeamsTab(QWidget):
             # Only a super admin sees this at all. An ordinary admin pressing a
             # button that always fails teaches them the panel is unreliable.
             if self._is_super_admin():
-                read = _btn("Read", "secondary", height=32, width=76)
+                read = _btn("Read", "secondary", height=36, width=76)
                 read.clicked.connect(lambda _=False, c=channel: self._read_channel(c))
                 line.addWidget(read)
 
@@ -906,12 +915,21 @@ class _TeamsTab(QWidget):
             # from the list altogether. Correct behaviour, wrong affordance:
             # the action people actually wanted had no button at all.
             if editable and not archived:
-                edit = QPushButton(f"{listing}   ✎")
+                # THE MARK THAT SAYS THIS CELL IS A CONTROL.
+                #
+                # It was a ✎ appended to the text, and it went out with the
+                # emoji — which quietly removed the only sign that the column
+                # could be clicked at all. The affordance matters more than
+                # the glyph did: without it people press the red Remove
+                # button instead, and that takes somebody out of the whole
+                # team rather than one channel.
+                edit = QPushButton(f"{listing}   Edit")
                 edit.setCursor(Qt.CursorShape.PointingHandCursor)
                 edit.setToolTip("Choose which channels this person can see")
                 edit.setStyleSheet(
                     f"QPushButton {{ color:{C['text_secondary']};background:transparent;"
-                    f"border:none;text-align:left;font-size:12px;padding:0 4px; }}"
+                    f"border:none;text-align:left;"
+                    f"font-size:{_theme.Type.MICRO}px;padding:0 4px; }}"
                     f"QPushButton:hover {{ color:{C['accent_hover']}; }}")
                 edit.clicked.connect(
                     lambda _c=False, m=member: self._member_channels(m, editable))
@@ -936,7 +954,7 @@ class _TeamsTab(QWidget):
             # the bottom of that editor, behind its own heading. The dangerous
             # action is still one click away — it is just no longer the click
             # you make by accident.
-            edit = _btn("Edit", "secondary", height=32, width=84)
+            edit = _btn("Edit", "secondary", height=36, width=84)
             edit.setToolTip("Channels, and removing them from the team")
             edit.clicked.connect(
                 lambda _=False, m=member: self._member_channels(m, editable))
@@ -962,7 +980,7 @@ class _TeamsTab(QWidget):
         listing = QListWidget(dialog)
         listing.setStyleSheet(
             f"QListWidget{{background:{C['bg_surface_alt']};border:1px solid {C['border']};"
-            f"border-radius:8px;color:{C['text_primary']};font-size:12px;padding:4px;}}"
+            f"border-radius:12px;color:{C['text_primary']};font-size:12px;padding:4px;}}"
             f"QListWidget::item{{padding:6px;}}")
         for channel in channels:
             item = QListWidgetItem(
@@ -987,7 +1005,7 @@ class _TeamsTab(QWidget):
         dialog.body.addWidget(_muted_label(
             "This is the whole team, not one channel — they lose General too. "
             "Their messages stay either way."))
-        kick = _btn(f"Remove {name} from the team", "danger", height=34)
+        kick = _btn(f"Remove {name} from the team", "danger", height=40)
         dialog.body.addWidget(kick)
 
         leaving = {"team": False}
@@ -1193,7 +1211,7 @@ class _TeamsTab(QWidget):
                     column.addStretch()
                     return
                 for member in staying:
-                    drop = _btn("Remove", "danger", height=32, width=96)
+                    drop = _btn("Remove", "danger", height=36, width=96)
                     drop.setToolTip(f"Remove from {channel['name']} only")
                     drop.clicked.connect(lambda _c=False, m=member: take_out(m))
                     column.addWidget(_person_row(

@@ -12,8 +12,8 @@ Bugs fixed:
 from __future__ import annotations
 
 from client.core import http as _http
-from PySide6.QtCore    import QTimer
-from PySide6.QtGui     import QAction, QColor, QIcon, QPixmap
+from PySide6.QtCore    import Qt, QPointF
+from PySide6.QtGui     import QAction, QColor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMenu, QStyle, QSystemTrayIcon,
 )
@@ -25,10 +25,35 @@ from client.application.managers.shift_manager      import ShiftManager
 from client.services.logger_service                 import LoggerService
 
 
-def _color_icon(hex_color: str, size: int = 16) -> QIcon:
-    """Solid color square icon — works without any image files."""
-    px = QPixmap(size, size)
-    px.fill(QColor(hex_color))
+def _color_icon(hex_color: str, size: int = 18) -> QIcon:
+    """The brand mark, with a status dot on it.
+
+    IT WAS A PLAIN COLOURED SQUARE. That is what sat in the menu bar, and on
+    Windows it is also what a balloon notification draws beside its text —
+    so every notification the product sent showed a solid green rectangle
+    where its logo belongs.
+
+    The dot keeps what the square was for: tracking active, idle, stopped.
+    Bottom-right, with a ring in the tray's own background so it reads at
+    18px against either a light or a dark menu bar.
+    """
+    from client.presentation.widgets.brand import RING, mark_pixmap
+
+    px = mark_pixmap(size, ratio=2.0)
+    ratio = px.devicePixelRatio() or 1.0
+    painter = QPainter(px)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+
+    edge = size * ratio
+    radius = edge * 0.30
+    centre = edge - radius - (edge * 0.06)
+
+    painter.setBrush(QColor(RING))
+    painter.drawEllipse(QPointF(centre, centre), radius * 1.28, radius * 1.28)
+    painter.setBrush(QColor(hex_color))
+    painter.drawEllipse(QPointF(centre, centre), radius, radius)
+    painter.end()
     return QIcon(px)
 
 
@@ -54,21 +79,21 @@ class SystemTray(QSystemTrayIcon):
         # ── Menu ────────────────────────────────────────────
         tray_menu = QMenu()
 
-        open_action = QAction("📊  Open Dashboard", tray_menu)
+        open_action = QAction("Open Dashboard", tray_menu)
         open_action.triggered.connect(self.show_dashboard)
         tray_menu.addAction(open_action)
 
-        logs_action = QAction("📋  View Logs", tray_menu)
+        logs_action = QAction("View Logs", tray_menu)
         logs_action.triggered.connect(self._open_logs)
         tray_menu.addAction(logs_action)
 
-        settings_action = QAction("⚙  Settings", tray_menu)
+        settings_action = QAction("Settings", tray_menu)
         settings_action.triggered.connect(self._open_settings)
         tray_menu.addAction(settings_action)
 
         tray_menu.addSeparator()
 
-        exit_action = QAction("🚪  Exit Amaze Connect", tray_menu)
+        exit_action = QAction("Exit Amaze Connect", tray_menu)
         exit_action.triggered.connect(self.exit_application)
         tray_menu.addAction(exit_action)
 

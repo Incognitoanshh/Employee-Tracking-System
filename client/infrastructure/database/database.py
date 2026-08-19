@@ -29,7 +29,77 @@ class Database:
             conn.close()
 
     @classmethod
+    def _quarantine_unreadable_file(cls) -> str | None:
+        """Move a corrupt database aside so a fresh one can be made.
+
+        WHY THIS EXISTS, AND WHAT HAPPENED WITHOUT IT.
+        A SQLite file can be left malformed by the ordinary accidents of a
+        laptop: power cut mid-write, a disk that filled, a forced shutdown.
+        Every read then raises "database disk image is malformed" — including
+        the one inside initialize(), which main.py calls before anything is
+        drawn.
+
+        So the app did not start. No window, no message, just a traceback in
+        a log nobody reads, on the machine of somebody whose only fault was
+        closing the lid at the wrong moment. Reproduced deliberately here by
+        overwriting bytes in the middle of the file.
+
+        THE FILE IS KEPT, NOT DELETED. Whatever is in it is already
+        unreadable, so nothing is lost by starting again — but a support
+        engineer may still want to look, and deleting the only evidence of a
+        failure is how a bug gets diagnosed twice.
+
+        Anything queued in it (unsent messages, unsynced logs) is gone. That
+        is the honest trade: it was already gone when the file stopped being
+        readable, and the alternative is an application that never opens
+        again.
+        """
+        if not os.path.exists(cls.DB_PATH):
+            return None
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        spoiled = f"{cls.DB_PATH}.corrupt-{stamp}"
+        try:
+            os.replace(cls.DB_PATH, spoiled)
+        except OSError:
+            return None
+        # The journal and write-ahead files belong to the file that just
+        # moved; left behind, SQLite tries to replay them into the new
+        # database and the new one is malformed too.
+        for suffix in ("-journal", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                os.remove(cls.DB_PATH + suffix)
+        return spoiled
+
+    @classmethod
     def initialize(cls):
+        try:
+            return cls._initialize()
+        except sqlite3.DatabaseError as error:
+            # NOT every DatabaseError — only the ones that mean the FILE is
+            # unusable. A mistake in a CREATE TABLE below is a bug to fix, and
+            # silently rebuilding the database on top of it would hide it.
+            if not any(word in str(error).lower() for word in
+                       ("malformed", "not a database", "encrypted", "corrupt")):
+                raise
+            spoiled = cls._quarantine_unreadable_file()
+            built = cls._initialize()
+            # LOGGED AFTER THE REBUILD, NOT BEFORE.
+            #
+            # The logger reads its verbose flag out of the settings table —
+            # which, one line after the old file was moved aside, does not
+            # exist yet. Logging first turned a handled corruption into
+            # "no such table: settings", which is a worse error than the one
+            # being recovered from and hid it completely.
+            from client.services.logger_service import LoggerService
+            with contextlib.suppress(Exception):
+                LoggerService.log_verbose(
+                    f"Local database was unreadable ({error}). "
+                    + (f"Moved to {spoiled} and started a new one."
+                       if spoiled else "Started a new one."))
+            return built
+
+    @classmethod
+    def _initialize(cls):
         connection = cls.connect()
         try:
             cursor = connection.cursor()

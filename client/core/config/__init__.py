@@ -74,6 +74,48 @@ SCREENSHOT_MAX_INTERVAL = int(os.getenv("SCREENSHOT_MAX_INTERVAL", 600))
 IDLE_THRESHOLD          = int(os.getenv("IDLE_THRESHOLD", 60))
 SCREENSHOT_ENCRYPTION_KEY = os.getenv("SCREENSHOT_ENCRYPTION_KEY")
 
+# KEYS THAT NO LONGER ENCRYPT, BUT STILL DECRYPT.
+#
+# Rotating an encryption key used to mean losing everything encrypted with
+# the old one: change the value and every screenshot already on the server
+# answers "AES-GCM decryption failed". That turns a routine security action
+# into a data loss, so in practice nobody rotates and a leaked key stays in
+# service — which is the situation this was written for.
+#
+# Retired keys go here, newest first, separated by commas. New captures are
+# always encrypted with SCREENSHOT_ENCRYPTION_KEY; old ones are read with
+# whichever key made them. AES-GCM authenticates, so a wrong key fails
+# cleanly rather than returning rubbish — trying them in turn is safe.
+#
+#     SCREENSHOT_ENCRYPTION_KEY=<the new one>
+#     SCREENSHOT_ENCRYPTION_KEY_RETIRED=<the old one>
+#
+# Once nothing encrypted with a retired key is still within the retention
+# window, take it out of this list and it is gone for good.
+SCREENSHOT_ENCRYPTION_KEY_RETIRED = os.getenv("SCREENSHOT_ENCRYPTION_KEY_RETIRED")
+
+def server_label() -> str:
+    """"●  connect.amazeinternet.com" — the host this build actually talks to.
+
+    BOTH PANELS SAY THIS, AND BOTH USED TO SAY IT WRONGLY. The admin console
+    read "Connected to Production Server" and the employee panel "Connected
+    to Server", whatever they were connected to — a test build pointed at a
+    laptop said the same thing. "Which server is this build on" is the first
+    question asked when two people are looking at different data, and the
+    status bar was the one place that could not answer it.
+
+    A local address is named as local rather than dressed up, so a test build
+    is obvious at a glance.
+    """
+    from urllib.parse import urlparse
+    host = (urlparse(API_BASE_URL).hostname or "").strip()
+    if not host:
+        return "Not configured"
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return f"{host}  ·  local"
+    return f"{host}"
+
+
 class Settings:
     APP_NAME    = APP_NAME
     APP_VERSION = APP_VERSION

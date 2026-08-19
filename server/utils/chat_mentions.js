@@ -54,7 +54,17 @@ async function resolveMentions(db, { channelId, senderId, body, explicitIds }) {
     const result = await db.query(
         `SELECT DISTINCT e.employee_id
            FROM employees e
-          WHERE (e.employee_id = ANY($1) OR LOWER(e.username) = ANY($2))
+          -- A HANDLE MAY BE A USERNAME **OR** AN EMPLOYEE ID.
+          --
+          -- The panel writes "@username", but people type "@26AMZEM001" from
+          -- memory — and for a while the panel itself did, because the member
+          -- list was sent without usernames. Every one of those mentions
+          -- resolved to nobody: no highlight, no notification, and no sign
+          -- that anything had failed. Matching the id as well costs one
+          -- comparison and closes both cases.
+          WHERE (e.employee_id = ANY($1)
+                 OR LOWER(e.username) = ANY($2)
+                 OR LOWER(e.employee_id) = ANY($2))
             AND e.employee_id <> $3
             AND NOT e.suspended
             AND EXISTS (

@@ -193,7 +193,7 @@ Installed and verified on the production VPS:
 === ETS backup  2026-08-04T03:00:40+0000 ===
 [2/4] verifying
   OK: 244K, 9 tables
-[3/4] rsync uploads -> /home/etsadmin/ets-backups/uploads/20260804
+[3/4] rsync uploads -> $ETS_HOME/ets-backups/uploads/20260804
   OK: 55 files, 136M apparent
 db snapshots     : 2
 upload snapshots : 1
@@ -367,33 +367,33 @@ Checked this pass and found no production-impacting issues:
 # 1. Ship the scripts
 cd "/Users/ansh/Downloads/Employee-Tracking-System-main copy" && \
 tar czf - server/scripts deploy/nginx-ets.conf server/migrations/retention_purge.sql | \
-ssh etsadmin@65.21.212.85 'cd "$HOME/ETS-v5/Employee-Tracking-System-main copy" && tar xzf -'
+ssh $ETS_HOST 'cd "$HOME/ETS-v5/Employee-Tracking-System-main copy" && tar xzf -'
 
 # 2. Install all cron jobs (idempotent)
-ssh -t etsadmin@65.21.212.85 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/install_cron.sh"'
+ssh -t $ETS_HOST 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/install_cron.sh"'
 
 # 3. Take the first backup now, do not wait for 02:00
-ssh -t etsadmin@65.21.212.85 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/backup.sh"'
+ssh -t $ETS_HOST 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/backup.sh"'
 
 # 4. Prove it can be restored — a backup nobody has restored is not a backup
-ssh -t etsadmin@65.21.212.85 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/restore_test.sh"'
+ssh -t $ETS_HOST 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/restore_test.sh"'
 ```
 
 Expected from step 4: `RESTORE TEST PASSED — N employees, 1 super admin(s)`.
 
 ```bash
 # 5. Auto-start after reboot
-ssh -t etsadmin@65.21.212.85 'pm2 save && pm2 startup'    # run the command it prints
-ssh etsadmin@65.21.212.85 'sudo systemctl enable postgresql && systemctl is-enabled postgresql'
+ssh -t $ETS_HOST 'pm2 save && pm2 startup'    # run the command it prints
+ssh $ETS_HOST 'sudo systemctl enable postgresql && systemctl is-enabled postgresql'
 
 # 6. Verify log rotation is active
-ssh etsadmin@65.21.212.85 'pm2 install pm2-logrotate 2>/dev/null; pm2 conf pm2-logrotate'
+ssh $ETS_HOST 'pm2 install pm2-logrotate 2>/dev/null; pm2 conf pm2-logrotate'
 ```
 
 ### Phase 2 — data reset (before real employees)
 
 ```bash
-ssh -t etsadmin@65.21.212.85 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/reset_test_data.sh"'
+ssh -t $ETS_HOST 'bash "$HOME/ETS-v5/Employee-Tracking-System-main copy/server/scripts/reset_test_data.sh"'
 ```
 
 Then clear local client storage on **every** machine that has run the app,
@@ -445,14 +445,14 @@ exclusion via GPO/Intune.
 ```bash
 git revert <commit> && git push origin main
 # server:
-ssh -t etsadmin@65.21.212.85 'cd "$HOME/ETS-v5/Employee-Tracking-System-main copy" && git pull && pm2 restart ets-server'
+ssh -t $ETS_HOST 'cd "$HOME/ETS-v5/Employee-Tracking-System-main copy" && git pull && pm2 restart ets-server'
 # client: rerun the GitHub Actions build and redistribute
 ```
 
 **Database**
 
 ```bash
-ssh -t etsadmin@65.21.212.85
+ssh -t $ETS_HOST
 cd ~/ets-backups/db && ls -lt | head          # pick a snapshot
 
 # Take the database name from the app's own config. It is NOT "ets" —

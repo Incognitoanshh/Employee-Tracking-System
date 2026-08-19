@@ -73,11 +73,63 @@ app.use(cors({
     // Dev: keep permissive behavior unless operator provided a stricter value.
     // Prod: wildcard is blocked above; only explicit origin allowed.
     origin: allowedOrigin || "*",
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    // PATCH WAS MISSING, AND THE API USES IT: closing a shift on the record,
+    // editing a message, updating a profile, renaming a channel. A browser
+    // asking to PATCH would have been refused at the preflight — the desktop
+    // client is unaffected, which is exactly why nobody noticed.
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
-app.use(express.json());
+// ─────────────────────────────────────────────────────────────────────────
+//  SECURITY HEADERS
+//
+//  WHY BY HAND AND NOT helmet. Four headers and one conditional is less code
+//  than the dependency, and this server is deployed by copying a directory —
+//  every package added is one more thing that has to be installed correctly
+//  on a machine nobody is watching. Nothing here needs a library.
+//
+//  WHAT EACH ONE IS FOR, because a header nobody can explain gets deleted:
+//
+//  nosniff       — the download endpoints hand back images and encrypted
+//                  blobs. Without this a browser may decide a .enc is HTML
+//                  and run it.
+//  frame DENY    — this API has no page worth framing, and saying so costs
+//                  nothing. Clickjacking needs a frame.
+//  CSP           — 'none' by default: a JSON API should load no scripts, no
+//                  styles and no fonts, so any that appear are an injection.
+//                  frame-ancestors repeats the frame rule for browsers that
+//                  prefer CSP.
+//  no-referrer   — URLs here carry employee ids. They should not travel to
+//                  anywhere the response happens to link.
+//
+//  HSTS IS DELIBERATELY CONDITIONAL. It tells a browser "never speak plain
+//  HTTP to this host again", for a year. Sent from a server reached over
+//  plain HTTP — a developer on localhost, or this box before nginx is in
+//  front — that is a foot-gun with a twelve-month fuse. So it goes out only
+//  when the request actually arrived over TLS.
+app.use((req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Content-Security-Policy",
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+
+    const overTls = req.secure
+        || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+    if (overTls) {
+        res.setHeader("Strict-Transport-Security",
+            "max-age=15552000; includeSubDomains");   // 180 days
+    }
+    next();
+});
+
+// A BODY LIMIT THAT IS WRITTEN DOWN. Express defaults to 100kb, which is the
+// right order of magnitude — but a default is not a decision, and the next
+// person to read this should not have to know Express's history to find out
+// what stops a hundred-megabyte JSON body. Files do not come through here;
+// they go to multer, which has limits of its own.
+app.use(express.json({ limit: "200kb" }));
 
 app.use((req, res, next) => {
     // Avoid logging query strings (may contain sensitive data).

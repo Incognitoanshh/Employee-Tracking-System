@@ -33,18 +33,21 @@ from PySide6.QtWidgets import (
 from client.core import http as _http
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
-from client.presentation.theme import C, R_SM, button, scrollbar
-from client.presentation.widgets.panel_widgets import Card, PageHeader
+from client.presentation.theme import C, R_SM, button, scrollbar, table_style
+from client.presentation.widgets.badge import badge_cell
+from client.presentation.widgets.panel_widgets import Card, PageHeader, fit_columns
 
 LEAVE_TYPES = [("CASUAL", "Casual"), ("SICK", "Sick"), ("UNPAID", "Unpaid")]
 
-STATUS_COLOUR = {
-    "PENDING":   C.AMBER,
-    "APPROVED":  C.GREEN,
-    "REJECTED":  C.RED,
-    "CANCELLED": C.TEXT_MUTED,
-    "REVOKED":   C.RED,
-}
+# The status colours used to live here, as a dict built at import time.
+#
+# TWO THINGS WERE WRONG WITH THAT. It was a third copy of a mapping the
+# attendance page and payroll each had their own version of, so one green
+# meant three things. And being built at import, it captured the DARK
+# palette once and kept it — switching to the light theme left these five
+# colours behind, which is the exact trap theme.scrollbar documents.
+#
+# theme.status_colors is looked up per call and is the only copy.
 
 
 def _headers() -> dict:
@@ -89,7 +92,7 @@ class LeavePage(QWidget):
         worker.start()
 
     def _say(self, message: str, ok: bool = True):
-        self._status.setText(("✓  " if ok else "⚠  ") + message)
+        self._status.setText(("" if ok else "") + message)
         self._status.setStyleSheet(
             f"color:{C.GREEN if ok else C.AMBER};font-size:12px;"
             f"background:transparent;border:none;")
@@ -128,7 +131,7 @@ class LeavePage(QWidget):
 
         heading = QLabel("APPLY")
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:800;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:800;"
             f"letter-spacing:1px;background:transparent;border:none;")
         column.addWidget(heading)
 
@@ -160,7 +163,7 @@ class LeavePage(QWidget):
             cell.setSpacing(2)
             caption = QLabel(label)
             caption.setStyleSheet(
-                f"color:{C.TEXT_MUTED};font-size:11px;background:transparent;border:none;")
+                f"color:{C.TEXT_MUTED};font-size:12px;background:transparent;border:none;")
             cell.addWidget(caption)
             cell.addWidget(widget)
             row.addLayout(cell)
@@ -208,7 +211,7 @@ class LeavePage(QWidget):
 
         heading = QLabel("HISTORY")
         heading.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;font-weight:800;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:800;"
             f"letter-spacing:1px;background:transparent;border:none;")
         column.addWidget(heading)
 
@@ -219,10 +222,14 @@ class LeavePage(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.setShowGrid(False)
-        self._table.setAlternatingRowColors(True)
+        self._table.setAlternatingRowColors(False)  # zebra striping competes with the data
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self._table.setStyleSheet(scrollbar())
+        # A TABLE STYLED WITH ONLY ITS SCROLLBAR KEEPS QT'S OWN PALETTE,
+        # which is near-black: a hole punched through the card it sits
+        # in, and the black rectangle reported on this page. table_style()
+        # is the same one the rest of the product uses.
+        self._table.setStyleSheet(table_style())
         column.addWidget(self._table, 1)
         return card
 
@@ -260,14 +267,12 @@ class LeavePage(QWidget):
             self._table.setItem(i, 3, cell(
                 f"{float(days):g}" if days is not None else ""))
 
+            # The remark is why a rejection is not just "no". On hover, so the
+            # table stays readable and the reason is never lost.
             status = str(row.get("status", ""))
-            state = QTableWidgetItem(status.title())
-            state.setForeground(QColor(STATUS_COLOUR.get(status, C.TEXT)))
-            # The remark is why a rejection is not just "no". Shown on hover
-            # so the table stays readable and the reason is never lost.
-            if row.get("remarks"):
-                state.setToolTip(str(row["remarks"]))
-            self._table.setItem(i, 4, state)
+            self._table.setCellWidget(i, 4, badge_cell(
+                status, status.title(),
+                str(row["remarks"]) if row.get("remarks") else None))
 
             # CANCEL EXISTS ONLY WHILE IT CAN WORK. An approved request is the
             # employer's plan now, and a button that is always there but
@@ -284,6 +289,8 @@ class LeavePage(QWidget):
 
         if not rows:
             self._say("No leave asked for yet.")
+        # Sized to the content, after it exists — see fit_columns.
+        fit_columns(self._table, stretch=0)
 
     def _apply(self):
         reason = self._reason.toPlainText().strip()

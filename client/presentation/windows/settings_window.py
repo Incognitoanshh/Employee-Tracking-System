@@ -26,7 +26,7 @@ import os
 import platform
 import subprocess
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
@@ -47,7 +47,8 @@ from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
 
-from client.presentation.theme import C
+from client.presentation.widgets import icons as _icons
+from client.presentation.theme import C, R_SM, Type
 from client.core.time_ist import IST  # single source of truth
 
 
@@ -209,7 +210,7 @@ class _Section(QLabel):
         font.setBold(True)
         self.setFont(font)
         self.setStyleSheet(
-            "color:#64748b; letter-spacing:1px; padding-top:14px; padding-bottom:2px;"
+            f"color:{C.TEXT_DIM}; letter-spacing:1px; padding-top:14px; padding-bottom:2px;"
         )
 
 
@@ -222,7 +223,7 @@ class SettingsWindow(QDialog):
         self.setMinimumWidth(560)
         self.setMinimumHeight(560)
         self.setSizeGripEnabled(True)
-        self.setStyleSheet("QDialog { background-color:#0b1220; }")
+        self.setStyleSheet(f"QDialog {{ background-color:{C.BG}; }}")
 
         self._rows: dict[str, QLabel] = {}
         self._previous: dict[str, str] = {}
@@ -260,12 +261,12 @@ class SettingsWindow(QDialog):
             self._base_style.setdefault(key, label.styleSheet())
             label.setStyleSheet(
                 f"color:{C.GREEN}; font-size:13px; font-weight:700;"
-                "background:#10281c; border-radius:4px; padding:1px 6px;"
+                f"background:{C.GREEN_BG}; border-radius:12px; padding:1px 6px;"
             )
             QTimer.singleShot(
                 2500,
                 lambda k=key: self._rows[k].setStyleSheet(
-                    self._base_style.get(k, "color:#e2e8f0;font-size:13px;font-weight:600;")
+                    self._base_style.get(k, f"color:{C.TEXT};font-size:13px;font-weight:600;")
                 ),
             )
 
@@ -277,7 +278,7 @@ class SettingsWindow(QDialog):
         name.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         val = QLabel(value)
-        val.setStyleSheet("color:#e2e8f0; font-size:13px; font-weight:600;")
+        val.setStyleSheet(f"color:{C.TEXT}; font-size:13px; font-weight:600;")
         val.setWordWrap(True)
         val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -296,7 +297,7 @@ class SettingsWindow(QDialog):
             f"font-size:20px; font-weight:700; color:{C.TEXT}; padding-bottom:2px;"
         )
         subtitle = QLabel("Your account, sync and storage details.")
-        subtitle.setStyleSheet("color:#64748b; font-size:12px; padding-bottom:6px;")
+        subtitle.setStyleSheet(f"color:{C.TEXT_DIM}; font-size:12px; padding-bottom:6px;")
         root.addWidget(title)
         root.addWidget(subtitle)
 
@@ -305,8 +306,8 @@ class SettingsWindow(QDialog):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet(
             "QScrollArea{background:transparent;}"
-            "QScrollBar:vertical{background:#0b1220;width:6px;border-radius:3px;}"
-            "QScrollBar::handle:vertical{background:#334155;border-radius:3px;}"
+            f"QScrollBar:vertical{{background:{C.BG};width:6px;border-radius:12px;}}"
+            f"QScrollBar::handle:vertical{{background:{C.BORDER_SOFT};border-radius:12px;}}"
         )
         content = QWidget()
         content.setStyleSheet("background:transparent;")
@@ -349,13 +350,13 @@ class SettingsWindow(QDialog):
 
         folder_btns = QHBoxLayout()
         folder_btns.addStretch()
-        self._btn_open = QPushButton("📂  Open Data Folder")
+        self._btn_open = QPushButton("Open Data Folder")
         self._btn_open.setFixedHeight(32)
         self._btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_open.setStyleSheet(
-            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};border-radius:8px;"
-            "color:#e2e8f0;font-size:12px;font-weight:600;padding:0 14px;}"
-            "QPushButton:hover{background:#334155;}"
+            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};border-radius:12px;"
+            f"color:{C.TEXT};font-size:12px;font-weight:600;padding:0 14px;}}"
+            f"QPushButton:hover{{background:{C.BORDER_SOFT};}}"
         )
         # BUG FIX: purana "Browse…" button permanently disabled tha.
         self._btn_open.clicked.connect(lambda: _open_in_file_manager(STORAGE_DIR))
@@ -376,7 +377,7 @@ class SettingsWindow(QDialog):
             "automatically — you do not need to restart the app."
         )
         sync_note.setWordWrap(True)
-        sync_note.setStyleSheet("color:#475569; font-size:11px; padding:2px 4px 0 4px;")
+        sync_note.setStyleSheet(f"color:{C.TEXT_MUTED}; font-size:12px; padding:2px 4px 0 4px;")
         layout.addWidget(sync_note)
 
         # ── Security ──
@@ -389,7 +390,7 @@ class SettingsWindow(QDialog):
             "they are never stored or transmitted as plain images."
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color:#475569; font-size:11px; padding:4px 4px 0 4px;")
+        note.setStyleSheet(f"color:{C.TEXT_MUTED}; font-size:12px; padding:4px 4px 0 4px;")
         layout.addWidget(note)
 
         # ── About ──
@@ -405,13 +406,14 @@ class SettingsWindow(QDialog):
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
 
-        self._btn_refresh = QPushButton("↻  Refresh")
+        self._btn_refresh = QPushButton("  Refresh")
+        self._btn_refresh.setIcon(_icons.icon("refresh-cw", 15, C.TEXT))
         self._btn_refresh.setFixedHeight(34)
         self._btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_refresh.setStyleSheet(
-            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};border-radius:9px;"
-            "color:#e2e8f0;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#334155;}"
+            f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};border-radius:12px;"
+            f"color:{C.TEXT};font-size:13px;font-weight:600;}}"
+            f"QPushButton:hover{{background:{C.BORDER_SOFT};}}"
         )
         self._btn_refresh.clicked.connect(self.refresh)
 
@@ -419,9 +421,12 @@ class SettingsWindow(QDialog):
         self._btn_close.setFixedHeight(34)
         self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_close.setStyleSheet(
-            "QPushButton{background:#1d4ed8;border:1px solid #2563eb;border-radius:9px;"
-            "color:white;font-size:13px;font-weight:600;}"
-            "QPushButton:hover{background:#2563eb;}"
+            # Palette, not literals. These two blues were sampled from the
+            # dark theme and stayed dark-theme blue after a switch to light.
+            f"QPushButton{{background:{C.PRIMARY_DIM};border:1px solid {C.PRIMARY};"
+            f"border-radius:{R_SM}px;"
+            f"color:white;font-size:{Type.BODY}px;font-weight:600;}}"
+            f"QPushButton:hover{{background:{C.PRIMARY};}}"
         )
         self._btn_close.clicked.connect(self.close)
 
@@ -442,8 +447,8 @@ class SettingsWindow(QDialog):
                 )
 
         role_map = {
-            "super_admin": "👑  Super Admin",
-            "admin": "🛡  Admin",
+"super_admin": "Super Admin",
+"admin": "Admin",
             "employee": "Employee",
         }
         role = getattr(SessionManager, "role", "employee")

@@ -61,6 +61,22 @@ router.get("/attachments/:id", chatCtrl.downloadAttachment);
 // Editing is allowed for a few minutes and keeps every previous version.
 router.patch("/messages/:seq", chatCtrl.editMessage);
 router.post("/messages/:seq/pin", chatCtrl.setPinned);
+
+// Reactions. The choices are a GET so the client never hard-codes a list that
+// can drift from what the server will accept.
+router.get("/reactions", chatCtrl.listReactionChoices);
+
+// Typing. A ping is a write into the channel and is guarded the same way the
+// messages are; the read excludes you, because nobody needs telling that they
+// are typing.
+router.post("/channels/:id/typing",   chatCtrl.pingTyping);
+router.delete("/channels/:id/typing", chatCtrl.clearTyping);
+router.get("/channels/:id/typing",    chatCtrl.whoIsTyping);
+router.post("/messages/:seq/reactions", chatCtrl.toggleReaction);
+
+// A message and its replies. Opening a REPLY opens the same thread — see the
+// controller: a thread of one is a dead end.
+router.get("/messages/:seq/thread", chatCtrl.getThread);
 // Withdraws a message from view. The row and its text stay — see the note on
 // deleteMessage for why this is not a DELETE in the database.
 router.delete("/messages/:seq", chatCtrl.deleteMessage);

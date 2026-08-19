@@ -82,7 +82,10 @@ async function main() {
             ('SA01','owner','${hash}','super_admin','The Owner','Founder'),
             ('A001','admin1','${hash}','admin','Priya Nair','Manager'),
             ('E001','rajesh','${hash}','employee','Rajesh Kumar','Developer'),
-            ('E002','sneha','${hash}','employee','Sneha Iyer','Designer')`);
+            ('E002','sneha','${hash}','employee','Sneha Iyer','Designer'),
+            -- A third employee who shares nothing with anybody: no team, no
+            -- channel, no message. The photo rule has to answer for them.
+            ('E003','chandra','${hash}','employee','Chandra Rao','Analyst')`);
 
         Object.assign(process.env, {
             DB_HOST: process.env.PGHOST || "127.0.0.1",
@@ -450,37 +453,29 @@ async function main() {
         res = await api("GET", "/profile/photo", { token: employee });
         check("I can fetch my own photo", res.status === 200 || res.status === 304,
             `HTTP ${res.status}`);
+        // ANYBODY SIGNED IN CAN SEE ANYBODY'S PHOTOGRAPH — the owner's rule,
+        // for a company of a thousand people. What is checked here is that
+        // the door is still shut to somebody with no session at all: the
+        // directory is the company's, not the internet's.
         res = await api("GET", "/profile/photo/E001", { token: other });
-        check("a stranger in the company cannot fetch mine", res.status === 403,
-            `HTTP ${res.status}`);
-        res = await api("GET", "/profile/photo/E001", { token: admin });
-        check("an admin can — they manage people", res.status === 200, `HTTP ${res.status}`);
-
-        // A FACE IS SHOWN WHERE THE NAME ALREADY IS.
-        //
-        // Photographs are meant to appear beside messages and in the team
-        // list — "photo agar employee lagayega to sab jagah dikhna chahiye
-        // like instagram". While only the owner of a photo and an
-        // administrator could read it, every one of those places drew
-        // initials instead, and the feature existed on exactly one page.
-        //
-        // The line is where chat already draws it: a colleague you share a
-        // team with, because you can already see their name, their messages
-        // and whether they are online. What is checked here is that it did
-        // not become the whole directory — the two assertions matter as a
-        // pair, and the 403 above is the half that is easy to lose.
-        const team = (await api("POST", "/admin/teams",
-            { token: admin, body: { name: "Design" } })).body.team;
-        await api("POST", `/admin/teams/${team.id}/members`,
-            { token: admin, body: { employee_ids: ["E001", "E002"] } });
-
-        res = await api("GET", "/profile/photo/E001", { token: other });
-        check("a team-mate CAN — the same people chat already shows them",
+        check("a colleague in no shared team can see it",
             res.status === 200, `HTTP ${res.status}`);
+
+        const third = await login("chandra");
+        res = await api("GET", "/profile/photo/E001", { token: third });
+        check("and so can somebody who has never messaged them",
+            res.status === 200, `HTTP ${res.status}`);
+
+        res = await api("GET", "/profile/photo/E001", { token: null });
+        check("but not somebody without a session", res.status === 401,
+            `HTTP ${res.status} — the directory is the company's, not the `
+            + `internet's`);
+
         res = await api("GET", "/profile/photo/E002", { token: employee });
-        check("and it works in both directions", res.status === 404,
-            `HTTP ${res.status} — 404 because E002 has uploaded nothing, `
-            + `which is a different answer from "not allowed"`);
+        check("somebody with no photo is a 404, not a refusal",
+            res.status === 404,
+            `HTTP ${res.status} — "there is none" and "you may not" must not `
+            + `look the same`);
 
         res = await api("DELETE", "/profile/me/photo", { token: employee });
         check("removing it works", res.status === 200, `HTTP ${res.status}`);

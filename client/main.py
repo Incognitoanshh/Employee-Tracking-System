@@ -77,6 +77,44 @@ def main():
 
     app = QApplication(sys.argv)
 
+    # AN EXCEPTION IN A SLOT MUST NOT TAKE THE WINDOW WITH IT.
+    #
+    # Qt calls Python slots from C++. When one raises, PySide prints the
+    # traceback and — depending on the build — may abort the process: the
+    # employee's app vanishes mid-shift with no window, no message, and
+    # nothing said about tracking that was running. Screenshots stop. Nobody
+    # finds out until somebody asks why a day is missing.
+    #
+    # This does not swallow the error. It writes it where support can read
+    # it and lets the application carry on, which is the right trade for a
+    # tool that is supposed to be running all day in the background.
+    def _log_uncaught(kind, value, trace):
+        if issubclass(kind, KeyboardInterrupt):
+            sys.__excepthook__(kind, value, trace)
+            return
+        import traceback as _tb
+        from client.services.logger_service import LoggerService
+        detail = "".join(_tb.format_exception(kind, value, trace))
+        try:
+            LoggerService.log_verbose(f"Unhandled error: {detail}")
+        except Exception:
+            pass
+        sys.__excepthook__(kind, value, trace)
+
+    sys.excepthook = _log_uncaught
+
+    # TOOLTIPS ARE STYLED HERE, NOT WITH THE REST OF THE PALETTE.
+    #
+    # A tooltip is its own top-level window, so a stylesheet set on a panel
+    # never reaches it — it has to go on the application. And the application
+    # does not exist yet when load_saved_theme() runs a few lines above, so
+    # on a session where nobody touches the theme toggle the rule was never
+    # applied at all: the tip fell through to the platform's, and on a Mac in
+    # dark mode under a light-themed app that is a black box with dark text
+    # in it. Reported, and this is the line that was missing.
+    from client.presentation.theme import apply_tooltip_style
+    apply_tooltip_style()
+
     # App identity — icon aur naam.
     #
     # Pehle kuch bhi set nahi tha, is liye Windows taskbar / macOS Dock me
@@ -105,6 +143,37 @@ def main():
     from client.presentation.windows.login_window import drain_login_workers
     app.aboutToQuit.connect(drain_login_workers)
 
+    def drain_every_worker():
+        """Wait for EVERY background thread, not only the login ones.
+
+        THE CRASH THIS ENDS, and it is the one people actually saw:
+        "Python quit unexpectedly", no traceback, nothing in the log.
+        Qt aborts the process when a QThread is destroyed while it is still
+        running, and these workers run a BLOCKING http request — quit() asks
+        an event loop to stop and there is no event loop inside a blocking
+        socket read, so a fetch cannot be interrupted at all. Close the app
+        while one is in flight and the process dies on the way out.
+
+        It needs an unreachable server to be common, which is exactly when it
+        is worst: the network drops, every request sits waiting, and the app
+        crashes the moment somebody gives up and quits.
+
+        Bounded, because quitting must stay quick — four seconds is longer
+        than a connection takes to fail and short enough that nobody waits.
+        Whatever has not finished by then is handled by the exit below.
+        """
+        from PySide6.QtCore import QThread
+        deadline = 4000
+        for thread in list(QApplication.instance().findChildren(QThread)):
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(deadline)
+            except RuntimeError:
+                pass
+
+    app.aboutToQuit.connect(drain_every_worker)
+
 
     _warm_native_modules()
 
@@ -127,7 +196,29 @@ def main():
 
     window.show()
 
-    sys.exit(app.exec())
+    code = app.exec()
+
+    # LEAVING WITHOUT LETTING Qt TEAR ITSELF DOWN, ON PURPOSE.
+    #
+    # The window is gone and the event loop has returned: everything after
+    # this point is destructors. If any worker is STILL inside a blocking
+    # request — the drain above waits, but a request can outlast it — Qt
+    # destroys a running QThread and calls abort(), and the employee sees
+    # "Python quit unexpectedly" as the last thing the app ever does. A clean
+    # session ending in a crash dialog is not a clean session: it is a
+    # support call, and it teaches people the app is unreliable at the exact
+    # moment it finished working correctly.
+    #
+    # Nothing is lost by skipping teardown. Every database write here is a
+    # short transaction committed by its context manager, and anything queued
+    # for the server is already on disk in the outbox — that is what the
+    # outbox is for. Logs are flushed first so nothing in flight is dropped.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
 
 
 if __name__ == "__main__":

@@ -118,6 +118,30 @@ async function main() {
         psql(DB, `INSERT INTO screenshots (employee_id, file_name)
                   VALUES ('E001','${shotFile}')`);
 
+        // A FINALISED PAYROLL RUN, AND THEIR LINE IN IT. This is the record
+        // that must survive the deletion — see below for what happened when
+        // it did not.
+        psql(DB, `INSERT INTO payroll_runs (month, status, working_days, generated_by)
+                  VALUES ('2026-05-01','FINALIZED',22,'E001')`);
+        const runId = psql(DB,
+            `SELECT id FROM payroll_runs WHERE month='2026-05-01'`).trim();
+        psql(DB, `INSERT INTO payroll_lines (run_id, employee_id, gross_monthly,
+                      working_days, present_days, per_day, net_before_adjustments)
+                  VALUES (${runId},'E001',50000,22,22,2272.73,50000)`);
+        psql(DB, `INSERT INTO employee_salaries (employee_id, gross_monthly, effective_from)
+                  VALUES ('E001', 50000, '2026-05-01')`);
+        const runTotalBefore = psql(DB,
+            `SELECT COALESCE(SUM(net_before_adjustments),0)
+               FROM payroll_lines WHERE run_id=${runId}`).trim();
+
+        // An alert that was sent about them — the send-log had no foreign key
+        // and no explicit delete, so without one its rows outlive everything.
+        psql(DB, `INSERT INTO alert_emails
+                      (employee_id, alert_type, ist_day, severity, subject,
+                       recipients, status)
+                  VALUES ('E001','IDLE','2026-05-04','WARN','Idle too long',
+                          'admin@example.com','SENT')`);
+
         console.log("Before");
         check("they have tracking data of every kind",
             count("attendance", "employee_id='E001'") === 1
@@ -127,6 +151,8 @@ async function main() {
             && count("employee_configs", "employee_id='E001'") === 1);
         check("and a message somebody else replied to",
             count("messages", "sender_id='E001'") === 1);
+        check("and an alert was logged about them",
+            count("alert_emails", "employee_id='E001'") === 1);
 
         // ── the deletion ────────────────────────────────────────────────
         const res = await api("DELETE", "/admin/employees/E001", { token: sa });
@@ -134,6 +160,36 @@ async function main() {
         check("succeeds", res.status === 200, JSON.stringify(res.body).slice(0, 120));
         check("and the account is gone",
             count("employees", "employee_id='E001'") === 0);
+
+        console.log("\nA FINALISED PAYROLL RUN DOES NOT MOVE");
+        // THE BUG THIS EXISTS FOR, measured in a scratch database:
+        // payroll_lines.employee_id carried ON DELETE CASCADE, so deleting an
+        // employee deleted their line out of a run that was already
+        // FINALISED. The run's total went from 50,000.00 to 0 and the run
+        // still said "FINALIZED". Nothing warned anybody and nothing in the
+        // audit log said a number had moved.
+        //
+        // The product says everywhere else that a finalised month stops
+        // moving. A payroll record that quietly changes is the one thing a
+        // payroll record must never do.
+        check("their payroll line is still there",
+            count("payroll_lines", "employee_id='E001'") === 1,
+            "a finalised run lost a line when somebody left");
+        const runTotalAfter = psql(DB,
+            `SELECT COALESCE(SUM(net_before_adjustments),0)
+               FROM payroll_lines WHERE run_id=${runId}`).trim();
+        check("and the run's total is exactly what it was",
+            runTotalAfter === runTotalBefore,
+            `${runTotalBefore} became ${runTotalAfter}`);
+        check("salary history survives too — it is what the run was computed from",
+            count("employee_salaries", "employee_id='E001'") === 1);
+        check("the line still names them, as a former employee",
+            psql(DB, `SELECT COALESCE(e.full_name, r.full_name, l.employee_id)
+                        FROM payroll_lines l
+                        LEFT JOIN employees e ON e.employee_id = l.employee_id
+                        LEFT JOIN retired_employee_ids r ON r.employee_id = l.employee_id
+                       WHERE l.employee_id = 'E001'`).trim().length > 0,
+            "a line with an id and no name is not a record of anything");
 
         console.log("\nTracking data goes with them");
         // The retention side: a company must not still hold pictures of the
@@ -145,6 +201,11 @@ async function main() {
             "encrypted pictures of a former employee left on disk, referenced "
             + "by nothing, so nothing can ever purge or even find them");
         check("activity logs are removed", count("activity_logs", "employee_id='E001'") === 0);
+        // The alert send-log was the one tracking table with no foreign key
+        // and no explicit delete, so its rows outlived everything else.
+        check("the alert send-log is removed too",
+            count("alert_emails", "employee_id='E001'") === 0,
+            "an orphan log about a former employee, kept for ever");
         check("their configuration is removed",
             count("employee_configs", "employee_id='E001'") === 0);
 

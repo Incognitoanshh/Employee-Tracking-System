@@ -1,6 +1,30 @@
 # ETS — Production Deployment Checklist
 
-**Release:** `90ed7e6` · **Build:** run `30805656701` · **Server:** `65.21.212.85`
+> **Before you run anything here, set where "here" is.**
+>
+> This document is public — the repository is, so that the code can be read.
+> An SSH login is two halves, a username and a secret, and writing the
+> username down in a public file hands over one of them for free. So the
+> commands below take the target from the environment instead:
+>
+> ```bash
+> export ETS_HOST=deployuser@your.server.ip     # the SSH login
+> export ETS_USER=deployuser                    # that user's name
+> export ETS_HOME=/home/deployuser              # and their home directory
+> ```
+>
+> Set those once per shell and every command in this file works as written.
+> Nothing about the procedure changed — only where the name of your server
+> comes from.
+>
+> The application's own API address is a different matter and is NOT hidden:
+> a desktop client that talks to a server must carry that server's address,
+> so it is in the shipped binary whatever this repository says. What protects
+> it is the server's own hardening — key-only SSH, a firewall, fail2ban — not
+> secrecy about where it lives.
+
+
+**Release:** `90ed7e6` · **Build:** run `30805656701` · **Server:** `$ETS_HOST`
 
 Work top to bottom. Every step has a verification command — do not move on
 until it passes. Anything marked **BLOCKER** must be done before employees
@@ -62,12 +86,12 @@ dig +short ets.example.com          # must print 65.21.212.85
 
 ```bash
 # 1.2 — install nginx + certbot
-ssh etsadmin@65.21.212.85 'sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx'
+ssh $ETS_HOST 'sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx'
 ```
 
 ```bash
 # 1.3 — reverse proxy config
-ssh etsadmin@65.21.212.85 'sudo tee /etc/nginx/sites-available/ets > /dev/null <<'"'"'NGINX'"'"'
+ssh $ETS_HOST 'sudo tee /etc/nginx/sites-available/ets > /dev/null <<'"'"'NGINX'"'"'
 server {
     listen 80;
     server_name ets.example.com;
@@ -93,12 +117,12 @@ sudo nginx -t && sudo systemctl reload nginx'
 
 ```bash
 # 1.4 — issue the certificate (certbot rewrites the vhost for TLS + redirect)
-ssh -t etsadmin@65.21.212.85 'sudo certbot --nginx -d ets.example.com --agree-tos -m hello@amazeinternet.com --redirect'
+ssh -t $ETS_HOST 'sudo certbot --nginx -d ets.example.com --agree-tos -m hello@amazeinternet.com --redirect'
 ```
 
 ```bash
 # 1.5 — close port 8000 to the world; nginx reaches it on loopback
-ssh etsadmin@65.21.212.85 'sudo ufw allow 80,443/tcp && sudo ufw deny 8000/tcp && sudo ufw --force enable && sudo ufw status'
+ssh $ETS_HOST 'sudo ufw allow 80,443/tcp && sudo ufw deny 8000/tcp && sudo ufw --force enable && sudo ufw status'
 ```
 
 **Verify**
@@ -107,7 +131,7 @@ ssh etsadmin@65.21.212.85 'sudo ufw allow 80,443/tcp && sudo ufw deny 8000/tcp &
 curl -s https://ets.example.com/api/health                 # healthy JSON
 curl -s -o /dev/null -w "%{http_code}\n" http://ets.example.com/api/health   # 301
 curl -s --max-time 8 http://65.21.212.85:8000/api/health || echo "port 8000 closed ✅"
-ssh etsadmin@65.21.212.85 'sudo certbot renew --dry-run'   # auto-renewal works
+ssh $ETS_HOST 'sudo certbot renew --dry-run'   # auto-renewal works
 ```
 
 ### After TLS: point the client at HTTPS
@@ -128,13 +152,13 @@ push — CI rebuilds, and **that** build is the one to distribute.
 ## 2. Deploy server audit fixes
 
 ```bash
-cd "/Users/ansh/Downloads/Employee-Tracking-System-main copy" && tar czf - -C server config/db.js migrations/retention_purge.sql | ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && tar xzf - && pm2 restart ets-server && sleep 3 && curl -s localhost:8000/api/health'
+cd "/Users/ansh/Downloads/Employee-Tracking-System-main copy" && tar czf - -C server config/db.js migrations/retention_purge.sql | ssh $ETS_HOST 'cd "$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy/server" && tar xzf - && pm2 restart ets-server && sleep 3 && curl -s localhost:8000/api/health'
 ```
 
 **Verify**
 
 ```bash
-ssh etsadmin@65.21.212.85 'pm2 logs ets-server --lines 20 --nostream | grep -E "DB CONNECTED|ERROR"'
+ssh $ETS_HOST 'pm2 logs ets-server --lines 20 --nostream | grep -E "DB CONNECTED|ERROR"'
 ```
 
 Expect `✅ DB CONNECTED`, no `[DB POOL]` errors.
@@ -170,10 +194,10 @@ The historical steps below are kept as reference.
 
 ```bash
 # 3.1 — nightly dump, 14-day retention
-ssh etsadmin@65.21.212.85 'mkdir -p ~/backups && tee ~/backup-ets.sh > /dev/null <<'"'"'SH'"'"'
+ssh $ETS_HOST 'mkdir -p ~/backups && tee ~/backup-ets.sh > /dev/null <<'"'"'SH'"'"'
 #!/bin/bash
 set -euo pipefail
-cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server"
+cd "$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy/server"
 set -a; . ./.env; set +a
 STAMP=$(date +%F_%H%M)
 PGPASSWORD="$DB_PASSWORD" pg_dump -h localhost -U "$DB_USER" "$DB_NAME" | gzip > ~/backups/ets_$STAMP.sql.gz
@@ -185,12 +209,12 @@ chmod +x ~/backup-ets.sh && ~/backup-ets.sh'
 
 ```bash
 # 3.2 — schedule 02:00 daily
-ssh etsadmin@65.21.212.85 '(crontab -l 2>/dev/null | grep -v backup-ets; echo "0 2 * * * /home/etsadmin/backup-ets.sh >> /home/etsadmin/backups/backup.log 2>&1") | crontab - && crontab -l'
+ssh $ETS_HOST '(crontab -l 2>/dev/null | grep -v backup-ets; echo "0 2 * * * $ETS_HOME/backup-ets.sh >> $ETS_HOME/backups/backup.log 2>&1") | crontab - && crontab -l'
 ```
 
 ```bash
 # 3.3 — RESTORE TEST. An untested backup is not a backup.
-ssh -t etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && sudo -u postgres createdb ets_restore_test && gunzip -c ~/backups/$(ls -t ~/backups | head -1) | sudo -u postgres psql -d ets_restore_test > /dev/null && sudo -u postgres psql -d ets_restore_test -c "SELECT (SELECT COUNT(*) FROM employees) AS employees, (SELECT COUNT(*) FROM attendance) AS attendance;" && sudo -u postgres dropdb ets_restore_test'
+ssh -t $ETS_HOST 'cd "$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && sudo -u postgres createdb ets_restore_test && gunzip -c ~/backups/$(ls -t ~/backups | head -1) | sudo -u postgres psql -d ets_restore_test > /dev/null && sudo -u postgres psql -d ets_restore_test -c "SELECT (SELECT COUNT(*) FROM employees) AS employees, (SELECT COUNT(*) FROM attendance) AS attendance;" && sudo -u postgres dropdb ets_restore_test'
 ```
 
 Row counts must match production. **Screenshot files are not in the dump** —
@@ -203,7 +227,7 @@ DB-only restore leaves screenshot rows pointing at missing files.
 
 ```bash
 # 4.1 — pm2 restarts on reboot
-ssh -t etsadmin@65.21.212.85 'pm2 save && pm2 startup systemd -u etsadmin --hp /home/etsadmin'
+ssh -t $ETS_HOST 'pm2 save && pm2 startup systemd -u $ETS_USER --hp $ETS_HOME'
 ```
 
 ```bash
@@ -224,7 +248,7 @@ ssh -t etsadmin@65.21.212.85 'pm2 save && pm2 startup systemd -u etsadmin --hp /
 #   Test it:  ETS_NTFY_TOPIC=<topic> bash server/scripts/healthcheck.sh
 
 # 4.2 — health check every 5 min; alerts on two consecutive failures
-ssh etsadmin@65.21.212.85 'tee ~/health-check.sh > /dev/null <<'"'"'SH'"'"'
+ssh $ETS_HOST 'tee ~/health-check.sh > /dev/null <<'"'"'SH'"'"'
 #!/bin/bash
 STATE=~/.ets_health_fails
 FAILS=$(cat $STATE 2>/dev/null || echo 0)
@@ -241,29 +265,29 @@ else
 fi
 SH
 chmod +x ~/health-check.sh
-(crontab -l 2>/dev/null | grep -v health-check; echo "*/5 * * * * /home/etsadmin/health-check.sh") | crontab -'
+(crontab -l 2>/dev/null | grep -v health-check; echo "*/5 * * * * $ETS_HOME/health-check.sh") | crontab -'
 ```
 
 ```bash
 # 4.3 — disk alarm. uploads/ grows ~40 GB/day at 1000 employees without retention.
-ssh etsadmin@65.21.212.85 'tee ~/disk-check.sh > /dev/null <<'"'"'SH'"'"'
+ssh $ETS_HOST 'tee ~/disk-check.sh > /dev/null <<'"'"'SH'"'"'
 #!/bin/bash
 USE=$(df / | awk "NR==2{print \$5}" | tr -d %)
 [ "$USE" -gt 80 ] && echo "$(date -Is) DISK ${USE}% — run retention_purge.sql" >> ~/health.log
 SH
 chmod +x ~/disk-check.sh
-(crontab -l 2>/dev/null | grep -v disk-check; echo "0 * * * * /home/etsadmin/disk-check.sh") | crontab -'
+(crontab -l 2>/dev/null | grep -v disk-check; echo "0 * * * * $ETS_HOME/disk-check.sh") | crontab -'
 ```
 
 ```bash
 # 4.4 — data retention, weekly (Sunday 03:00). Review the periods first.
-ssh etsadmin@65.21.212.85 '(crontab -l 2>/dev/null | grep -v retention_purge; echo "0 3 * * 0 cd \"/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server\" && set -a && . ./.env && set +a && PGPASSWORD=\$DB_PASSWORD psql -h localhost -U \$DB_USER -d \$DB_NAME -f migrations/retention_purge.sql >> /home/etsadmin/purge.log 2>&1") | crontab - && crontab -l'
+ssh $ETS_HOST '(crontab -l 2>/dev/null | grep -v retention_purge; echo "0 3 * * 0 cd \"$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy/server\" && set -a && . ./.env && set +a && PGPASSWORD=\$DB_PASSWORD psql -h localhost -U \$DB_USER -d \$DB_NAME -f migrations/retention_purge.sql >> $ETS_HOME/purge.log 2>&1") | crontab - && crontab -l'
 ```
 
 **Weekly manual check**
 
 ```bash
-ssh etsadmin@65.21.212.85 'df -h / | tail -1; du -sh ~/ETS-v5/*/server/uploads 2>/dev/null; tail -5 ~/health.log; pm2 list'
+ssh $ETS_HOST 'df -h / | tail -1; du -sh ~/ETS-v5/*/server/uploads 2>/dev/null; tail -5 ~/health.log; pm2 list'
 ```
 
 ---
@@ -353,7 +377,7 @@ logout works.
 **Stage 2 — 5 employees, one full shift.** Then check:
 
 ```bash
-ssh etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "SELECT employee_id, COUNT(*) shots, MIN(created_at::time) first, MAX(created_at::time) last FROM screenshots WHERE created_at > NOW() - INTERVAL '\''1 day'\'' GROUP BY 1;"'
+ssh $ETS_HOST 'cd "$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && PGPASSWORD=$DB_PASSWORD psql -h localhost -U $DB_USER -d $DB_NAME -c "SELECT employee_id, COUNT(*) shots, MIN(created_at::time) first, MAX(created_at::time) last FROM screenshots WHERE created_at > NOW() - INTERVAL '\''1 day'\'' GROUP BY 1;"'
 ```
 
 Captures should be **spread across the shift**, not bunched at the start.
@@ -382,13 +406,13 @@ new clients speak the same API.
 **Server**
 
 ```bash
-ssh -t etsadmin@65.21.212.85 'cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy" && git log --oneline -5 && git checkout <previous-sha> -- server/ && pm2 restart ets-server && sleep 3 && curl -s localhost:8000/api/health'
+ssh -t $ETS_HOST 'cd "$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy" && git log --oneline -5 && git checkout <previous-sha> -- server/ && pm2 restart ets-server && sleep 3 && curl -s localhost:8000/api/health'
 ```
 
 **Database**
 
 ```bash
-ssh -t etsadmin@65.21.212.85 'pm2 stop ets-server && cd "/home/etsadmin/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && sudo -u postgres dropdb $DB_NAME && sudo -u postgres createdb -O $DB_USER $DB_NAME && gunzip -c ~/backups/<chosen>.sql.gz | sudo -u postgres psql -d $DB_NAME && pm2 start ets-server'
+ssh -t $ETS_HOST 'pm2 stop ets-server && cd "$ETS_HOME/ETS-v5/Employee-Tracking-System-main copy/server" && set -a && . ./.env && set +a && sudo -u postgres dropdb $DB_NAME && sudo -u postgres createdb -O $DB_USER $DB_NAME && gunzip -c ~/backups/<chosen>.sql.gz | sudo -u postgres psql -d $DB_NAME && pm2 start ets-server'
 ```
 
 Migrations are additive and idempotent — none drop a column or table, so a

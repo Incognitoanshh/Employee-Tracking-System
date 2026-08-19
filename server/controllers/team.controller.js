@@ -134,14 +134,24 @@ exports.createTeam = async (req, res) => {
                 `SELECT employee_id FROM employees WHERE employee_id = ANY($1)`,
                 [members.map(String)]
             );
-            for (const row of valid.rows) {
-                await client.query(
-                    `INSERT INTO team_members (team_id, employee_id) VALUES ($1, $2)
-                     ON CONFLICT DO NOTHING`,
-                    [teamId, row.employee_id]
-                );
-                added += 1;
-            }
+            // ONE STATEMENT, NOT ONE PER PERSON.
+            //
+            // This was an INSERT inside a loop: adding a team of five hundred
+            // meant five hundred round trips, all inside one open
+            // transaction, holding locks the whole way. unnest() turns the
+            // list into rows and the database does it in a single pass.
+            //
+            // `added` now counts what was actually inserted rather than what
+            // was attempted — ON CONFLICT DO NOTHING means the two are not
+            // the same number when somebody is already on the team, and the
+            // old count quietly claimed they had been added again.
+            const inserted = await client.query(
+                `INSERT INTO team_members (team_id, employee_id)
+                 SELECT $1, unnest($2::text[])
+                 ON CONFLICT DO NOTHING`,
+                [teamId, valid.rows.map((row) => row.employee_id)]
+            );
+            added += inserted.rowCount;
         }
         await client.query("COMMIT");
 
@@ -352,12 +362,13 @@ exports.createChannel = async (req, res) => {
                   WHERE tm.team_id = $1 AND tm.employee_id = ANY($2)`,
                 [teamId, members]
             );
-            for (const row of valid.rows) {
-                await client.query(
-                    `INSERT INTO channel_members (channel_id, employee_id) VALUES ($1, $2)
-                     ON CONFLICT DO NOTHING`, [channelId, row.employee_id]);
-                added += 1;
-            }
+            // One statement — see the team member insert above for why.
+            const inserted = await client.query(
+                `INSERT INTO channel_members (channel_id, employee_id)
+                 SELECT $1, unnest($2::text[])
+                 ON CONFLICT DO NOTHING`,
+                [channelId, valid.rows.map((row) => row.employee_id)]);
+            added += inserted.rowCount;
         }
         await client.query("COMMIT");
 

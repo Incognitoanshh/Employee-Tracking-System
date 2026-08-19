@@ -27,7 +27,7 @@
 #  a password. Over `ssh host 'command'` there is no terminal and it fails
 #  with "a terminal is required to read the password". Use `ssh -t`:
 #
-#      ssh -t etsadmin@HOST 'bash .../compare_schedules.sh'
+#      ssh -t $ETS_HOST 'bash .../compare_schedules.sh'
 #
 #  ...or run it from an interactive session on the server.
 #  Usage:

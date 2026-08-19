@@ -15,7 +15,7 @@ from client.application.managers.sync_manager import SyncManager
 from client.infrastructure.database.database import Database
 from client.security.crypto_engine import CryptoEngine
 from client.services.logger_service import LoggerService
-from client.core.time_ist import now_ist, end_of_ist_day, ist_day_str
+from client.core.time_ist import now_ist, ist_day_str
 from client.services.settings_service import SettingsService
 from client.core.config import API_BASE_URL, STORAGE_DIR
 from client.core.config.settings import Settings

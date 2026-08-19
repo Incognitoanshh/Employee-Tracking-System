@@ -52,19 +52,26 @@ check("and is built with that many", table is not None and table.group(1) == "10
 # less than the column count — no more (writing off the end of the table) and
 # no fewer (a column left permanently blank).
 populate = SOURCE.split("def _populate(self, data: dict):")[1].split("\n    def ")[0]
-indices = sorted({int(m) for m in re.findall(r"self\._table\.setItem\(i, (\d+),", populate)})
+# setItem AND setCellWidget. The status columns hold chips, which have to be
+# real widgets — a QTableWidgetItem cannot carry a stylesheet. Counting only
+# setItem made a migrated column look like a skipped one.
+indices = sorted({int(m) for m in re.findall(
+    r"self\._table\.set(?:Item|CellWidget)\(i, (\d+),", populate)})
 check("every column from 0 to 9 is filled, none skipped",
       indices == list(range(10)), str(indices))
 
 print("\nThe two status columns stay apart")
-check("Attendance status is written to column 8",
-      re.search(r"self\._table\.setItem\(i, 8, record\)", populate) is not None)
-check("Shift status is written to column 9",
-      re.search(r"self\._table\.setItem\(i, 9, shift\)", populate) is not None)
+check("Attendance status is a chip in column 8",
+      re.search(r"setCellWidget\(i, 8, _badge_cell\(", populate) is not None)
+check("Shift status is a chip in column 9",
+      re.search(r"setCellWidget\(i, 9, _badge_cell\(", populate) is not None)
 check("the record column reads attendance_label",
       'row.get("attendance_label")' in populate)
 check("the shift column reads shift_label",
       'row.get("shift_label")' in populate)
+check("neither picks its own colours any more",
+      'C["danger"]' not in populate and 'C["success"]' not in populate,
+      "status colours belong in theme.status_colors, once")
 
 print("\nNothing says 'signed in' or 'signed out' in a status cell again")
 # The words that produced the contradiction: "Not signed out" beside

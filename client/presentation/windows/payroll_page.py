@@ -25,8 +25,8 @@ from PySide6.QtWidgets import (
 from client.core import http as _http
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
-from client.presentation.theme import C, scrollbar
-from client.presentation.widgets.panel_widgets import Card, PageHeader
+from client.presentation.theme import C, table_style
+from client.presentation.widgets.panel_widgets import Card, PageHeader, fit_columns
 
 
 def _headers() -> dict:
@@ -89,7 +89,7 @@ class PayrollPage(QWidget):
         worker.start()
 
     def _say(self, message: str, ok: bool = True):
-        self._status.setText(("" if ok else "⚠  ") + message)
+        self._status.setText(("" if ok else "") + message)
         self._status.setStyleSheet(
             f"color:{C.TEXT_MUTED if ok else C.AMBER};font-size:12px;"
             f"background:transparent;border:none;")
@@ -119,10 +119,14 @@ class PayrollPage(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.setShowGrid(False)
-        self._table.setAlternatingRowColors(True)
+        self._table.setAlternatingRowColors(False)  # zebra striping competes with the data
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self._table.setStyleSheet(scrollbar())
+        # A TABLE STYLED WITH ONLY ITS SCROLLBAR KEEPS QT'S OWN PALETTE,
+        # which is near-black: a hole punched through the card it sits
+        # in, and the black rectangle reported on this page. table_style()
+        # is the same one the rest of the product uses.
+        self._table.setStyleSheet(table_style())
         column.addWidget(self._table, 1)
         outer.addWidget(card, 1)
 
@@ -178,7 +182,7 @@ class PayrollPage(QWidget):
             open_slip.setCursor(Qt.CursorShape.PointingHandCursor)
             open_slip.setStyleSheet(
                 f"QPushButton{{background:{C.ELEVATED};border:1px solid {C.BORDER};"
-                f"border-radius:6px;color:{C.TEXT};font-size:11px;padding:4px 10px;}}"
+                f"border-radius:12px;color:{C.TEXT};font-size:12px;padding:4px 10px;}}"
                 f"QPushButton:hover{{border-color:{C.PRIMARY};}}")
             open_slip.clicked.connect(
                 lambda _checked=False, month=row.get("month"): self._payslip(month))
@@ -188,6 +192,8 @@ class PayrollPage(QWidget):
             self._say("No payslips yet. They appear here once a month is finalised.")
         else:
             self._say(f"{len(rows)} month{'' if len(rows) == 1 else 's'}.")
+        # Sized to the content, after it exists — see fit_columns.
+        fit_columns(self._table, stretch=0)
 
     def _payslip(self, month: str):
         """Fetch the payslip and open it in the browser.

@@ -241,6 +241,70 @@ async function main() {
                       (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days'),
                      ('SA01','owner','${hash}','super_admin','The Owner',
                       (NOW() AT TIME ZONE 'UTC') - INTERVAL '30 days')`);
+        // ── EIGHT APPLICATIONS AT ONCE MAKE ONE LEAVE ───────────────────
+        //
+        // THE BUG. The overlap check and the INSERT were two separate calls
+        // on the pool — two connections, nothing holding the gap. Fired
+        // together, all eight read "no overlap" and all eight inserted:
+        // measured against a running server, eight rows and eight 201s.
+        //
+        // That is a double-clicked Apply button, or a client retrying a
+        // request whose reply was lost — and the result is a payroll run
+        // that can deduct the same Tuesday more than once.
+        //
+        // The fix is one transaction under an advisory lock keyed on the
+        // employee. This test fires the burst and counts the rows, because
+        // the guard is only worth anything under real concurrency.
+        {
+            const burst = await Promise.all(Array.from({ length: 8 }, () =>
+                api("POST", "/leave", {
+                    token: rajesh,
+                    body: {
+                        start_date: "2027-03-08", end_date: "2027-03-08",
+                        leave_type: "CASUAL", reason: "concurrent burst",
+                    },
+                })));
+            const created = burst.filter((r) => r.status === 201).length;
+            const refused = burst.filter((r) => r.status === 409).length;
+            const rows = psql(
+                "SELECT COUNT(*) FROM leave_requests WHERE reason = 'concurrent burst'")
+                .trim();
+            check("eight simultaneous applications create exactly one leave",
+                  rows === "1", `${rows} rows in the table`);
+            check("one is accepted and the rest are refused as overlapping",
+                  created === 1 && refused === 7, `${created} created, ${refused} refused`);
+
+            // AND THE GUARD ITSELF, BECAUSE THE BURST ABOVE IS NOT PROOF.
+            //
+            // Measured, not assumed: with the advisory lock deleted, the
+            // burst above still passes — at eight requests and at thirty.
+            // Node's fetch against a local server does not interleave them
+            // finely enough to land two overlap checks between one another,
+            // while eight Python threads against the same server reproduced
+            // the duplicate every time. A test that passes with the bug
+            // present is worse than no test, so the burst stays as an
+            // end-to-end sanity check and THIS is the regression guard: the
+            // check and the insert must sit in one transaction, and that
+            // transaction must take a lock keyed on the employee.
+            const source = fs.readFileSync(
+                path.join(__dirname, "..", "controllers", "leave.controller.js"), "utf8");
+            const apply = source.slice(source.indexOf("exports.apply"),
+                                       source.indexOf("exports.mine"));
+            check("applying takes an advisory lock on the employee",
+                  apply.includes("pg_advisory_xact_lock(hashtext($1))"),
+                  "without it two applications can both pass the overlap check");
+            const lockAt   = apply.indexOf("pg_advisory_xact_lock");
+            const selectAt = apply.indexOf("FROM leave_requests");
+            const insertAt = apply.indexOf("INSERT INTO leave_requests");
+            check("the lock is taken BEFORE the overlap check and the insert",
+                  lockAt > 0 && lockAt < selectAt && selectAt < insertAt,
+                  `lock@${lockAt} select@${selectAt} insert@${insertAt}`);
+            check("both run on the same client, inside one transaction",
+                  apply.includes("await client.query(\"BEGIN\")")
+                  && apply.includes("client.release()"),
+                  "two pool calls are two connections with a gap between them");
+        }
+
         const admin2 = await login("admin2", "admin2-machine");
         const owner = await login("owner", "owner-machine");
 

@@ -800,17 +800,20 @@ def main():
            "body": "galti se bhej diya", "created_at": datetime.now().isoformat(),
            "attachments": [], "mentions": []}
     bubble_mine = _Bubble(dict(own), mine=True, can_post=True)
-    labels = [b.text() for b in bubble_mine.findChildren(QPushButton)]
-    check("your own message offers the ⋯ menu", "⋯" in labels, str(labels))
+    # FOUND BY TOOLTIP, NOT BY ITS LABEL. The button used to be the character
+    # "⋯"; it is a drawn Lucide ellipsis now and carries no text at all, so
+    # matching on text would only ever have found the old version.
+    tips = [b.toolTip() for b in bubble_mine.findChildren(QPushButton)]
+    check("your own message offers the more menu", "More" in tips, str(tips))
 
     bubble_theirs = _Bubble(dict(own), mine=False, can_post=True)
-    labels = [b.text() for b in bubble_theirs.findChildren(QPushButton)]
+    tips = [b.toolTip() for b in bubble_theirs.findChildren(QPushButton)]
     check("somebody else's does not — you cannot delete it anyway",
-          "⋯" not in labels, str(labels))
+          "More" not in tips, str(tips))
 
     menu = bubble_mine.build_more_menu()
     check("and the menu offers exactly one thing: delete",
-          [a.text() for a in menu.actions()] == ["🗑   Delete message"],
+          [a.text() for a in menu.actions()] == ["Delete message"],
           str([a.text() for a in menu.actions()]))
 
     asked = []

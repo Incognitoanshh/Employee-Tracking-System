@@ -184,8 +184,21 @@ def main():
     from client.presentation.windows import admin_config_panel as acp
 
     class _FakeTray:
+        """Shaped like the real QSystemTrayIcon, including icon().
+
+        It had showMessage and nothing else. The delivery path now asks the
+        tray for its icon — so a balloon carries the brand mark rather than a
+        blank — and against this stub that raised, was swallowed by the
+        catch, and every notification silently vanished. The stub has to
+        answer the same calls the real object does, or it tests a different
+        program.
+        """
         def __init__(self):
             self.shown = []
+
+        def icon(self):
+            from PySide6.QtGui import QIcon
+            return QIcon()
 
         def showMessage(self, title, body, icon=None, msecs=None):
             self.shown.append((title, body))

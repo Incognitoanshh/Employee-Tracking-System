@@ -185,7 +185,7 @@ def main():
     check("and General is always shown, because team membership grants it",
           "General" in cell_text(tab._members, 1, 3), cell_text(tab._members, 1, 3))
     check("and that column is itself the way to change them",
-          "✎" in cell_text(tab._members, 0, 3), cell_text(tab._members, 0, 3))
+          "Edit" in cell_text(tab._members, 0, 3), cell_text(tab._members, 0, 3))
 
     # The trap this closes: the only control on the row used to be a red
     # "Remove" that took somebody out of the ENTIRE team. Asked to drop

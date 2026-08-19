@@ -1,7 +1,8 @@
 const pool = require("../config/db");
+const { pageOf, idOf } = require("../utils/request_params");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 // The same grace the employee list uses, so "working" cannot mean two things.
-const { HEARTBEAT_GRACE_MINUTES } = require("../utils/presence");
+const { HEARTBEAT_GRACE_MINUTES, MAX_SHIFT_HOURS } = require("../utils/presence");
 const { attendanceState, shiftState } = require("../utils/attendance_state");
 // The single hierarchy rule, so attendance cannot disagree with the rest of
 // the panel about who may act on whom.
@@ -174,7 +175,10 @@ async function annotateAttendance(rows) {
 
 exports.getAttendance = async (req, res) => {
     try {
-        let { employee_id, date, status, page = 1 } = req.query;
+        let { employee_id, date, from, to, status } = req.query;
+        // Clamped rather than trusted — `req.query.page` is a string, and
+        // "-1" made a negative OFFSET, which Postgres refuses with a 500.
+        const page   = pageOf(req.query.page);
         const limit  = 50;
         const offset = (page - 1) * limit;
 
@@ -188,8 +192,20 @@ exports.getAttendance = async (req, res) => {
         let   idx        = 1;
 
         if (employee_id) {
-            conditions.push(`employee_id = $${idx++}`);
+            // A NAME WORKS AS WELL AS AN ID.
+            //
+            // This was an exact match on the id, so the box labelled
+            // "Employee ID" was the only way in: an administrator who knew
+            // somebody as "Shailabh" had to go to another page, find the id,
+            // come back and type it. The id match stays exact so a full id
+            // never drags in a name that happens to contain it.
+            conditions.push(
+                `(employee_id = $${idx} OR EXISTS (
+                     SELECT 1 FROM employees e
+                      WHERE e.employee_id = attendance.employee_id
+                        AND e.full_name ILIKE '%' || $${idx} || '%'))`);
             values.push(employee_id);
+            idx += 1;
         }
 
         // BUG FIX: admin panel ke Attendance tab me date picker maujood tha
@@ -202,6 +218,21 @@ exports.getAttendance = async (req, res) => {
                 `${istDate("login_time")} = $${idx++}`
             );
             values.push(date);
+        }
+
+        // A RANGE, WHICH IS WHAT ATTENDANCE IS ACTUALLY READ IN.
+        //
+        // One day at a time meant "last week" was seven searches, and
+        // anything longer was not attempted. Both ends are inclusive and
+        // either may be given on its own — "everything since the first" is a
+        // real question, and so is "everything up to the day they left".
+        if (from) {
+            conditions.push(`${istDate("login_time")} >= $${idx++}::date`);
+            values.push(from);
+        }
+        if (to) {
+            conditions.push(`${istDate("login_time")} <= $${idx++}::date`);
+            values.push(to);
         }
 
         // FILTER BY THE RECORD'S STATE, IN SQL, so paging and the total stay
@@ -262,9 +293,18 @@ exports.getAttendance = async (req, res) => {
                     --
                     -- The window runs over the filtered set before LIMIT, so
                     -- this stays correct across pagination.
-                    MIN(login_time) OVER (
-                        PARTITION BY employee_id, ${istDate("login_time")}
-                    )                                                  AS day_first_login,
+                    -- ASKED PER ROW, NOT COMPUTED OVER THE WHOLE TABLE.
+                    --
+                    -- This was MIN(login_time) OVER (PARTITION BY employee,
+                    -- day). A window function runs BEFORE ORDER BY and LIMIT,
+                    -- so it was computed for every row in the table and all
+                    -- but fifty thrown away: on 500,000 rows that was a
+                    -- 333ms window over a 241ms sort, for one page. Measured.
+                    --
+                    -- The lateral below asks the same question only for the
+                    -- rows actually returned — fifty index lookups — and the
+                    -- two were compared row by row before this was changed.
+                    day_window.day_first_login                          AS day_first_login,
                     -- IS THIS OPEN ROW ACTUALLY SOMEBODY WORKING?
                     --
                     -- The page drew "ACTIVE" from logout_time being null and
@@ -287,7 +327,29 @@ exports.getAttendance = async (req, res) => {
                            AND ses.token IS NOT NULL
                            AND ses.last_seen > NOW() - INTERVAL '${HEARTBEAT_GRACE_MINUTES} minutes'
                     )                                                  AS session_live
-             FROM attendance ${where}
+             FROM attendance
+             LEFT JOIN LATERAL (
+                 -- The IST day this row belongs to, expressed as a range on
+                 -- login_time so an index can serve it. The boundaries are
+                 -- IST midnight converted back to UTC, which is what the
+                 -- column stores.
+                 SELECT MIN(same_day.login_time) AS day_first_login
+                   FROM attendance same_day
+                  WHERE same_day.employee_id = attendance.employee_id
+                    -- QUALIFIED, AND IT HAS TO BE. Inside a lateral,
+                    -- an unqualified login_time inside this subquery binds
+                    -- to same_day, the INNER table — not to the row being
+                    -- annotated. The range became a statement about itself
+                    -- and every row read "Extra Session". Caught by
+                    -- test_attendance_status, which is exactly what it is for.
+                    AND same_day.login_time >=
+                        (${istDate("attendance.login_time")}::timestamp
+                            AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC'
+                    AND same_day.login_time <
+                        ((${istDate("attendance.login_time")} + 1)::timestamp
+                            AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC'
+             ) day_window ON TRUE
+             ${where}
              ORDER BY id DESC
              LIMIT $${idx} OFFSET $${idx + 1}`,
             [...values, limit, offset]
@@ -372,6 +434,18 @@ exports.loginAttendance = async (req, res) => {
                    FROM attendance a
                   WHERE a.employee_id = $1
                     AND a.logout_time IS NULL
+                    -- A SHIFT BELONGS TO THE DAY IT STARTED.
+                    --
+                    -- Resuming was judged only on whether there was recent
+                    -- evidence of the person, and an app left running
+                    -- overnight keeps producing that. So a shift opened at
+                    -- 18:19 was still open the next morning and read
+                    -- "Active, 15:39:18" — one row spanning two days, and
+                    -- fifteen hours that would go to payroll as worked.
+                    --
+                    -- Reported from the running app. Same IST day, or it is
+                    -- closed at the last evidence and a new one begins.
+                    AND ${istDate("a.login_time")} = ${istToday()}
                     AND GREATEST(
                           a.login_time,
                           COALESCE((SELECT MAX(al.created_at) FROM activity_logs al
@@ -426,17 +500,37 @@ exports.loginAttendance = async (req, res) => {
                      -- did counts here; the sweep in utils/attendance_cleanup
                      -- may use the heartbeat, because nothing has refreshed it
                      -- there.
+                     --
+                     -- AND THE EVIDENCE MUST BE FROM THE SHIFT'S OWN DAY.
+                     --
+                     -- Reported from the running app: a shift opened at 18:19
+                     -- was closed the next morning at 11:13 and recorded
+                     -- 15:56:17 — because the panel had been left running all
+                     -- night writing USER IDLE and USER ACTIVE rows, and the
+                     -- newest of them was from today. Tomorrow cannot tell us
+                     -- when somebody stopped working yesterday, and sixteen
+                     -- hours of it would have gone to payroll as worked.
+                     --
+                     -- Capped at MAX_SHIFT_HOURS as well, which is the rule
+                     -- the abandoned-shift sweep already applies.
                      SELECT a2.id,
-                            GREATEST(
+                            LEAST(
+                              GREATEST(
                                 a2.login_time,
                                 COALESCE((SELECT MAX(al.created_at) FROM activity_logs al
                                            WHERE al.employee_id = a2.employee_id
-                                             AND al.created_at >= a2.login_time),
+                                             AND al.created_at >= a2.login_time
+                                             AND ${istDate("al.created_at")}
+                                                 = ${istDate("a2.login_time")}),
                                          a2.login_time),
                                 COALESCE((SELECT MAX(sc.created_at) FROM screenshots sc
                                            WHERE sc.employee_id = a2.employee_id
-                                             AND sc.created_at >= a2.login_time),
+                                             AND sc.created_at >= a2.login_time
+                                             AND ${istDate("sc.created_at")}
+                                                 = ${istDate("a2.login_time")}),
                                          a2.login_time)
+                              ),
+                              a2.login_time + INTERVAL '${MAX_SHIFT_HOURS} hours'
                             ) AS ended
                        FROM attendance a2
                       WHERE a2.employee_id = $1 AND a2.logout_time IS NULL
@@ -444,6 +538,7 @@ exports.loginAttendance = async (req, res) => {
                   WHERE a.id = ev.id`,
                 [employee_id]
             );
+
             // login_time is stamped by the server in UTC. The client used to
             // send an IST string, which Postgres stored without a zone.
             const result = await client.query(

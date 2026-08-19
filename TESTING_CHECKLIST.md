@@ -251,7 +251,7 @@ Client log: `~/Library/Application Support/ETS/storage/app.log` (macOS) or
 
 Server log:
 ```bash
-ssh etsadmin@65.21.212.85 'pm2 logs ets-server --lines 50 --nostream'
+ssh $ETS_HOST 'pm2 logs ets-server --lines 50 --nostream'
 ```
 
 For screenshot problems, turn on **Verbose logging** for that employee in

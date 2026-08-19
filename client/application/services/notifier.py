@@ -131,7 +131,7 @@ def for_alerts(alerts, *, role):
             where = " — ".join(
                 p for p in (alert.get("team_name"), alert.get("channel_name")) if p)
             out.append({
-                "title": f"📢 Announcement{f' in {where}' if where else ''}",
+                "title": f"Announcement{f' in {where}' if where else ''}",
                 "body": "A new announcement was posted.",
                 "kind": QUIET,
                 "channel_id": alert.get("channel_id"),
@@ -151,7 +151,7 @@ def for_alerts(alerts, *, role):
         # answering in the next thirty seconds — but said, because the whole
         # point of the Alerts feature is that nobody has to think to look.
         out.append({
-            "title": f"⚠️ {alert.get('title') or 'Something needs attention'}",
+            "title": f"{alert.get('title') or 'Something needs attention'}",
             "body": str(alert.get("detail") or "Open Alerts to see more."),
             "kind": QUIET,
             "channel_id": None,
@@ -244,12 +244,41 @@ def deliver(tray, title, body):
     quiet = not pref_enabled(PREF_SOUND)
     shown = False
 
+    # INSIDE A .app BUNDLE, MACOS CAN POST IT AS US — WITH OUR ICON.
+    #
+    # The osascript path below works everywhere, but macOS attributes that
+    # notification to Script Editor, which is the application actually running
+    # the AppleScript. So every notification this product sent carried Script
+    # Editor's icon, and the picture beside "Raju Kumar — haa" was a generic
+    # plug. Reported, correctly, as "logo nahi aa raha".
+    #
+    # There is no setting for that picture: macOS takes it from the POSTING
+    # application's bundle. The only way to make it ours is to be the posting
+    # application — which Qt can do once the app is a bundle with a bundle
+    # identifier, both of which the packaged build has.
+    #
+    # RUNNING FROM SOURCE IT STILL CANNOT BE OURS. python3 -m client.main is
+    # not a bundle; there is nothing to take an icon from. The fallback below
+    # is kept for exactly that case rather than pretending otherwise.
+    bundled = mac and getattr(sys, "frozen", False) and ".app/Contents/" in sys.executable
+
     if tray is not None:
         try:
             from PySide6.QtWidgets import QSystemTrayIcon, QApplication
-            tray.showMessage(title, body,
-                             QSystemTrayIcon.MessageIcon.Information, 6000)
-            shown = not mac
+            # The tray's own icon is the brand mark, so this is what carries
+            # the logo on Windows — a balloon draws whatever the tray holds.
+            #
+            # getattr, NOT tray.icon(). Anything that quacks like a tray can
+            # be passed in here, and one that has no icon() would raise —
+            # into the except below, where it becomes a notification that
+            # silently never appears. That is the exact failure this whole
+            # module exists because of, and it was reintroduced by this line
+            # until a test caught it.
+            badge = getattr(tray, "icon", None)
+            badge = badge() if callable(badge) else \
+                QSystemTrayIcon.MessageIcon.Information
+            tray.showMessage(title, body, badge, 6000)
+            shown = (not mac) or bundled
             if not mac and not quiet:
                 # A SOUND ON EVERY NOTIFICATION, by the owner's decision —
                 # group messages and administrative alerts included, not only
@@ -260,7 +289,10 @@ def deliver(tray, title, body):
             # down with it — this runs off a poll, on every arrival.
             pass
 
-    if mac:
+    # ONLY WHEN QT COULD NOT. In a bundle the line above has already posted
+    # it as Amaze Connect; doing both would show the same message twice, once
+    # with our icon and once with Script Editor's.
+    if mac and not shown:
         try:
             import subprocess
             script = (
@@ -273,6 +305,29 @@ def deliver(tray, title, body):
             shown = True
         except Exception:
             pass
+
+    # A LINE IN THE LOG SAYING WHAT HAPPENED.
+    #
+    # "Notification nahi aaya" cannot be answered from the outside: the panel
+    # decides, the delivery decides, and macOS decides, and none of them said
+    # anything. Now the first two do. Verbose, so it costs nothing on a
+    # normal machine and is there when somebody asks.
+    try:
+        from client.services.logger_service import LoggerService
+        route = "qt" if (not mac or bundled) else "osascript"
+        if shown:
+            # The ordinary case, and noisy — one line per message.
+            LoggerService.log_verbose(f"notifier: shown via {route} — {title!r}")
+        else:
+            # THE CASE SOMEBODY ASKS ABOUT. "Notification nahi aaya" cannot
+            # be answered from outside the app: the panel decides, delivery
+            # decides, and the operating system decides, and none of them
+            # used to say anything. A failure is rare and worth a line at the
+            # ordinary level, where it will actually be found.
+            LoggerService.log(
+                f"notifier: NOTHING SHOWN via {route} — {title!r}")
+    except Exception:
+        pass
 
     return shown
 

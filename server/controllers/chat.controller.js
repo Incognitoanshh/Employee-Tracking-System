@@ -23,6 +23,12 @@
  */
 
 const pool = require("../config/db");
+// idOf / bigIdOf REPLACE `Number.isFinite`, WHICH WAS NOT ENOUGH.
+// parseInt("99999999999999999999") is 1e20 — perfectly finite, and far past
+// what a Postgres integer holds. It sailed through the guard and the query
+// answered "value out of range for type integer": a 500 where a 400 was
+// meant. Verified against the running server.
+const { idOf, bigIdOf, pageOf, textOf } = require("../utils/request_params");
 const { visibleChannelSql, isTeamWide, loadVisibleChannel, directKey } = require("../utils/chat_access");
 const { resolveMentions } = require("../utils/chat_mentions");
 const path = require("path");
@@ -115,6 +121,16 @@ function toMessage(row) {
         edit_count:   deleted ? 0 : row.edit_count,
         pinned:       Boolean(row.pinned_at),
         pinned_at:    row.pinned_at || null,
+        // A withdrawn message keeps no reactions on screen. The rows are
+        // already gone from the table by then (ON DELETE CASCADE), but a
+        // message can be tombstoned rather than deleted, and a row of
+        // approving thumbs under "this message was withdrawn" would be
+        // grotesque.
+        reactions:    deleted ? [] : (row.reactions || []),
+        // The replies stay visible even when the root is withdrawn — they
+        // are other people's words, and hiding them would take a whole
+        // conversation away because one person changed their mind.
+        reply_count:  Number(row.reply_count || 0),
         // Filled in by enrich(). Present as empty rather than absent so the
         // panel never has to test for undefined before iterating.
         attachments:  [],
@@ -197,9 +213,54 @@ async function enrich(rows, me) {
     return rows;
 }
 
+/**
+ * The message columns, with reactions folded in.
+ *
+ * A FUNCTION, BECAUSE THE PARAMETER NUMBER DIFFERS. "Which of these did I
+ * react to" needs the reader's own id, and the two queries that select
+ * messages number their parameters differently — $1 in one, a new one in the
+ * other. A constant with a hard-coded $1 would have silently compared the
+ * reader against a channel id in one of them.
+ */
+function messageColumns(mePlaceholder) {
+    return MESSAGE_COLUMNS.replace(/\$ME\$/g, mePlaceholder);
+}
+
 const MESSAGE_COLUMNS = `
     m.seq, m.channel_id, m.sender_id, m.sender_name, m.sender_employee_code,
-    m.body, m.reply_to, m.created_at, m.edit_count, m.pinned_at, m.deleted_at`;
+    m.body, m.reply_to, m.created_at, m.edit_count, m.pinned_at, m.deleted_at,
+    -- REACTIONS TRAVEL WITH THE MESSAGE.
+    --
+    -- The alternative is a request per message to ask who reacted, which on
+    -- a fifty-message channel is fifty round trips over the same link that
+    -- made loading the page slow in the first place. This is one aggregate
+    -- on an indexed column.
+    --
+    -- Shape: [{emoji, count, mine}] — "mine" so the client can draw the
+    -- pressed state without a second lookup, and so toggling is a decision
+    -- the client can make without asking. (No backticks in here: this is
+    -- inside a template literal, and one would end the string.)
+    -- HOW MANY REPLIES HANG OFF THIS MESSAGE.
+    --
+    -- One count, folded into the same read, so the conversation can show "3
+    -- replies" without a request per message. A thread is one level deep on
+    -- purpose: a reply to a reply is attached to the same root, because a
+    -- tree of replies is unreadable in a panel this width and nobody can
+    -- tell where a conversation continues.
+    (SELECT COUNT(*)::int FROM messages child
+      WHERE child.reply_to = m.seq AND child.deleted_at IS NULL) AS reply_count,
+    COALESCE((
+        SELECT json_agg(r ORDER BY r.first_at)
+          FROM (
+            SELECT mr.emoji,
+                   COUNT(*)::int AS count,
+                   bool_or(mr.employee_id = $ME$) AS mine,
+                   MIN(mr.created_at) AS first_at
+              FROM message_reactions mr
+             WHERE mr.seq = m.seq
+             GROUP BY mr.emoji
+          ) r
+    ), '[]'::json) AS reactions`;
 
 // ───────────────────────────────────────────────────────────────────────────
 //  What the employee can see
@@ -335,7 +396,7 @@ exports.getUpdates = async (req, res) => {
         }
 
         const messages = await pool.query(
-            `SELECT ${MESSAGE_COLUMNS}
+            `SELECT ${messageColumns("$1")}
                FROM messages m
                JOIN channels c ON c.id = m.channel_id
               WHERE m.seq > $2 AND ${visibleChannelSql("c", 1)}
@@ -406,8 +467,8 @@ exports.getMessages = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const channelId = Number.parseInt(req.params.id, 10);
-    if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
 
     const before = req.query.before ? Number.parseInt(req.query.before, 10) : null;
     if (req.query.before && !Number.isFinite(before)) {
@@ -424,13 +485,13 @@ exports.getMessages = async (req, res) => {
         if (!channel) return fail(res, 404, "Channel not found");
 
         const result = await pool.query(
-            `SELECT ${MESSAGE_COLUMNS}
+            `SELECT ${messageColumns("$4")}
                FROM messages m
               WHERE m.channel_id = $1
                 AND ($2::BIGINT IS NULL OR m.seq < $2)
               ORDER BY m.seq DESC
               LIMIT $3`,
-            [channelId, before, limit]
+            [channelId, before, limit, me]
         );
 
         const rows = result.rows.reverse();
@@ -504,8 +565,8 @@ exports.sendMessage = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const channelId = Number.parseInt(req.params.id, 10);
-    if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
 
     // Control characters are stripped, NOT rejected.
     //
@@ -616,9 +677,9 @@ exports.sendMessage = async (req, res) => {
             // The insert was suppressed, so this send already landed.
             duplicate = true;
             const existing = await client.query(
-                `SELECT ${MESSAGE_COLUMNS} FROM messages m
+                `SELECT ${messageColumns("$3")} FROM messages m
                   WHERE m.channel_id = $1 AND m.client_msg_id = $2`,
-                [channelId, clientMsgId]
+                [channelId, clientMsgId, me]
             );
             row = existing.rows[0];
         }
@@ -697,8 +758,8 @@ exports.editMessage = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const seq = Number.parseInt(req.params.seq, 10);
-    if (!Number.isFinite(seq)) return fail(res, 400, "Invalid message");
+    const seq = bigIdOf(req.params.seq);
+    if (seq === null) return fail(res, 400, "Invalid message");
 
     const body = String(req.body?.body ?? "").trim();
     if (!body) return fail(res, 400, "Message cannot be empty");
@@ -823,8 +884,8 @@ exports.deleteMessage = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const seq = Number.parseInt(req.params.seq, 10);
-    if (!Number.isFinite(seq)) return fail(res, 400, "Invalid message");
+    const seq = bigIdOf(req.params.seq);
+    if (seq === null) return fail(res, 400, "Invalid message");
 
     let client;
     try {
@@ -1105,10 +1166,10 @@ exports.markRead = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const channelId = Number.parseInt(req.params.id, 10);
-    const seq = Number.parseInt(req.body?.seq, 10);
-    if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
-    if (!Number.isFinite(seq) || seq < 0) return fail(res, 400, "seq must be a number");
+    const channelId = idOf(req.params.id);
+    const seq = bigIdOf(req.body?.seq);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
+    if (seq === null) return fail(res, 400, "seq must be a number");
 
     try {
         const channel = await loadVisibleChannel(pool, me, channelId);
@@ -1160,8 +1221,8 @@ exports.search = async (req, res) => {
     if (q.length < 2) return fail(res, 400, "Search for at least two characters");
     if (q.length > 200) return fail(res, 400, "Search text is too long");
 
-    const channelId = req.query.channel_id ? Number.parseInt(req.query.channel_id, 10) : null;
-    if (req.query.channel_id && !Number.isFinite(channelId)) {
+    const channelId = req.query.channel_id ? idOf(req.query.channel_id) : null;
+    if (req.query.channel_id && channelId === null) {
         return fail(res, 400, "Invalid channel");
     }
 
@@ -1175,7 +1236,7 @@ exports.search = async (req, res) => {
 
     try {
         const result = await pool.query(
-            `SELECT ${MESSAGE_COLUMNS}, c.name AS channel_name, t.name AS team_name,
+            `SELECT ${messageColumns("$1")}, c.name AS channel_name, t.name AS team_name,
                     ts_headline('simple', m.body, to_tsquery('simple', $2),
                                 'StartSel=<b>,StopSel=</b>,MaxWords=30,MinWords=10') AS excerpt
                FROM messages m
@@ -1224,8 +1285,8 @@ exports.getChannelMembers = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const channelId = Number.parseInt(req.params.id, 10);
-    if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
 
     try {
         const channel = await loadVisibleChannel(pool, me, channelId);
@@ -1263,6 +1324,16 @@ exports.getChannelMembers = async (req, res) => {
              )
              SELECT e.employee_id,
                     COALESCE(NULLIF(e.full_name, ''), e.username) AS name,
+                    -- THE HANDLE, WHICH WAS MISSING.
+                    --
+                    -- The panel writes "@" + username into the message and
+                    -- falls back to the employee id when it has none. This
+                    -- query never sent one, so every mention picked from the
+                    -- list came out as "@26AMZEM001" — reported as "mention
+                    -- me id aa raha hai". A name cannot be used as the handle
+                    -- (it has spaces in it and cannot be parsed back out of
+                    -- the text), so the username is what has to travel.
+                    e.username,
                     e.designation, e.role, e.suspended,
                     s.last_seen,
                     (s.token IS NOT NULL
@@ -1299,6 +1370,11 @@ exports.getChannelMembers = async (req, res) => {
             return {
                 employee_id: row.employee_id,
                 name:        row.name,
+                // The handle the panel writes into a message. Selected in
+                // the query above but dropped here, which is the same as
+                // never having selected it — the mention list fell back to
+                // the employee id and every "@" resolved to nobody.
+                username:    row.username,
                 designation: row.designation,
                 role:        row.role,
                 suspended:   row.suspended,
@@ -1354,8 +1430,8 @@ exports.setPinned = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const seq = Number.parseInt(req.params.seq, 10);
-    if (!Number.isFinite(seq)) return fail(res, 400, "Invalid message");
+    const seq = bigIdOf(req.params.seq);
+    if (seq === null) return fail(res, 400, "Invalid message");
     const pinned = req.body?.pinned === true || req.body?.pinned === "true";
 
     try {
@@ -1399,22 +1475,22 @@ exports.getPinned = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const channelId = Number.parseInt(req.params.id, 10);
-    if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
 
     try {
         const channel = await loadVisibleChannel(pool, me, channelId);
         if (!channel) return fail(res, 404, "Channel not found");
 
         const result = await pool.query(
-            `SELECT ${MESSAGE_COLUMNS},
+            `SELECT ${messageColumns("$2")},
                     COALESCE(NULLIF(pe.full_name, ''), pe.username) AS pinned_by_name
                FROM messages m
                LEFT JOIN employees pe ON pe.employee_id = m.pinned_by
               WHERE m.channel_id = $1 AND m.pinned_at IS NOT NULL
                 AND m.deleted_at IS NULL
               ORDER BY m.pinned_at DESC`,
-            [channelId]);
+            [channelId, me]);
 
         const shaped = await enrich(result.rows.map(toMessage), me);
         shaped.forEach((message, index) => {
@@ -1448,8 +1524,8 @@ exports.uploadAttachment = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const channelId = Number.parseInt(req.params.id, 10);
-    if (!Number.isFinite(channelId)) return fail(res, 400, "Invalid channel");
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
     if (!req.file) return fail(res, 400, "No file uploaded");
 
     const cleanup = () => {
@@ -1511,8 +1587,8 @@ exports.downloadAttachment = async (req, res) => {
     const me = req.employee?.employee_id;
     if (!me) return fail(res, 401, "Unauthenticated");
 
-    const id = Number.parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return fail(res, 400, "Invalid attachment");
+    const id = idOf(req.params.id);
+    if (id === null) return fail(res, 400, "Invalid attachment");
 
     try {
         const result = await pool.query(
@@ -1561,3 +1637,268 @@ exports.EDIT_WINDOW_MINUTES = EDIT_WINDOW_MINUTES;
 exports.RATE_LIMIT_PER_MINUTE = RATE_LIMIT_PER_MINUTE;
 exports.MAX_PINNED = MAX_PINNED;
 exports.MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_BYTES;
+
+// ───────────────────────────────────────────────────────────────────────────
+//  Reactions
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The emoji anybody may react with.
+ *
+ * A SHORT LIST, NOT A PICKER OVER THE WHOLE UNICODE TABLE. Six covers what
+ * reactions are actually for — acknowledging, agreeing, thanking, laughing —
+ * and a short list keeps the row under a message readable rather than turning
+ * it into a wall of tiny pictures.
+ *
+ * It is enforced here rather than by a CHECK constraint so that adding one is
+ * a code change with a test, and so a rejected emoji is a clear 400 instead
+ * of a constraint violation surfacing as a 500.
+ */
+const REACTIONS = ["👍", "❤️", "😂", "🎉", "👀", "✅"];
+
+exports.listReactionChoices = (_req, res) =>
+    res.json({ success: true, reactions: REACTIONS });
+
+/**
+ * POST /api/chat/messages/:seq/reactions   { emoji }
+ *
+ * TOGGLES. The same call adds your reaction or takes it away, because that is
+ * what pressing the same button twice means to the person doing it. Two
+ * endpoints would need the client to know which state it is in, and it
+ * already draws that state — so it would be the same knowledge in two places,
+ * able to disagree.
+ */
+exports.toggleReaction = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const seq = bigIdOf(req.params.seq);
+    if (seq === null) return fail(res, 400, "Invalid message");
+
+    const emoji = String(req.body?.emoji || "");
+    if (!REACTIONS.includes(emoji)) {
+        return fail(res, 400, "That is not one of the available reactions.");
+    }
+
+    try {
+        const found = await pool.query(
+            `SELECT channel_id FROM messages
+              WHERE seq = $1 AND deleted_at IS NULL`, [seq]);
+        // The same answer for "no such message" and "not yours to see": a 403
+        // here would confirm that a message with this number exists.
+        if (found.rows.length === 0) return fail(res, 404, "Message not found");
+
+        const channel = await loadVisibleChannel(pool, me, found.rows[0].channel_id);
+        if (!channel) return fail(res, 404, "Message not found");
+        if (channel.is_archived) {
+            return fail(res, 409,
+                `${channel.team_name} is archived — it is read-only.`);
+        }
+
+        // ON CONFLICT DO NOTHING, then a delete that reports whether it hit.
+        // Reading first and then writing is two round trips and a race: two
+        // taps in quick succession would both see "not reacted" and both
+        // insert, and the second would fail on the primary key.
+        const added = await pool.query(
+            `INSERT INTO message_reactions (seq, emoji, employee_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING
+             RETURNING 1`, [seq, emoji, me]);
+
+        let mine = true;
+        if (added.rowCount === 0) {
+            await pool.query(
+                `DELETE FROM message_reactions
+                  WHERE seq = $1 AND emoji = $2 AND employee_id = $3`,
+                [seq, emoji, me]);
+            mine = false;
+        }
+
+        const totals = await pool.query(
+            `SELECT emoji, COUNT(*)::int AS count,
+                    bool_or(employee_id = $2) AS mine
+               FROM message_reactions
+              WHERE seq = $1
+              GROUP BY emoji
+              ORDER BY MIN(created_at)`, [seq, me]);
+
+        return res.json({ success: true, seq, emoji, mine,
+                          reactions: totals.rows });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return fail(res, 500, "Internal server error");
+    }
+};
+
+// ───────────────────────────────────────────────────────────────────────────
+//  Typing
+// ───────────────────────────────────────────────────────────────────────────
+
+// How long one "I am typing" lasts. Longer than the client's ping interval,
+// so an indicator does not flicker between pings; short enough that closing
+// the laptop mid-sentence clears it within a breath.
+const TYPING_SECONDS = 6;
+
+/**
+ * POST /api/chat/channels/:id/typing
+ *
+ * Says "I am typing here for the next few seconds". Sent on a throttle by the
+ * client — a request per keystroke would be a hundred writes a minute per
+ * person for a line of text nobody has sent yet.
+ *
+ * ANSWERS 204, NOT 200 WITH A BODY. There is nothing to say back, and the
+ * client must never wait on this: it is typed into a box while somebody is
+ * mid-thought, and a slow reply here would be felt as a slow keyboard.
+ */
+exports.pingTyping = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
+
+    try {
+        // The same visibility test every other channel route uses — a typing
+        // ping is a write into a channel, and the answer for a channel you
+        // cannot see is that it does not exist.
+        const channel = await loadVisibleChannel(pool, me, channelId);
+        if (!channel) return fail(res, 404, "Channel not found");
+        if (channel.is_archived) return res.status(204).end();
+
+        await pool.query(
+            `INSERT INTO typing_state (channel_id, employee_id, expires_at)
+             VALUES ($1, $2, (NOW() AT TIME ZONE 'UTC')
+                             + ($3 || ' seconds')::interval)
+             ON CONFLICT (channel_id, employee_id)
+             DO UPDATE SET expires_at = EXCLUDED.expires_at`,
+            [channelId, me, String(TYPING_SECONDS)]);
+
+        return res.status(204).end();
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return fail(res, 500, "Internal server error");
+    }
+};
+
+/**
+ * DELETE /api/chat/channels/:id/typing
+ *
+ * "I have stopped" — sent when the message goes, or the box is emptied.
+ * Without it the indicator lingers for the rest of the window after somebody
+ * presses Send, which reads as though they are already writing the next one.
+ */
+exports.clearTyping = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
+
+    try {
+        await pool.query(
+            `DELETE FROM typing_state WHERE channel_id = $1 AND employee_id = $2`,
+            [channelId, me]);
+        return res.status(204).end();
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return fail(res, 500, "Internal server error");
+    }
+};
+
+/**
+ * GET /api/chat/channels/:id/typing
+ *
+ * Who is typing in this channel, other than you.
+ *
+ * LAPSED ROWS ARE DELETED HERE, on the way past. A background sweep for a
+ * table this small is a scheduler, a failure mode and a thing to remember;
+ * the read already has to filter them out, so it may as well tidy up.
+ */
+exports.whoIsTyping = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const channelId = idOf(req.params.id);
+    if (channelId === null) return fail(res, 400, "Invalid channel");
+
+    try {
+        const channel = await loadVisibleChannel(pool, me, channelId);
+        if (!channel) return fail(res, 404, "Channel not found");
+
+        await pool.query(
+            `DELETE FROM typing_state
+              WHERE channel_id = $1 AND expires_at <= (NOW() AT TIME ZONE 'UTC')`,
+            [channelId]);
+
+        const rows = await pool.query(
+            `SELECT t.employee_id,
+                    COALESCE(NULLIF(e.full_name, ''), e.username) AS name
+               FROM typing_state t
+               JOIN employees e ON e.employee_id = t.employee_id
+              WHERE t.channel_id = $1
+                AND t.employee_id <> $2
+                AND t.expires_at > (NOW() AT TIME ZONE 'UTC')
+              ORDER BY name`,
+            [channelId, me]);
+
+        return res.json({ success: true, typing: rows.rows });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return fail(res, 500, "Internal server error");
+    }
+};
+
+/**
+ * GET /api/chat/messages/:seq/thread
+ *
+ * A message and everything said in reply to it.
+ *
+ * ONE LEVEL DEEP, DELIBERATELY. A reply to a reply is attached to the same
+ * root rather than nesting, so a thread is always a root and a list. A tree
+ * reads badly in a panel this wide, and worse, it makes "where does this
+ * conversation continue" a question with several answers.
+ *
+ * THE ROOT COMES BACK EVEN IF IT WAS WITHDRAWN. Its text does not — toMessage
+ * withholds that — but the replies are other people's words, and losing a
+ * whole discussion because one person deleted the first line would be the
+ * wrong trade.
+ */
+exports.getThread = async (req, res) => {
+    const me = req.employee?.employee_id;
+    if (!me) return fail(res, 401, "Unauthenticated");
+
+    const seq = bigIdOf(req.params.seq);
+    if (seq === null) return fail(res, 400, "Invalid message");
+
+    try {
+        const found = await pool.query(
+            `SELECT channel_id, reply_to FROM messages WHERE seq = $1`, [seq]);
+        if (found.rows.length === 0) return fail(res, 404, "Message not found");
+
+        const channel = await loadVisibleChannel(pool, me, found.rows[0].channel_id);
+        if (!channel) return fail(res, 404, "Message not found");
+
+        // OPENING A REPLY OPENS ITS THREAD, not a thread of one. Somebody who
+        // clicks the third message in a discussion means "show me this
+        // discussion" — anything else is a dead end they have to back out of.
+        const rootSeq = found.rows[0].reply_to
+            ? Number(found.rows[0].reply_to) : seq;
+
+        const rows = await pool.query(
+            `SELECT ${messageColumns("$2")}
+               FROM messages m
+              WHERE m.seq = $1 OR m.reply_to = $1
+              ORDER BY m.seq`,
+            [rootSeq, me]);
+
+        const shaped = await enrich(rows.rows.map(toMessage), me);
+        const root = shaped.find((message) => message.seq === rootSeq) || null;
+        const replies = shaped.filter((message) => message.seq !== rootSeq);
+
+        return res.json({ success: true, channel_id: channel.id,
+                          root, replies });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return fail(res, 500, "Internal server error");
+    }
+};

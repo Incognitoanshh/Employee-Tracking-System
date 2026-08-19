@@ -424,32 +424,28 @@ exports.getPhoto = async (req, res) => {
     // The filename is taken from the database, never from the URL, so there
     // is nothing here to traverse with whatever the caller sends.
     const wanted = String(req.params.employee_id || employeeId);
-    const isSelf = wanted === employeeId;
-    const elevated = ["admin", "super_admin"].includes(req.employee?.role);
 
     try {
-        // A FACE IS ONLY SHOWN TO PEOPLE WHO ALREADY SEE THE NAME.
+        // ANY SIGNED-IN EMPLOYEE MAY SEE ANY COLLEAGUE'S PHOTOGRAPH.
         //
-        // Photographs are meant to appear beside messages, in the team list,
-        // wherever a colleague appears — so restricting them to "yourself and
-        // administrators" left every one of those places drawing initials.
+        // The owner's decision, in those words: "1000 employee rahenge,
+        // sabko ek dusre ka photo dikhna chahiye". This is a company
+        // directory, and a face is the least sensitive thing in it — the
+        // name, the employee id and the online state are already visible to
+        // everybody.
         //
-        // The line is drawn where chat already draws it: you may see the
-        // photo of somebody you share a team with, because you can already
-        // see their name, their messages and their presence. It is not a new
-        // disclosure, and it deliberately does not open the whole directory —
-        // two employees in unrelated departments still cannot look each other
-        // up.
-        if (!isSelf && !elevated) {
-            const shares = await pool.query(
-                `SELECT 1 FROM team_members a
-                  JOIN team_members b ON a.team_id = b.team_id
-                 WHERE a.employee_id = $1 AND b.employee_id = $2
-                 LIMIT 1`, [employeeId, wanted]);
-            if (shares.rowCount === 0) {
-                return fail(res, 403, "Not yours to look at");
-            }
-        }
+        // WHAT IT REPLACED, AND WHY THAT FAILED. The rule was "yourself,
+        // administrators, or somebody you share a team with". A direct
+        // message is a channel with two members and NO team, so two people
+        // messaging each other saw initials — reported from use. Widening it
+        // to channels would have fixed that one case and left the next
+        // hundred: a new joiner in no team, a colleague from another
+        // department, anybody in a list. Every one of those would have come
+        // back as another bug report.
+        //
+        // STILL AUTHENTICATED-ONLY. `me(req)` above rejects anyone without a
+        // valid session, so this is not public — it is the company, which is
+        // what a staff directory is.
 
         const row = await pool.query(
             `SELECT photo FROM employees WHERE employee_id = $1`, [wanted]);

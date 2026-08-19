@@ -19,11 +19,11 @@ class BaseWindow(QWidget):
             QScrollBar:vertical {{
                 background: {ThemeManager.background()};
                 width: 6px;
-                border-radius: 3px;
+                border-radius:12px;
             }}
             QScrollBar::handle:vertical {{
                 background: #334155;
-                border-radius: 3px;
+                border-radius:12px;
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;

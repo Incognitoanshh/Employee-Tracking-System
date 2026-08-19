@@ -106,7 +106,7 @@ echo
 echo "File PSQL nahi kholta — kyunki wo postgres ban kar chalta hai"
 # YE FUNCTIONAL TEST SE PAKDA NAHI JA SAKTA. Yahan sab kuch EK hi user ke
 # roop me chalta hai, jo har file padh sakta hai. Server pe psql `postgres`
-# banta hai aur /home/etsadmin/... ke andar jhaank nahi sakta — to `-f` ke
+# banta hai aur $ETS_HOME/... ke andar jhaank nahi sakta — to `-f` ke
 # saath har migration "Permission denied" deti hai, file par, database par
 # nahi. Poora output aisa lagta hai jaise database ne mana kiya ho.
 #

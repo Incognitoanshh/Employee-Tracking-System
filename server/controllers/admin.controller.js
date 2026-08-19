@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { pageOf, limitOf, idOf, textOf } = require("../utils/request_params");
 const { endSession, markLoggedIn } = require("../utils/session");
 const { isOnlineSql } = require("../utils/presence");
 const { closeShiftFor } = require("../utils/attendance_cleanup");
@@ -1164,7 +1165,10 @@ exports.setSuspended = async (req, res) => {
 };
 
 exports.getConfig = async (req, res) => {
-    const { employee_id } = req.params;
+    // STRIPPED, NOT TRUSTED. A NUL byte is the one character Postgres will
+    // not carry inside a text value; /admin/config/%00 reached the query and
+    // came back 500. No real employee id contains one.
+    const employee_id = textOf(req.params.employee_id, 50);
     const isGlobal = employee_id === "global";
 
     try {
@@ -1518,7 +1522,12 @@ exports.forceLogout = async (req, res) => {
 };
 
 exports.getScreenshots = async (req, res) => {
-    const { employee_id, date, page = 1 } = req.query;
+    const { employee_id, date } = req.query;
+    // `req.query.page` IS A STRING. `("-1" - 1) * 20` is -40, and a negative
+    // OFFSET is an error Postgres refuses — this endpoint answered 500 to
+    // ?page=-1. pageOf clamps instead: the first page is what somebody who
+    // typed a bad page number wanted.
+    const page   = pageOf(req.query.page);
     const limit  = 20;
     const offset = (page - 1) * limit;
 
@@ -1558,7 +1567,10 @@ exports.getScreenshots = async (req, res) => {
 };
 
 exports.getLogs = async (req, res) => {
-    const { employee_id, date, page = 1, limit: limitParam } = req.query;
+    const { employee_id, date, limit: limitParam } = req.query;
+    // Clamped, for the same reason as the screenshot list above: ?page=0
+    // produced OFFSET -50 and a 500.
+    const page = pageOf(req.query.page);
     // BUG FIX: pehle limit hardcoded 50 tha, client (LogsWindow admin view)
     // 500 tak request karta tha (poori tarah admin ko saari employees ke
     // logs ek saath dikhane ke liye) lekin server hamesha sirf 50 hi
@@ -1566,9 +1578,7 @@ exports.getLogs = async (req, res) => {
     // Ab client ka diya limit respect hota hai, bas ek sane upper-cap
     // (1000) ke sath taaki koi galti se/jaan-boojh kar bahut bada query
     // na maang le aur DB pe load na daale.
-    let limit = parseInt(limitParam, 10);
-    if (!Number.isFinite(limit) || limit < 1) limit = 50;
-    if (limit > 1000) limit = 1000;
+    const limit  = limitOf(limitParam, 50, 1000);
     const offset = (page - 1) * limit;
 
     const conditions = [];
@@ -1945,6 +1955,21 @@ exports.deleteEmployee = async (req, res) => {
         await client.query(
             `DELETE FROM activity_logs
              WHERE employee_id = $1`,
+            [employee_id]
+        );
+
+        // AND THE ALERT SEND-LOG, WHICH WAS BEING LEFT BEHIND.
+        //
+        // alert_emails keeps one row per alert sent about a person — its
+        // employee_id is nullable only because the daily digest is about
+        // nobody in particular. There is no foreign key on that column, so
+        // nothing removed these rows and nothing ever would: an orphan log
+        // about somebody who left the company, kept for ever, under their id.
+        //
+        // The deletion contract is that tracking data goes with the person.
+        // This is tracking data.
+        await client.query(
+            `DELETE FROM alert_emails WHERE employee_id = $1`,
             [employee_id]
         );
 

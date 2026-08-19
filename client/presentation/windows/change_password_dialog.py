@@ -65,7 +65,7 @@ class ChangePasswordDialog(QDialog):
 
         title = QLabel("Set a new password" if self._forced else "Change your password")
         title.setStyleSheet(
-            f"color:{C.TEXT}; font-size:17px; font-weight:600; background:transparent;"
+            f"color:{C.TEXT}; font-size:18px; font-weight:600; background:transparent;"
         )
         root.addWidget(title)
 
@@ -94,7 +94,7 @@ class ChangePasswordDialog(QDialog):
         hint = QLabel("At least 8 characters. Cannot be your username or employee ID.")
         hint.setWordWrap(True)
         hint.setStyleSheet(
-            f"color:{C.TEXT_DIM}; font-size:11px; background:transparent;"
+            f"color:{C.TEXT_DIM}; font-size:12px; background:transparent;"
         )
         root.addWidget(hint)
 

@@ -199,30 +199,61 @@ exports.apply = async (req, res) => {
         // ends up with two approvals for one Tuesday and a payroll run that
         // deducts it twice. Cancelled and rejected ones do not count — those
         // days are free again.
-        const clash = await pool.query(
-            `SELECT id, start_date, end_date, status FROM leave_requests
-              WHERE employee_id = $1
-                AND status IN ('PENDING','APPROVED')
-                AND start_date <= $3::date AND end_date >= $2::date
-              LIMIT 1`,
-            [employeeId, start_date, end_date]);
-        if (clash.rowCount > 0) {
-            const other = clash.rows[0];
-            return fail(res, 409,
-                `That overlaps a ${other.status.toLowerCase()} request for `
-                + `${other.start_date} to ${other.end_date}.`);
-        }
+        //
+        // THE CHECK AND THE INSERT ARE ONE TRANSACTION, UNDER A LOCK.
+        //
+        // They used to be two calls on the pool — which is two connections,
+        // with nothing between them. Eight identical requests fired together
+        // all read "no overlap", and all eight inserted: measured against the
+        // running server, eight rows and eight 201s where one row and seven
+        // 409s were meant. That is not a hypothetical: it is a double-clicked
+        // Apply button, or a client retrying a request whose reply was lost.
+        //
+        // The lock is keyed on the EMPLOYEE, so two people applying at the
+        // same moment never wait for each other, and it is an xact lock, so
+        // it is released by COMMIT or ROLLBACK — including the rollback that
+        // an exception causes. This is the same guard the attendance
+        // check-in uses, for the same reason.
+        const client = await pool.connect();
+        let row;
+        try {
+            await client.query("BEGIN");
+            await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [employeeId]);
 
-        const row = (await pool.query(
-            `INSERT INTO leave_requests
-                 (employee_id, leave_type, reason, start_date, end_date,
-                  total_days, half_day)
-             VALUES ($1, $2, $3, $4::date, $5::date, $6, $7)
-             RETURNING id, employee_id, leave_type, reason,
-                       start_date::text, end_date::text, total_days,
-                       half_day, status, created_at`,
-            [employeeId, leave_type, String(reason).trim(),
-             start_date, end_date, total, isHalf])).rows[0];
+            const clash = await client.query(
+                `SELECT id, start_date, end_date, status FROM leave_requests
+                  WHERE employee_id = $1
+                    AND status IN ('PENDING','APPROVED')
+                    AND start_date <= $3::date AND end_date >= $2::date
+                  LIMIT 1`,
+                [employeeId, start_date, end_date]);
+            if (clash.rowCount > 0) {
+                await client.query("ROLLBACK");
+                const other = clash.rows[0];
+                return fail(res, 409,
+                    `That overlaps a ${other.status.toLowerCase()} request for `
+                    + `${other.start_date} to ${other.end_date}.`);
+            }
+
+            row = (await client.query(
+                `INSERT INTO leave_requests
+                     (employee_id, leave_type, reason, start_date, end_date,
+                      total_days, half_day)
+                 VALUES ($1, $2, $3, $4::date, $5::date, $6, $7)
+                 RETURNING id, employee_id, leave_type, reason,
+                           start_date::text, end_date::text, total_days,
+                           half_day, status, created_at`,
+                [employeeId, leave_type, String(reason).trim(),
+                 start_date, end_date, total, isHalf])).rows[0];
+
+            await client.query("COMMIT");
+        } catch (error) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw error;
+        } finally {
+            // Released exactly once, whichever way the block above left.
+            client.release();
+        }
 
         await writeAudit(employeeId,
             `LEAVE APPLIED : ${describe(row)} — ${String(reason).trim().slice(0, 80)}`);

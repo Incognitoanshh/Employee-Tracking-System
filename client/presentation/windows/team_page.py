@@ -26,15 +26,17 @@ from __future__ import annotations
 from datetime import datetime
 from time import monotonic
 
-from PySide6.QtCore import Qt, QTimer, Signal, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QSize
 from PySide6.QtGui import QAction, QCursor, QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QStackedWidget, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from client.presentation.theme import C, R, R_SM, button, input_style, scrollbar
+from client.presentation.widgets import icons as _icons
+from client.presentation.theme import (
+    C, R, R_SM, Radius, Space, Type, button, dot_style, input_style, scrollbar)
 from client.presentation.widgets.avatar import Avatar
 from client.presentation.widgets.panel_widgets import PageHeader
 from client.application.managers.chat_manager import ChatManager, MAX_BODY
@@ -97,11 +99,14 @@ def _day_label(value) -> str:
 FOLLOW_SECONDS = 0.6
 
 
+# Colour and word per state. THE DOT USED TO BE IN HERE as a "●" character
+# and is not any more: the member panel draws it as a small round label, so
+# its size is the panel's decision rather than the text font's.
 PRESENCE = {
-    "ACTIVE":      ("●", C.GREEN,      "Active"),
-    "IDLE":        ("●", C.AMBER,      "Idle"),
-    "OFFLINE":     ("●", C.TEXT_DIM,   "Offline"),
-    "SHIFT_ENDED": ("●", C.PURPLE,     "Shift ended"),
+    "ACTIVE":      (C.GREEN,    "Active"),
+    "IDLE":        (C.AMBER,    "Idle"),
+    "OFFLINE":     (C.TEXT_DIM, "Offline"),
+    "SHIFT_ENDED": (C.PURPLE,   "Shift ended"),
 }
 
 
@@ -276,8 +281,8 @@ class _ChannelRow(QPushButton):
         row.setContentsMargins(12, 0, 10, 0)
         row.setSpacing(8)
 
-        icon = "📢" if channel.get("type") == "ANNOUNCEMENT" else (
-            "🔒" if channel.get("is_private") else "#")
+        icon = "" if channel.get("type") == "ANNOUNCEMENT" else (
+"" if channel.get("is_private") else "#")
         self._icon = QLabel(icon)
         self._icon.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;")
         self._name = QLabel(channel["name"])
@@ -333,14 +338,14 @@ class _ChannelRow(QPushButton):
             if count > 0:
                 self._badge.setText(str(count) if count < 100 else "99+")
                 self._badge.setStyleSheet(
-                    f"background:{C.SELECTED_TEXT};color:{C.SELECTED_BG};font-size:10px;"
-                    f"font-weight:800;border-radius:9px;padding:0 5px;border:none;")
+                    f"background:{C.SELECTED_TEXT};color:{C.SELECTED_BG};font-size:12px;"
+                    f"font-weight:800;border-radius:12px;padding:0 5px;border:none;")
             return
         if count > 0:
             self._badge.setText(str(count) if count < 100 else "99+")
             self._badge.setStyleSheet(
-                f"background:{C.RED};color:#fff;font-size:10px;font-weight:800;"
-                f"border-radius:9px;padding:0 5px;border:none;")
+                f"background:{C.RED};color:#fff;font-size:12px;font-weight:800;"
+                f"border-radius:12px;padding:0 5px;border:none;")
             self._badge.show()
             self._name.setStyleSheet(
                 f"color:{C.TEXT};font-size:13px;font-weight:700;border:none;background:transparent;")
@@ -368,6 +373,8 @@ class _Bubble(QFrame):
     jump_requested = Signal(int)                # seq of the message replied to
     image_wanted = Signal(int, object)          # attachment id, the label to fill
     image_clicked = Signal(int, str)            # attachment id, file name
+    react_requested = Signal(int, str)          # seq, emoji
+    thread_requested = Signal(int)              # seq of the root
 
     def __init__(self, message: dict, mine: bool, can_post: bool = True, parent=None):
         super().__init__(parent)
@@ -427,30 +434,30 @@ class _Bubble(QFrame):
 
         when = QLabel(_clock(message.get("created_at")))
         when.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;border:none;background:transparent;")
+            f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;")
         head.addWidget(when)
 
         if message.get("edited"):
             tag = QLabel("edited")
             tag.setStyleSheet(
-                f"color:{C.TEXT_DIM};font-size:10px;font-style:italic;"
+                f"color:{C.TEXT_DIM};font-size:12px;font-style:italic;"
                 f"border:none;background:transparent;")
             head.addWidget(tag)
 
         if message.get("pinned") and not self.deleted:
-            pin = QLabel("📌")
-            pin.setStyleSheet("font-size:10px;border:none;background:transparent;")
+            pin = QLabel("")
+            pin.setStyleSheet("font-size:12px;border:none;background:transparent;")
             head.addWidget(pin)
 
         if message.get("pending"):
             state = QLabel("sending…")
             state.setStyleSheet(
-                f"color:{C.AMBER};font-size:10px;border:none;background:transparent;")
+                f"color:{C.AMBER};font-size:12px;border:none;background:transparent;")
             head.addWidget(state)
         elif message.get("failed"):
             state = QLabel(f"not sent — {message.get('failed')}")
             state.setStyleSheet(
-                f"color:{C.RED};font-size:10px;border:none;background:transparent;")
+                f"color:{C.RED};font-size:12px;border:none;background:transparent;")
             head.addWidget(state)
 
         head.addStretch()
@@ -460,6 +467,7 @@ class _Bubble(QFrame):
         # Nothing is offered on a withdrawn message: there is nothing to
         # reply to, quote, pin, or take back a second time.
         if self.seq and can_post and not message.get("pending") and not self.deleted:
+            head.addWidget(self._action("React", self._offer_reactions))
             head.addWidget(self._action("Reply",
                                         lambda: self.reply_requested.emit(self.seq)))
             if mine and _within_edit_window(message.get("created_at")):
@@ -480,11 +488,14 @@ class _Bubble(QFrame):
         # ── what this replies to ────────────────────────────────────────
         reply = message.get("reply")
         if reply:
-            quote = QPushButton(f"↩  {reply.get('sender_name')}: {reply.get('excerpt', '')}")
+            quote = QPushButton(
+                f"  {reply.get('sender_name')}: {reply.get('excerpt', '')}")
+            quote.setIcon(_icons.icon("corner-up-left", 13, C.TEXT_DIM))
+            quote.setIconSize(QSize(13, 13))
             quote.setCursor(Qt.CursorShape.PointingHandCursor)
             quote.setObjectName("replyQuote")
             quote.setStyleSheet(
-                f"QPushButton#replyQuote {{ color:{C.TEXT_DIM};font-size:11px;"
+                f"QPushButton#replyQuote {{ color:{C.TEXT_DIM};font-size:12px;"
                 f"text-align:left;background:transparent;border:none;"
                 f"border-left:2px solid {C.BORDER};padding:1px 0 1px 8px; }}"
                 f"QPushButton#replyQuote:hover {{ color:{C.TEXT_MUTED}; }}")
@@ -542,13 +553,45 @@ class _Bubble(QFrame):
         # server will call them — it has not been sent yet.
         queued_files = int(message.get("attachment_count") or 0)
         if queued_files and not message.get("attachments"):
-            waiting = QLabel(f"📎 {queued_files} file(s) uploading…")
+            waiting = QLabel(f"{queued_files} file(s) uploading…")
             waiting.setStyleSheet(
-                f"color:{C.TEXT_DIM};font-size:11px;border:none;background:transparent;")
+                f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;")
             col.addWidget(waiting)
 
+        # ── reactions ───────────────────────────────────────────────────
+        # Under the message, and only when there are any: an empty strip on
+        # every message would take a line of height from the conversation to
+        # say nothing.
+        reactions = message.get("reactions") or []
+        if reactions and not self.deleted:
+            col.addWidget(self._reaction_row(reactions))
+
+        # ── the thread hanging off this message ─────────────────────────
+        #
+        # Shown only when there IS one. A "0 replies" affordance on every
+        # message is a column of noise, and it invites a thread where a
+        # reply would do.
+        replies = int(message.get("reply_count") or 0)
+        if replies and self.seq:
+            open_thread = QPushButton(
+                f"{replies} repl{'y' if replies == 1 else 'ies'}")
+            open_thread.setCursor(Qt.CursorShape.PointingHandCursor)
+            open_thread.setStyleSheet(
+                f"QPushButton{{color:{C.PRIMARY};font-size:{Type.MICRO}px;"
+                f"background:transparent;border:none;text-align:left;"
+                f"padding:2px 0;}}"
+                f"QPushButton:hover{{text-decoration:underline;}}")
+            open_thread.clicked.connect(
+                lambda _checked=False: self.thread_requested.emit(self.seq))
+            col.addWidget(open_thread, 0, Qt.AlignmentFlag.AlignLeft)
+
     def _more_button(self) -> QPushButton:
-        button_ = self._action("⋯", self._more_menu)
+        # A DRAWN ELLIPSIS. "⋯" is one character whose spacing is the font's
+        # choice, so it sat off-centre in a 24px button and vanished entirely
+        # in fonts without it.
+        button_ = self._action("", self._more_menu)
+        button_.setIcon(_icons.icon("more-horizontal", 14, C.TEXT_DIM))
+        button_.setIconSize(QSize(14, 14))
         button_.setToolTip("More")
         return button_
 
@@ -572,7 +615,10 @@ class _Bubble(QFrame):
             f"border-radius:{R_SM}px; padding:4px; }}"
             f"QMenu::item {{ padding:7px 18px 7px 12px; border-radius:{R_SM}px; }}"
             f"QMenu::item:selected {{ background:{C.SELECTED_BG}; color:{C.SELECTED_TEXT}; }}")
-        remove = QAction("🗑   Delete message", menu)
+        remove = QAction("Delete message", menu)
+        # The icon lives on the action rather than in its text, where it used
+        # to be a 🗑 typed into the label.
+        remove.setIcon(_icons.icon("trash-2", 16, C.RED))
         remove.triggered.connect(lambda: self.delete_requested.emit(self.seq))
         menu.addAction(remove)
         return menu
@@ -582,11 +628,71 @@ class _Bubble(QFrame):
         button_.setCursor(Qt.CursorShape.PointingHandCursor)
         button_.setObjectName("bubbleAction")
         button_.setStyleSheet(
-            f"QPushButton#bubbleAction {{ color:{C.TEXT_DIM};font-size:10px;"
+            f"QPushButton#bubbleAction {{ color:{C.TEXT_DIM};font-size:12px;"
             f"background:transparent;border:none;padding:0 3px; }}"
             f"QPushButton#bubbleAction:hover {{ color:{C.PRIMARY}; }}")
         button_.clicked.connect(slot)
         return button_
+
+    # The choices the server will accept. Fetched once per run and cached on
+    # the class — hard-coding them here is how a client ends up offering an
+    # emoji the server refuses, which reads as a broken button.
+    REACTION_CHOICES: list = []
+
+    def _offer_reactions(self):
+        """A small menu under the message, not a full emoji keyboard.
+
+        Six choices cover what reactions are for — acknowledging, agreeing,
+        thanking, laughing. A picker over the whole Unicode table turns a
+        one-tap gesture into a search, and fills the row under a message with
+        pictures nobody can scan.
+        """
+        menu = QMenu(self)
+        # A fallback for the moment before the server's list arrives. These
+        # are content, not interface icons — see the marker.
+        fallback = ["👍", "❤️", "😂", "🎉", "👀", "✅"]  # reaction content
+        for emoji in (self.REACTION_CHOICES or fallback):
+            action = menu.addAction(emoji)
+            action.triggered.connect(
+                lambda _checked=False, e=emoji: self.react_requested.emit(self.seq, e))
+        menu.exec(self.mapToGlobal(self.rect().topRight()))
+
+    def _reaction_row(self, reactions: list) -> QWidget:
+        """The chips under a message: one per emoji, with its count.
+
+        PRESSED WHEN IT IS YOURS. Without that the row says how many people
+        reacted but not whether you are one of them, so the only way to find
+        out is to press it and watch the number move — which either adds a
+        reaction you did not want or removes one you did.
+        """
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 2, 0, 0)
+        row.setSpacing(6)
+
+        for entry in reactions:
+            emoji = str(entry.get("emoji", ""))
+            count = int(entry.get("count", 0) or 0)
+            mine = bool(entry.get("mine"))
+            if not emoji or count <= 0:
+                continue
+            chip = QPushButton(f"{emoji}  {count}")
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setToolTip("You reacted — press to remove" if mine
+                            else "Press to react")
+            chip.setStyleSheet(
+                f"QPushButton{{background:{C.ACTIVE if mine else C.ELEVATED};"
+                f"color:{C.TEXT if mine else C.TEXT_MUTED};"
+                f"border:1px solid {C.PRIMARY if mine else C.BORDER};"
+                f"border-radius:{Radius.PILL}px;padding:2px 10px;"
+                f"font-size:{Type.MICRO}px;}}"
+                f"QPushButton:hover{{border-color:{C.PRIMARY};}}")
+            chip.clicked.connect(
+                lambda _checked=False, e=emoji: self.react_requested.emit(self.seq, e))
+            row.addWidget(chip)
+
+        row.addStretch()
+        return holder
 
     def _image(self, attachment: dict) -> QWidget:
         """A picture shown in the conversation, not a file to go and fetch.
@@ -599,7 +705,7 @@ class _Bubble(QFrame):
         holder.setObjectName("chatImage")
         holder.setStyleSheet(
             f"QLabel#chatImage {{ background:{C.ELEVATED};border:1px solid {C.BORDER};"
-            f"border-radius:{R_SM}px;padding:6px;color:{C.TEXT_DIM};font-size:11px; }}")
+            f"border-radius:{R_SM}px;padding:6px;color:{C.TEXT_DIM};font-size:12px; }}")
         holder.setCursor(Qt.CursorShape.PointingHandCursor)
         holder.setToolTip("Click to open")
 
@@ -618,7 +724,7 @@ class _Bubble(QFrame):
         if problem:
             # Say what went wrong, and stop asking. Clicking tries again —
             # a server that has come back should not need a restart here.
-            holder.setText(f"⚠  {problem}\nClick to try again")
+            holder.setText(f"{problem}\nClick to try again")
             holder.setToolTip("Click to try again")
             return holder
 
@@ -648,7 +754,7 @@ class _Bubble(QFrame):
         else:
             pretty = f"{size} B"
 
-        row = QPushButton(f"📎  {attachment.get('file_name')}   ·   {pretty}")
+        row = QPushButton(f"{attachment.get('file_name')}   ·   {pretty}")
         row.setCursor(Qt.CursorShape.PointingHandCursor)
         row.setObjectName("fileRow")
         row.setStyleSheet(
@@ -716,7 +822,7 @@ class _DirectRow(QPushButton):
             f"color:{C.TEXT_MUTED};font-size:13px;border:none;background:transparent;")
         self._preview = QLabel(str(direct.get("preview") or "No messages yet"))
         self._preview.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:10px;border:none;background:transparent;")
+            f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;")
         column.addWidget(self._name)
         column.addWidget(self._preview)
         row.addLayout(column, 1)
@@ -746,14 +852,16 @@ class _DirectRow(QPushButton):
         self._name.setStyleSheet(
             f"color:{colour};font-size:13px;border:none;background:transparent;")
         self._preview.setStyleSheet(
-            f"color:{dim};font-size:10px;border:none;background:transparent;")
+            f"color:{dim};font-size:12px;border:none;background:transparent;")
 
     def set_unread(self, count: int) -> None:
         if count > 0:
             self._badge.setText(str(count if count < 100 else "99+"))
             self._badge.setStyleSheet(
-                f"background:{C.PRIMARY};color:{C.ON_ACCENT};border-radius:9px;"
-                f"font-size:10px;font-weight:700;padding:0 5px;border:none;")
+                # Red, matching the menu badge: one colour means "unread"
+                # everywhere, and it is not the colour of the selected row.
+                f"background:{C.RED};color:#ffffff;border-radius:12px;"
+                f"font-size:12px;font-weight:700;padding:0 5px;border:none;")
             self._badge.show()
         else:
             self._badge.hide()
@@ -799,7 +907,7 @@ class _PeoplePicker(QDialog):
 
         self._status = QLabel("Loading…")
         self._status.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;background:transparent;")
+            f"color:{C.TEXT_DIM};font-size:12px;background:transparent;")
         column.addWidget(self._status)
 
         buttons = QHBoxLayout()
@@ -876,16 +984,27 @@ class _Composer(QTextEdit):
     file_pasted = Signal(str)       # a path on this machine
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-    def __init__(self, parent=None):
+        # ONE CONSTRUCTOR. There were two, identical name, the first holding
+        # only a super() call — dead from the moment Python read the second.
         super().__init__(parent)
         self._picking = False
         self.setPlaceholderText("Write a message…   @ to mention somebody")
-        self.setFixedHeight(44)
+        self.setFixedHeight(38)
+        # FLAT, BECAUSE THE BAR AROUND IT IS THE FRAME. A bordered box inside
+        # a bordered bar is two rectangles saying the same thing, and it is
+        # what made the old composer read as three loose controls rather than
+        # one place to write.
         self.setStyleSheet(
-            f"QTextEdit {{ background:{C.CARD}; color:{C.TEXT}; border:1px solid {C.BORDER};"
-            f"border-radius:{R_SM}px; padding:10px 12px; font-size:13px; }}"
+            f"QTextEdit {{ background:transparent; color:{C.TEXT}; border:none;"
+            f"padding:8px 4px; font-size:13px; }}"
             + scrollbar(C.CARD))
+        # NO GUTTER INSIDE THE BAR. A QTextEdit reserves room for its vertical
+        # scrollbar, which showed as a pale sliver wedged against the Send
+        # button — visible in the render. The view still follows the cursor,
+        # so a message longer than the box remains reachable by typing and by
+        # the arrow keys, which is how every chat composer behaves.
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def set_picking(self, picking: bool) -> None:
         """True while the member list is open, so Enter picks instead of sends."""
@@ -977,6 +1096,18 @@ class _Composer(QTextEdit):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TeamPage(QWidget):
+    """The chat page.
+
+    SURVIVING A THEME SWITCH. Changing the theme rebuilds every page — see
+    theme.py for why — and a rebuilt chat page starts with no channel open
+    and an empty composer. Reported from use: a conversation was in progress,
+    the theme was switched, and the chat closed with a half-typed message in
+    it.
+
+    `snapshot()` and `restore()` are what the panel carries across that
+    rebuild. They deliberately hold only what a person would notice losing:
+    which channel was open, and what they had typed.
+    """
     """Channels, the conversation, and who is in it."""
 
     unread_changed = Signal(int)
@@ -998,6 +1129,8 @@ class TeamPage(QWidget):
         # fires before that must not read it — see open_channel.
         self._channel_id: int | None = None
         self._messages: list[dict] = []
+        # Which thread is open, if any. None means the members panel is up.
+        self._thread_root: int | None = None
         self._oldest_seq: int | None = None
         self._searching = False
         self._reply_to: dict | None = None
@@ -1023,6 +1156,22 @@ class TeamPage(QWidget):
         self._member_timer.setInterval(30_000)
         self._member_timer.timeout.connect(self._load_members)
 
+        # ── typing ──────────────────────────────────────────────────────
+        #
+        # THREE SECONDS, AND ONLY WHILE A CHANNEL IS OPEN. Typing is worth
+        # knowing for about as long as it takes somebody to finish a
+        # sentence; polling faster spends requests on a line nobody has sent,
+        # and slower makes the indicator arrive after the message does.
+        self._typing_timer = QTimer(self)
+        self._typing_timer.setInterval(3_000)
+        self._typing_timer.timeout.connect(self._load_typing)
+
+        # A ping is sent at most this often however fast somebody types. One
+        # request per keystroke is a hundred writes a minute per person, for
+        # a message that does not exist yet.
+        self._typing_ping_gap = 2.5
+        self._typing_last_ping = 0.0
+
         # The channel list has to refresh even when nothing is said.
         #
         # It used to update only when a message arrived or the page was
@@ -1033,6 +1182,18 @@ class TeamPage(QWidget):
         # correct matters most.
         self._teams_timer = QTimer(self)
         self._teams_timer.setInterval(60_000)
+        # STARTED HERE, NOT ONLY IN showEvent.
+        #
+        # The unread badge on the menu comes from this page. It used to poll
+        # only once the page had been SHOWN, so a panel where nobody had ever
+        # opened the chat never asked — and the count sat at zero all day
+        # while messages arrived. Seen live: the employee panel showed a
+        # count because its Team page had been opened once; the admin
+        # console's My Chat, never opened in that run, showed nothing.
+        #
+        # A page nobody has looked at still owes its badge an answer.
+        self._teams_timer.start()
+        QTimer.singleShot(1500, self.refresh)
         self._teams_timer.timeout.connect(self.refresh)
 
     # ── layout ──────────────────────────────────────────────────────────
@@ -1047,8 +1208,66 @@ class TeamPage(QWidget):
         body.setSpacing(14)
         body.addWidget(self._channel_pane())
         body.addWidget(self._chat_pane(), 1)
-        body.addWidget(self._member_pane())
+        # THE THREAD TAKES THE MEMBER PANEL'S PLACE, it does not add a third
+        # column. Three panels side by side leaves the conversation itself
+        # about four hundred pixels wide, which is the thing everybody is
+        # actually reading. The members are still one click away.
+        self._side = QStackedWidget()
+        self._side.setFixedWidth(212)
+        self._side.addWidget(self._member_pane())     # index 0
+        self._side.addWidget(self._thread_pane())     # index 1
+        body.addWidget(self._side)
         root.addLayout(body, 1)
+
+    def _thread_pane(self) -> QWidget:
+        """A root message and its replies, with a box that replies to it."""
+        pane = QFrame()
+        pane.setObjectName("threadPane")
+        pane.setStyleSheet(
+            f"QFrame#threadPane {{ background:{C.CARD}; border:1px solid {C.BORDER};"
+            f"border-radius:{R}px; }}")
+        col = QVBoxLayout(pane)
+        col.setContentsMargins(14, 14, 10, 14)
+        col.setSpacing(8)
+
+        head = QHBoxLayout()
+        heading = QLabel("Thread")
+        heading.setStyleSheet(
+            f"color:{C.TEXT};font-size:13px;font-weight:700;"
+            f"border:none;background:transparent;")
+        head.addWidget(heading)
+        head.addStretch()
+        close = QPushButton()
+        close.setIcon(_icons.icon("x", 14, C.TEXT_DIM))
+        close.setIconSize(QSize(14, 14))
+        close.setFixedSize(24, 24)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setToolTip("Back to members")
+        close.setStyleSheet("background:transparent;border:none;")
+        close.clicked.connect(self.close_thread)
+        head.addWidget(close)
+        col.addLayout(head)
+
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setStyleSheet("QScrollArea{background:transparent;border:none;}"
+                           + scrollbar(C.CARD))
+        host = QWidget()
+        host.setStyleSheet("background:transparent;")
+        self._thread_body = QVBoxLayout(host)
+        self._thread_body.setContentsMargins(0, 0, 6, 0)
+        self._thread_body.setSpacing(8)
+        self._thread_body.addStretch()
+        area.setWidget(host)
+        self._thread_area = area
+        col.addWidget(area, 1)
+
+        self._thread_input = QLineEdit()
+        self._thread_input.setPlaceholderText("Reply in thread…")
+        self._thread_input.returnPressed.connect(self._send_thread_reply)
+        col.addWidget(self._thread_input)
+        return pane
 
     def _channel_pane(self) -> QWidget:
         pane = QFrame()
@@ -1084,7 +1303,7 @@ class TeamPage(QWidget):
         self._offline_note = QLabel("Offline — messages will send when reconnected")
         self._offline_note.setWordWrap(True)
         self._offline_note.setStyleSheet(
-            f"color:{C.AMBER};font-size:11px;border:none;background:transparent;")
+            f"color:{C.AMBER};font-size:12px;border:none;background:transparent;")
         self._offline_note.hide()
         col.addWidget(self._offline_note)
         return pane
@@ -1103,7 +1322,7 @@ class TeamPage(QWidget):
         head = QHBoxLayout()
         self._title = QLabel("Select a channel")
         self._title.setStyleSheet(
-            f"color:{C.TEXT};font-size:15px;font-weight:700;border:none;background:transparent;")
+            f"color:{C.TEXT};font-size:16px;font-weight:700;border:none;background:transparent;")
         self._subtitle = QLabel("")
         self._subtitle.setStyleSheet(
             f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;")
@@ -1113,7 +1332,8 @@ class TeamPage(QWidget):
         titles.addWidget(self._subtitle)
         head.addLayout(titles)
         head.addStretch()
-        self._back = QPushButton("← Back to channel")
+        self._back = QPushButton("  Back to channel")
+        self._back.setIcon(_icons.icon("chevron-left", 15, C.TEXT))
         self._back.setStyleSheet(button("secondary"))
         self._back.setCursor(Qt.CursorShape.PointingHandCursor)
         self._back.clicked.connect(self._exit_search)
@@ -1127,7 +1347,7 @@ class TeamPage(QWidget):
         self._pinned_bar.setObjectName("pinnedBar")
         self._pinned_bar.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pinned_bar.setStyleSheet(
-            f"QPushButton#pinnedBar {{ color:{C.AMBER};font-size:11px;text-align:left;"
+            f"QPushButton#pinnedBar {{ color:{C.AMBER};font-size:12px;text-align:left;"
             f"background:{C.AMBER_BG};border:1px solid {C.BORDER};"
             f"border-radius:{R_SM}px;padding:7px 10px; }}"
             f"QPushButton#pinnedBar:hover {{ border-color:{C.AMBER}; }}")
@@ -1175,11 +1395,17 @@ class TeamPage(QWidget):
         reply_row.setSpacing(8)
         self._reply_label = QLabel("")
         self._reply_label.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;border:none;background:transparent;"
+            f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;"
             f"border-left:2px solid {C.PRIMARY};padding-left:8px;")
-        cancel_reply = QPushButton("✕")
+        # The ✕ that drops the reply you are composing. It was that glyph as
+        # text; with the emoji gone this was a 22px invisible button, and the
+        # only way out of a reply was to send it.
+        cancel_reply = QPushButton()
+        cancel_reply.setIcon(_icons.icon("x", 14, C.TEXT_DIM))
+        cancel_reply.setIconSize(QSize(14, 14))
+        cancel_reply.setToolTip("Cancel this reply")
         cancel_reply.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_reply.setFixedWidth(22)
+        cancel_reply.setFixedWidth(24)
         cancel_reply.setStyleSheet(
             f"color:{C.TEXT_DIM};background:transparent;border:none;font-size:12px;")
         cancel_reply.clicked.connect(self._cancel_reply)
@@ -1197,37 +1423,84 @@ class TeamPage(QWidget):
         self._staged_bar.hide()
         col.addWidget(self._staged_bar)
 
-        self._composer_row = QWidget()
-        self._composer_row.setStyleSheet("background:transparent;")
+        # ── the composer ────────────────────────────────────────────────
+        #
+        # ONE BAR, NOT THREE CONTROLS. This was a paperclip button, a
+        # bordered text box and a Send button sitting side by side with a gap
+        # between each — three rectangles of three different heights, which is
+        # what "composer saada hai" meant. Slack and Teams both draw a single
+        # rounded container and put the controls inside it, and the reason is
+        # that writing a message is ONE act.
+        #
+        # Every button in here is the same 34px square, the same radius, the
+        # same Lucide stroke and the same hover, so the row reads as a
+        # toolbar. Send keeps its label because it is the one control whose
+        # meaning must not depend on recognising an icon.
+        self._composer_row = QFrame()
+        self._composer_row.setObjectName("composerBar")
+        self._composer_row.setStyleSheet(
+            f"QFrame#composerBar {{ background:{C.CARD};"
+            f"border:1px solid {C.BORDER};border-radius:{R_SM + 2}px; }}"
+            f"QFrame#composerBar:focus-within {{ border-color:{C.PRIMARY}; }}")
         row = QHBoxLayout(self._composer_row)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        row.setContentsMargins(6, 6, 6, 6)
+        row.setSpacing(6)
+        # Bottom-aligned: when the text runs to a second line the buttons stay
+        # level with the last line, which is where the eye is.
+        row.setAlignment(Qt.AlignmentFlag.AlignBottom)
 
-        attach = QPushButton("📎")
-        attach.setCursor(Qt.CursorShape.PointingHandCursor)
-        attach.setFixedSize(44, 44)
-        attach.setToolTip("Attach a file")
-        attach.setStyleSheet(
-            f"QPushButton {{ background:{C.CARD};color:{C.TEXT_MUTED};"
-            f"border:1px solid {C.BORDER};border-radius:{R_SM}px;font-size:15px; }}"
-            f"QPushButton:hover {{ color:{C.TEXT};border-color:{C.PRIMARY}; }}")
-        attach.clicked.connect(self._attach_menu)
-        row.addWidget(attach)
+        def tool(icon_name: str, tip: str, on_click) -> QPushButton:
+            """One square in the toolbar. All of them, so none can drift."""
+            btn = QPushButton()
+            btn.setIcon(_icons.icon(icon_name, 17, C.TEXT_MUTED))
+            btn.setIconSize(QSize(17, 17))
+            btn.setFixedSize(34, 34)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.setStyleSheet(
+                f"QPushButton {{ background:transparent;border:none;"
+                f"border-radius:{R_SM}px; }}"
+                f"QPushButton:hover {{ background:{C.ELEVATED}; }}"
+                f"QPushButton:pressed {{ background:{C.CARD_HOVER}; }}")
+            btn.clicked.connect(on_click)
+            return btn
+
+        row.addWidget(tool("paperclip", "Attach a file", self._attach_menu))
+        row.addWidget(tool("smile", "Insert an emoji", self._insert_emoji))
+        row.addWidget(tool("at-sign", "Mention somebody", self._insert_mention))
 
         self._composer = _Composer()
         self._composer.send.connect(self._on_send)
+        self._composer.textChanged.connect(self._on_typed)
         self._composer.mention_typed.connect(self._on_mention_typed)
         self._composer.navigate.connect(self._navigate_mentions)
         self._composer.accept_mention.connect(self._accept_mention)
         self._composer.image_pasted.connect(self._paste_image)
         self._composer.file_pasted.connect(self._paste_file)
-        send_btn = QPushButton("Send")
-        send_btn.setStyleSheet(button("primary"))
-        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        send_btn.setFixedHeight(44)
-        send_btn.clicked.connect(self._on_send)
         row.addWidget(self._composer, 1)
+
+        send_btn = QPushButton("Send")
+        send_btn.setIcon(_icons.icon("send", 15, C.ON_ACCENT))
+        send_btn.setIconSize(QSize(15, 15))
+        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        send_btn.setFixedHeight(34)
+        send_btn.setStyleSheet(
+            f"QPushButton {{ background:{C.PRIMARY};color:{C.ON_ACCENT};border:none;"
+            f"border-radius:{R_SM}px;padding:0 14px;font-size:13px;font-weight:600; }}"
+            f"QPushButton:hover {{ background:{C.PRIMARY_DIM}; }}")
+        send_btn.clicked.connect(self._on_send)
         row.addWidget(send_btn)
+
+        # WHERE THE INDICATOR LIVES: between the conversation and the box,
+        # which is where the next message will appear. Hidden when nobody is
+        # typing, so it takes no height rather than leaving a blank line.
+        self._typing_label = QLabel("")
+        self._typing_label.setStyleSheet(
+            f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;"
+            f"background:transparent;border:none;padding:0 4px 2px 4px;")
+        self._typing_label.hide()
+        col.addWidget(self._typing_label)
+
         col.addWidget(self._composer_row)
 
         self._read_only = QLabel("")
@@ -1239,20 +1512,37 @@ class TeamPage(QWidget):
         return pane
 
     def _member_pane(self) -> QWidget:
+        """Who is in this conversation, and whether they are at their desk.
+
+        WHAT WAS WRONG WITH IT. A heading, then rows of a bullet character and
+        two lines of 12px text at six pixels apart, then a sentence — three
+        different rhythms in one narrow column, and no avatars, so the panel
+        did not look like it belonged to the same product as the message list
+        beside it, which is full of them.
+
+        WHAT CHANGED, AND ONLY THIS. The heading is the same small-caps label
+        the rest of the product uses for a section and now carries the count.
+        Each person is a row of avatar, name and state on the panel's own
+        grid, with the status shown as a drawn dot rather than a "●" from the
+        text font. Rules separate the three parts. Nothing about who is
+        fetched, or when, moved.
+        """
         pane = QFrame()
         pane.setObjectName("memberPane")
-        pane.setFixedWidth(212)
+        pane.setFixedWidth(224)
         pane.setStyleSheet(
             f"QFrame#memberPane {{ background:{C.CARD}; border:1px solid {C.BORDER};"
             f"border-radius:{R}px; }}")
         col = QVBoxLayout(pane)
-        col.setContentsMargins(14, 14, 10, 14)
-        col.setSpacing(8)
+        col.setContentsMargins(Space.MD, Space.MD, Space.SM, Space.MD)
+        col.setSpacing(Space.SM)
 
-        heading = QLabel("Members")
-        heading.setStyleSheet(
-            f"color:{C.TEXT};font-size:13px;font-weight:700;border:none;background:transparent;")
-        col.addWidget(heading)
+        self._member_heading = QLabel("MEMBERS")
+        self._member_heading.setStyleSheet(
+            f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;font-weight:800;"
+            f"letter-spacing:1px;border:none;background:transparent;")
+        col.addWidget(self._member_heading)
+        col.addWidget(self._rule())
 
         area = QScrollArea()
         area.setWidgetResizable(True)
@@ -1262,17 +1552,26 @@ class TeamPage(QWidget):
         host.setStyleSheet("background:transparent;")
         self._members = QVBoxLayout(host)
         self._members.setContentsMargins(0, 0, 6, 0)
-        self._members.setSpacing(6)
+        self._members.setSpacing(2)
         self._members.addStretch()
         area.setWidget(host)
         col.addWidget(area, 1)
 
+        col.addWidget(self._rule())
         note = QLabel("Team chat is kept in the company record.")
         note.setWordWrap(True)
         note.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:10px;border:none;background:transparent;")
+            f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;line-height:16px;"
+            f"border:none;background:transparent;")
         col.addWidget(note)
         return pane
+
+    def _rule(self) -> QFrame:
+        """A hairline. One definition, so both rules in this panel match."""
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background:{C.BORDER};border:none;")
+        return line
 
     # ── loading ─────────────────────────────────────────────────────────
 
@@ -1300,8 +1599,7 @@ class TeamPage(QWidget):
     def _on_teams(self, payload):
         self._teams = payload.get("teams") or []
         self._render_channels()
-        total = sum(int(t.get("unread") or 0) for t in self._teams)
-        self.unread_changed.emit(total)
+        self._emit_unread()
 
         if self._channel_id is None:
             # `_channel` is only set when the history reply lands, so testing
@@ -1314,6 +1612,7 @@ class TeamPage(QWidget):
 
     def _on_directs(self, payload):
         self._directs = payload.get("directs") or []
+        self._emit_unread()
         self._render_channels()
 
     def _new_message(self):
@@ -1360,7 +1659,7 @@ class TeamPage(QWidget):
             label = QLabel(team["name"].upper() +
                            ("  · archived" if team.get("is_archived") else ""))
             label.setStyleSheet(
-                f"color:{C.TEXT_DIM};font-size:10px;font-weight:800;letter-spacing:1px;"
+                f"color:{C.TEXT_DIM};font-size:12px;font-weight:800;letter-spacing:1px;"
                 f"padding:10px 10px 2px;border:none;background:transparent;")
             self._channel_list.insertWidget(index, label)
             index += 1
@@ -1389,7 +1688,7 @@ class TeamPage(QWidget):
         # was missed entirely — which is the whole feature missed, because
         # finding somebody outside your team is the only way in. An affordance
         # nobody sees is not an affordance.
-        new_chat = QPushButton("✉   Message somebody")
+        new_chat = QPushButton("Message somebody")
         new_chat.setCursor(Qt.CursorShape.PointingHandCursor)
         new_chat.setFixedHeight(34)
         new_chat.setObjectName("newDm")
@@ -1410,14 +1709,27 @@ class TeamPage(QWidget):
 
         title = QLabel("DIRECT MESSAGES")
         title.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:10px;font-weight:800;letter-spacing:1px;"
+            f"color:{C.TEXT_DIM};font-size:12px;font-weight:800;letter-spacing:1px;"
             f"border:none;background:transparent;padding-left:2px;")
         bar.addWidget(title)
 
         self._channel_list.insertWidget(index, holder)
         index += 1
 
+        # ONE ROW PER CHANNEL. The list is keyed by channel_id, so two
+        # entries pointing at the same conversation would overwrite each
+        # other in self._rows — and both would be drawn as selected at once,
+        # because selection is decided by comparing that same id.
+        #
+        # Seen for real: a direct channel briefly had three members, so the
+        # server offered it twice — once under each of the other two people —
+        # and picking one highlighted both. The membership was the fault, but
+        # a list that cannot survive a duplicate is a second one.
+        seen_channels = set()
         for direct in self._directs:
+            if direct.get("channel_id") in seen_channels:
+                continue
+            seen_channels.add(direct.get("channel_id"))
             row = _DirectRow(direct)
             row.clicked.connect(
                 lambda _checked=False, cid=direct["channel_id"]: self.open_channel(cid))
@@ -1434,13 +1746,185 @@ class TeamPage(QWidget):
                           "anybody in the company, team or not.")
             hint.setWordWrap(True)
             hint.setStyleSheet(
-                f"color:{C.TEXT_DIM};font-size:11px;padding:2px 12px 8px;"
+                f"color:{C.TEXT_DIM};font-size:12px;padding:2px 12px 8px;"
                 f"border:none;background:transparent;")
             self._channel_list.insertWidget(index, hint)
             index += 1
         return index
 
     # ── one channel ─────────────────────────────────────────────────────
+
+    def snapshot(self) -> dict:
+        """What is worth carrying across a rebuild."""
+        draft = ""
+        try:
+            draft = self._composer.toPlainText()
+        except Exception:
+            pass
+        return {"channel_id": self._channel_id, "draft": draft}
+
+    def restore(self, state: dict) -> None:
+        """Put back what snapshot() took, if it is still valid."""
+        if not state:
+            return
+        channel_id = state.get("channel_id")
+        if channel_id:
+            try:
+                self.open_channel(channel_id)
+            except Exception:
+                # A channel that has since been left or archived simply does
+                # not reopen; losing the draft as well would be worse.
+                pass
+        draft = state.get("draft") or ""
+        if draft:
+            try:
+                self._composer.setPlainText(draft)
+                cursor = self._composer.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                self._composer.setTextCursor(cursor)
+            except Exception:
+                pass
+
+    def _on_typed(self):
+        """A keystroke — tell the server, at most once every few seconds.
+
+        THROTTLED HERE RATHER THAN ON THE SERVER. The server cannot tell a
+        fast typist from a loop; the client knows it has already said so two
+        seconds ago and that nothing has changed since.
+
+        An empty box means "stopped" — somebody who selects all and deletes
+        has abandoned the message, and leaving the dots up would be a lie
+        that lasts until the row expires.
+        """
+        if not self._channel_id:
+            return
+        import time
+
+        if not self._composer.toPlainText().strip():
+            self._typing_last_ping = 0.0
+            self._run(ChatManager.stop_typing, lambda _r: None,
+                      lambda _e: None, self._channel_id)
+            return
+
+        now = time.monotonic()
+        if now - self._typing_last_ping < self._typing_ping_gap:
+            return
+        self._typing_last_ping = now
+        self._run(ChatManager.ping_typing, lambda _r: None,
+                  lambda _e: None, self._channel_id)
+
+    def _load_typing(self):
+        """Who is typing here, other than me."""
+        if not self._channel_id:
+            return
+        self._run(ChatManager.who_is_typing, self._show_typing,
+                  lambda _error: None, self._channel_id)
+
+    def _show_typing(self, people: list):
+        """One name, two names, or a count — never a wall of them."""
+        names = [str(p.get("name") or "").strip() for p in (people or [])]
+        names = [n for n in names if n]
+        if not names:
+            self._typing_label.hide()
+            self._typing_label.setText("")
+            return
+
+        if len(names) == 1:
+            text = f"{names[0]} is typing…"
+        elif len(names) == 2:
+            text = f"{names[0]} and {names[1]} are typing…"
+        else:
+            # NOT a list of six names. On a busy channel that line grows
+            # wider than the panel and pushes the composer around.
+            text = f"{len(names)} people are typing…"
+        self._typing_label.setText(text)
+        self._typing_label.show()
+
+    # ── threads ─────────────────────────────────────────────────────────
+
+    def open_thread(self, seq: int):
+        """Show the discussion hanging off a message."""
+        self._thread_root = int(seq)
+        self._side.setCurrentIndex(1)
+        self._load_thread()
+
+    def close_thread(self):
+        self._thread_root = None
+        self._side.setCurrentIndex(0)
+
+    def _load_thread(self):
+        if not getattr(self, "_thread_root", None):
+            return
+        self._run(ChatManager.thread, self._fill_thread,
+                  lambda error: QMessageBox.information(
+                      self, "Thread", error),
+                  self._thread_root)
+
+    def _fill_thread(self, payload: dict):
+        """Root at the top, replies under it, oldest first."""
+        while self._thread_body.count():
+            item = self._thread_body.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        root = (payload or {}).get("root")
+        replies = (payload or {}).get("replies") or []
+        # THE ROOT SEQ COMES FROM THE SERVER. Clicking a reply opens the same
+        # thread, so what is on screen may not be what was clicked — sending
+        # against the clicked message would start a second thread beside the
+        # first.
+        if root and root.get("seq"):
+            self._thread_root = int(root["seq"])
+
+        me = SessionManager.employee_id
+        for message in ([root] if root else []) + list(replies):
+            bubble = _Bubble(message, mine=message.get("sender_id") == me,
+                             can_post=False)
+            bubble.react_requested.connect(self._toggle_reaction)
+            bubble.thread_requested.connect(self.open_thread)
+            self._thread_body.addWidget(bubble)
+
+        count = len(replies)
+        note = QLabel("No replies yet — the first one starts the thread."
+                      if not count else
+                      f"{count} repl{'y' if count == 1 else 'ies'}")
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;"
+            f"border:none;background:transparent;")
+        self._thread_body.addWidget(note)
+        self._thread_body.addStretch()
+
+    def _send_thread_reply(self):
+        text = self._thread_input.text().strip()
+        root = getattr(self, "_thread_root", None)
+        if not text or not root or not self._channel:
+            return
+        try:
+            self._chat.send(self._channel["id"], text, reply_to=int(root))
+        except Exception as error:              # noqa: BLE001
+            QMessageBox.information(self, "Not sent", str(error))
+            return
+        self._thread_input.clear()
+        # The reply is queued locally, so the thread is redrawn from the
+        # server a moment later rather than optimistically here — one source
+        # for what the thread contains.
+        QTimer.singleShot(600, self._load_thread)
+
+    def _load_reaction_choices(self):
+        """Ask the server what it accepts, once per run.
+
+        A hard-coded list here is the classic drift: somebody adds an emoji
+        server-side, the client never offers it; somebody removes one, the
+        client offers a button that returns 400. The fallback in _Bubble is
+        only for the moment before this answers.
+        """
+        if _Bubble.REACTION_CHOICES:
+            return
+        self._run(ChatManager.reaction_choices,
+                  lambda choices: setattr(_Bubble, "REACTION_CHOICES",
+                                          list(choices or [])),
+                  lambda _error: None)
 
     def open_channel(self, channel_id: int):
         self._searching = False
@@ -1450,6 +1934,17 @@ class TeamPage(QWidget):
             row.set_selected(cid == channel_id)
         self._chat.set_active_channel(channel_id)
         self._member_timer.start()
+        # Clear whatever the previous channel was showing before the first
+        # poll of the new one answers — otherwise "Priya is typing…" follows
+        # you into a conversation Priya is not in.
+        self._show_typing([])
+        # A thread belongs to the channel it was opened from. Carrying it
+        # across would leave somebody replying into a conversation they are
+        # no longer looking at.
+        self.close_thread()
+        self._typing_last_ping = 0.0
+        self._typing_timer.start()
+        self._load_typing()
         self._cancel_reply()
         self._mention_list.hide()
 
@@ -1467,6 +1962,7 @@ class TeamPage(QWidget):
         # it look intermittent rather than wrong.
         self._channel_id = channel_id
         self._members_cache = []
+        self._load_reaction_choices()
         self._run(ChatManager.fetch_history, self._on_history,
                   self._on_history_failed, channel_id)
         self._load_members(channel_id)
@@ -1566,7 +2062,7 @@ class TeamPage(QWidget):
                 divider = QLabel(day)
                 divider.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 divider.setStyleSheet(
-                    f"color:{C.TEXT_DIM};font-size:10px;font-weight:700;"
+                    f"color:{C.TEXT_DIM};font-size:12px;font-weight:700;"
                     f"letter-spacing:1px;padding:12px 0 6px;"
                     f"border:none;background:transparent;")
                 self._feed.insertWidget(index, divider)
@@ -1583,6 +2079,7 @@ class TeamPage(QWidget):
             bubble.jump_requested.connect(self._jump_to)
             bubble.image_wanted.connect(self._load_image)
             bubble.image_clicked.connect(self._open_image)
+            bubble.react_requested.connect(self._toggle_reaction)
             # Only now is anything listening — see _Bubble.request_images.
             bubble.request_images()
             self._feed.insertWidget(index, bubble)
@@ -1642,12 +2139,45 @@ class TeamPage(QWidget):
             self._recount()
 
     def _recount(self):
+        # Same rule as _emit_unread: a channel is only "being read" while the
+        # page is actually on screen. Zeroing it from a hidden page threw
+        # away counts for the very conversation somebody was last in.
+        reading = self.isVisible() and self._channel is not None
         for team in self._teams:
             for channel in team["channels"]:
-                if self._channel and channel["id"] == self._channel["id"]:
+                if reading and channel["id"] == self._channel["id"]:
                     channel["unread"] = 0
             team["unread"] = sum(int(c.get("unread") or 0) for c in team["channels"])
-        self.unread_changed.emit(sum(int(t.get("unread") or 0) for t in self._teams))
+        self._emit_unread()
+
+    def _emit_unread(self):
+        """Teams AND direct messages.
+
+        THE TOTAL USED TO COUNT TEAM CHANNELS ONLY. A direct message — the
+        one kind that is always addressed to you personally — added nothing
+        to the badge, so somebody wrote to you and the menu said nothing.
+        Reported as "jab tak My Chat nahi khol raha, pata hi nahi chalta".
+        """
+        # THE OPEN CONVERSATION IS ONLY "OPEN" WHILE THE PAGE IS VISIBLE.
+        #
+        # This excluded whatever `self._channel` held — and that attribute
+        # keeps its value after the page is closed. So the one conversation
+        # somebody had been reading was excluded from the badge for the rest
+        # of the session: messages arrived, the count stayed at zero, and it
+        # looked as though notifications were dead.
+        #
+        # Seen live, and it explains why the employee panel looked right and
+        # the admin console did not: the employee's count came from team
+        # channels, which were never excluded, while the admin's traffic was
+        # all in the one direct message they had opened.
+        looking = self.isVisible() and self._channel is not None
+        open_id = self._channel.get("id") if looking else None
+
+        teams = sum(int(t.get("unread") or 0) for t in self._teams)
+        directs = sum(int(d.get("unread") or 0)
+                      for d in getattr(self, "_directs", []) or []
+                      if d.get("channel_id") != open_id)
+        self.unread_changed.emit(teams + directs)
 
     # ── members ─────────────────────────────────────────────────────────
 
@@ -1679,6 +2209,8 @@ class TeamPage(QWidget):
         self._members_cache = []
         self._chat.set_active_channel(None)
         self._member_timer.stop()
+        self._typing_timer.stop()
+        self._show_typing([])
         self.refresh()
         QMessageBox.information(
             self, "No longer available",
@@ -1699,32 +2231,55 @@ class TeamPage(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        for index, member in enumerate(payload.get("members") or []):
-            dot, colour, label = PRESENCE.get(member.get("status", "OFFLINE"),
-                                              PRESENCE["OFFLINE"])
+        members = payload.get("members") or []
+        if getattr(self, "_member_heading", None) is not None:
+            self._member_heading.setText(
+                f"MEMBERS  ·  {len(members)}" if members else "MEMBERS")
+
+        for index, member in enumerate(members):
+            colour, label = PRESENCE.get(member.get("status", "OFFLINE"),
+                                         PRESENCE["OFFLINE"])
             if member.get("status") == "IDLE" and member.get("idle_minutes") is not None:
                 label = f"Idle {member['idle_minutes']} min"
 
             row = QWidget()
             row.setStyleSheet("background:transparent;")
             line = QHBoxLayout(row)
-            line.setContentsMargins(0, 0, 0, 0)
-            line.setSpacing(8)
+            line.setContentsMargins(4, 5, 4, 5)
+            line.setSpacing(Space.SM)
 
-            bullet = QLabel(dot)
-            bullet.setStyleSheet(
-                f"color:{colour};font-size:14px;border:none;background:transparent;")
+            face = Avatar(26)
+            face.show_person(member.get("employee_id"), member.get("name") or "")
+            line.addWidget(face)
+
             names = QVBoxLayout()
-            names.setSpacing(0)
+            names.setSpacing(1)
+            names.setContentsMargins(0, 0, 0, 0)
             name = QLabel(member["name"] + (" (you)" if member.get("is_me") else ""))
             name.setStyleSheet(
-                f"color:{C.TEXT};font-size:12px;border:none;background:transparent;")
+                f"color:{C.TEXT};font-size:13px;font-weight:600;"
+                f"border:none;background:transparent;")
+
+            # THE STATE, WITH THE DOT DRAWN RATHER THAN TYPED. "●" is a
+            # character out of the text font: its size and its baseline are
+            # the font's business, so it never lined up with the word beside
+            # it. A four-pixel rounded label is the same shape at every font.
+            state_row = QHBoxLayout()
+            state_row.setSpacing(6)
+            state_row.setContentsMargins(0, 0, 0, 0)
+            dot = QLabel()
+            dot.setFixedSize(6, 6)
+            dot.setStyleSheet(dot_style(6, colour))
             state = QLabel(label)
             state.setStyleSheet(
-                f"color:{C.TEXT_DIM};font-size:10px;border:none;background:transparent;")
+                f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;"
+                f"border:none;background:transparent;")
+            state_row.addWidget(dot)
+            state_row.addWidget(state)
+            state_row.addStretch()
+
             names.addWidget(name)
-            names.addWidget(state)
-            line.addWidget(bullet)
+            names.addLayout(state_row)
             line.addLayout(names, 1)
             self._members.insertWidget(index, row)
 
@@ -1752,6 +2307,13 @@ class TeamPage(QWidget):
             QMessageBox.warning(self, "Not sent", str(error))
             return
         self._composer.clear()
+        # Sent — so stop saying "typing". Without this the dots stay up for
+        # the rest of the window, which reads as though the next message is
+        # already on its way.
+        self._typing_last_ping = 0.0
+        if self._channel_id:
+            self._run(ChatManager.stop_typing, lambda _r: None,
+                      lambda _e: None, self._channel_id)
         self._cancel_reply()
         self._clear_staged()
         # Your own message always scrolls into view — you just wrote it.
@@ -1782,13 +2344,46 @@ class TeamPage(QWidget):
                     touched = True
                 continue
             # Somewhere else — bump its badge.
+            #
+            # BOTH LISTS, NOT JUST THE TEAMS. This walked self._teams alone,
+            # so a direct message raised nothing here and its count only
+            # appeared when fetch_directs next ran — on a 30-to-60 second
+            # timer. The badge did arrive, ten to twenty seconds late, which
+            # reads as broken rather than slow: "raju ko message kiya to ye 1
+            # se 2 nahi hua".
+            #
+            # The message itself is already in hand at this point; the count
+            # should not need a second round trip to the server to change.
             row = self._rows.get(channel_id)
+            bumped = False
             for team in self._teams:
                 for channel in team["channels"]:
                     if channel["id"] == channel_id:
                         channel["unread"] = int(channel.get("unread") or 0) + 1
                         if row:
                             row.set_unread(channel["unread"])
+                        bumped = True
+            if not bumped:
+                for direct in getattr(self, "_directs", []) or []:
+                    if direct.get("channel_id") == channel_id:
+                        direct["unread"] = int(direct.get("unread") or 0) + 1
+                        if row:
+                            row.set_unread(direct["unread"])
+                        bumped = True
+            if not bumped:
+                # A conversation this panel has never listed — somebody
+                # writing for the first time. The row cannot be bumped
+                # because it does not exist yet, so ask for the list; without
+                # this the very first message from a new person is silent
+                # until the slow timer comes round.
+                #
+                # Throttled, because "not in either list" also describes a
+                # public announcement channel somebody is not a member of,
+                # and that would otherwise fetch the whole conversation list
+                # once per announcement.
+                if monotonic() - getattr(self, "_directs_asked_at", 0.0) > 10:
+                    self._directs_asked_at = monotonic()
+                    self._run(ChatManager.fetch_directs, self._on_directs, None)
         if touched:
             self._render_feed()
             self._mark_read()
@@ -1882,6 +2477,30 @@ class TeamPage(QWidget):
 
     # ── pinning ─────────────────────────────────────────────────────────
 
+    def _toggle_reaction(self, seq: int, emoji: str):
+        """React, or take it back — and redraw only that message.
+
+        NOT A CHANNEL RELOAD. Pinning reloads because it changes the pinned
+        shelf as well; a reaction changes one row. Reloading would scroll the
+        conversation back to the bottom, which on a long thread throws away
+        where somebody was reading.
+        """
+        def done(payload):
+            reactions = (payload or {}).get("reactions") or []
+            for message in self._messages:
+                if message.get("seq") == seq:
+                    message["reactions"] = reactions
+                    break
+            # _render_feed, and NOT with force_bottom: reacting to a message
+            # eight screens up must not throw the reader back to the newest
+            # one. That is what a channel reload would have done.
+            self._render_feed()
+
+        self._run(ChatManager.react, done,
+                  lambda error: QMessageBox.information(
+                      self, "Not reacted", error),
+                  seq, emoji)
+
     def _toggle_pin(self, seq: int, pinned: bool):
         self._run(ChatManager.set_pinned, lambda _p: self._reload_channel(),
                   lambda error: QMessageBox.information(self, "Not pinned", error),
@@ -1962,8 +2581,16 @@ class TeamPage(QWidget):
         if self._pinned:
             first = str(self._pinned[0].get("body") or "")[:60] or "(file)"
             more = f"   +{len(self._pinned) - 1} more" if len(self._pinned) > 1 else ""
-            self._pinned_bar.setTextFormat(Qt.TextFormat.PlainText)
-            self._pinned_bar.setText(f"📌  {first}{more}")
+            # setTextFormat() WAS CALLED HERE AND QPushButton HAS NO SUCH
+            # METHOD — this raised the moment a channel had anything pinned,
+            # which is to say the pinned bar never once appeared. A button
+            # does not interpret markup anyway, so the call was trying to buy
+            # something it already had.
+            #
+            # What a button DOES do to text is read "&" as a mnemonic and
+            # swallow it, so a pinned message about "R&D" showed as "RD".
+            # Doubling it is how Qt is told to draw one.
+            self._pinned_bar.setText(f"{first}{more}".replace("&", "&&"))
             self._pinned_bar.show()
         else:
             self._pinned_bar.hide()
@@ -1982,6 +2609,42 @@ class TeamPage(QWidget):
         self._render_feed()
 
     # ── files ───────────────────────────────────────────────────────────
+
+    def _insert_emoji(self):
+        """A short menu of emoji, dropped into the box at the cursor.
+
+        THE SAME LIST THE REACTIONS USE, and for the same reason: the server
+        keeps a whitelist, and offering a full keyboard would mean offering
+        characters it will refuse. Nothing is sent from here — the emoji is
+        typed for the person, and they still press Send.
+        """
+        menu = QMenu(self)
+        # Content, not interface icons — the same marker the reaction menu
+        # carries, so the "no emoji in the UI" check knows the difference.
+        fallback = ["👍", "❤️", "😂", "🎉", "👀", "✅"]  # reaction content
+        for emoji in (_Bubble.REACTION_CHOICES or fallback):
+            action = menu.addAction(str(emoji))
+            action.triggered.connect(
+                lambda _checked=False, e=str(emoji): self._type_into_composer(e))
+        menu.exec(QCursor.pos())
+
+    def _insert_mention(self):
+        """Types the "@" for somebody, which opens the member list.
+
+        The list is driven by what is in the box — the composer reports the
+        partial handle and the page answers with names — so this needs no new
+        path of its own: it types the character and the existing flow runs.
+        """
+        text = self._composer.toPlainText()
+        lead = "" if (not text or text[-1:].isspace()) else " "
+        self._type_into_composer(f"{lead}@")
+
+    def _type_into_composer(self, text: str) -> None:
+        """Insert at the cursor and keep the focus in the box."""
+        cursor = self._composer.textCursor()
+        cursor.insertText(text)
+        self._composer.setTextCursor(cursor)
+        self._composer.setFocus()
 
     def _attach_menu(self):
         """A small menu, rather than dropping straight into a file browser.
@@ -2009,15 +2672,15 @@ class TeamPage(QWidget):
         menu.setStyleSheet(
             f"QMenu {{ background:{C.ELEVATED};color:{C.TEXT};"
             f"border:1px solid {C.BORDER};border-radius:{R_SM}px;padding:6px; }}"
-            f"QMenu::item {{ padding:9px 22px;border-radius:6px;font-size:13px; }}"
+            f"QMenu::item {{ padding:9px 22px;border-radius:12px;font-size:13px; }}"
             f"QMenu::item:selected {{ background:{C.SELECTED_BG};"
             f"color:{C.SELECTED_TEXT}; }}")
 
-        photos = QAction("🖼   Photo", menu)
+        photos = QAction("Photo", menu)
         photos.triggered.connect(lambda: self._attach_file(images_only=True))
         menu.addAction(photos)
 
-        any_file = QAction("📄   File", menu)
+        any_file = QAction("File", menu)
         any_file.triggered.connect(lambda: self._attach_file(images_only=False))
         menu.addAction(any_file)
         return menu
@@ -2106,7 +2769,7 @@ class TeamPage(QWidget):
         self._clear_staged_widgets()
         label = QLabel(text)
         label.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;border:none;background:transparent;")
+            f"color:{C.TEXT_DIM};font-size:12px;border:none;background:transparent;")
         self._staged_row.addWidget(label)
         self._staged_bar.show()
 
@@ -2116,12 +2779,12 @@ class TeamPage(QWidget):
             self._staged_bar.hide()
             return
         for attachment in self._staged:
-            chip = QPushButton(f"📎 {attachment['file_name']}   ✕")
+            chip = QPushButton(f"{attachment['file_name']}")
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             chip.setToolTip("Remove")
             chip.setStyleSheet(
                 f"color:{C.BLUE};background:{C.BLUE_BG};border:1px solid {C.BORDER};"
-                f"border-radius:{R_SM}px;padding:4px 8px;font-size:11px;")
+                f"border-radius:{R_SM}px;padding:4px 8px;font-size:12px;")
             chip.clicked.connect(
                 lambda _c=False, a=attachment: self._unstage(a))
             self._staged_row.addWidget(chip)
@@ -2215,7 +2878,7 @@ class TeamPage(QWidget):
             _IMAGE_FAILED[_id] = str(error) or "Image could not be loaded"
             try:
                 if _label is not None:
-                    _label.setText(f"⚠  {_IMAGE_FAILED[_id]}\nClick to try again")
+                    _label.setText(f"{_IMAGE_FAILED[_id]}\nClick to try again")
             except RuntimeError:
                 pass
 
@@ -2296,11 +2959,31 @@ class TeamPage(QWidget):
         # Nothing is being watched, so stop asking every three seconds.
         self._chat.set_active_channel(None)
         self._member_timer.stop()
-        self._teams_timer.stop()
+        # THE CHANNEL LIST KEEPS REFRESHING WHILE THE PAGE IS HIDDEN.
+        #
+        # It used to stop with everything else, so the unread badge on the
+        # menu froze at whatever it was when the page was last closed — and
+        # somebody could be messaged all afternoon with no sign of it
+        # anywhere. That is the one number that has to stay right while the
+        # page is NOT open; the members and the typing indicator do not.
+        #
+        # Slower, because nobody is reading it: once a minute against the
+        # same query the page already makes.
+        self._teams_timer.setInterval(60_000)
+        self._teams_timer.start()
+        # And say so: leaving the page with the dots still up leaves a
+        # colleague waiting for a message that is not coming.
+        self._typing_timer.stop()
+        if self._channel_id:
+            self._run(ChatManager.stop_typing, lambda _r: None,
+                      lambda _e: None, self._channel_id)
         super().hideEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Back to the open-page cadence: somebody watching the list should
+        # see a channel appear or a count clear without a minute's wait.
+        self._teams_timer.setInterval(30_000)
         self._teams_timer.start()
         self.refresh()
 

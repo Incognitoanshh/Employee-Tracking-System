@@ -5,16 +5,20 @@ sidebar nav item, activity row, section header.
 
 from __future__ import annotations
 
+from itertools import count
+
 import random
 from collections import deque
 
-from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtCore import Qt, QPointF, QSize
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QBrush, QLinearGradient
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget, QSizePolicy
 )
 
-from client.presentation.theme import C, R, R_SM
+from client.presentation.theme import C, R, R_SM, Radius, Type
+from client.presentation.widgets import icons as _icons
+from client.presentation.theme import dot_style
 
 
 class Sparkline(QWidget):
@@ -110,24 +114,35 @@ class StatCard(QFrame):
         head = QHBoxLayout()
         head.setSpacing(13)
 
-        badge = QLabel(icon)
-        badge.setFixedSize(42, 42)
+        # A LUCIDE GLYPH, NOT AN EMOJI.
+        #
+        # `icon` may still be an emoji from a caller not yet migrated; that
+        # falls back to drawing it as text, so nothing breaks while the last
+        # few are moved over. A known icon name is drawn as a stroke glyph
+        # tinted with the card's own accent.
+        badge = QLabel()
+        badge.setFixedSize(40, 40)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
-            f"background:{accent_bg};border-radius:21px;font-size:18px;border:none;"
-        )
+            f"background:{accent_bg};border-radius:{Radius.CONTROL}px;"
+            f"font-size:{Type.SECTION}px;border:none;color:{accent};")
+        if _icons.known(icon):
+            badge.setPixmap(_icons.pixmap(icon, 20, accent))
+        else:
+            badge.setText(icon)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(3)
 
         self._title = QLabel(title)
         self._title.setStyleSheet(
-            f"color:{C.TEXT_MUTED};font-size:12px;font-weight:600;border:none;"
-        )
+            f"color:{C.TEXT_MUTED};font-size:{Type.MICRO}px;"
+            f"font-weight:500;border:none;")
         self._value = QLabel("—")
+        # The number is the point of the card, so it is the display step.
         self._value.setStyleSheet(
-            f"color:{accent};font-size:21px;font-weight:800;border:none;"
-        )
+            f"color:{C.TEXT};font-size:{Type.HEADING}px;"
+            f"font-weight:600;border:none;")
         text_col.addWidget(self._title)
         text_col.addWidget(self._value)
 
@@ -137,7 +152,7 @@ class StatCard(QFrame):
 
         self._sub = QLabel("")
         self._sub.setStyleSheet(
-            f"color:{C.TEXT_DIM};font-size:11px;border:none;padding-top:4px;"
+            f"color:{C.TEXT_DIM};font-size:12px;border:none;padding-top:4px;"
         )
         self._sub.setWordWrap(True)
         root.addWidget(self._sub)
@@ -154,7 +169,7 @@ class StatCard(QFrame):
     def set_value(self, text: str, color: str | None = None) -> None:
         self._value.setText(text)
         self._value.setStyleSheet(
-            f"color:{color or self._accent};font-size:21px;font-weight:800;border:none;"
+            f"color:{color or self._accent};font-size:24px;font-weight:800;border:none;"
         )
 
     def set_subtitle(self, text: str) -> None:
@@ -187,25 +202,31 @@ class MiniStat(QFrame):
 
         top = QHBoxLayout()
         top.setSpacing(9)
-        badge = QLabel(icon)
-        badge.setFixedSize(26, 26)
+        badge = QLabel()
+        badge.setFixedSize(28, 28)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
-            f"background:{accent_bg};border-radius:7px;font-size:13px;border:none;"
-        )
+            f"background:{accent_bg};border-radius:{Radius.CONTROL}px;"
+            f"font-size:{Type.SMALL}px;border:none;color:{accent};")
+        if _icons.known(icon):
+            badge.setPixmap(_icons.pixmap(icon, 16, accent))
+        else:
+            badge.setText(icon)
         name = QLabel(label)
-        name.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:12px;font-weight:600;border:none;")
+        name.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:{Type.MICRO}px;"
+                           f"font-weight:500;border:none;")
         top.addWidget(badge)
         top.addWidget(name)
         top.addStretch()
         root.addLayout(top)
 
         self._value = QLabel("—")
-        self._value.setStyleSheet(f"color:{C.TEXT};font-size:26px;font-weight:800;border:none;")
+        self._value.setStyleSheet(f"color:{C.TEXT};font-size:{Type.HEADING}px;"
+                                  f"font-weight:600;border:none;")
         root.addWidget(self._value)
 
         self._caption = QLabel("")
-        self._caption.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+        self._caption.setStyleSheet(f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;border:none;")
         root.addWidget(self._caption)
 
         root.addSpacing(2)
@@ -226,9 +247,14 @@ class QuickAction(QPushButton):
     """Quick Actions bar ka button."""
 
     def __init__(self, icon: str, label: str, danger: bool = False, parent=None):
-        super().__init__(f"  {icon}   {label}", parent)
+        super().__init__(f"   {label}" if _icons.known(icon)
+                         else f"  {icon}   {label}", parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(52)
+        if _icons.known(icon):
+            self.setIcon(_icons.icon(icon, 18,
+                                     C.RED if danger else C.TEXT_MUTED))
+            self.setIconSize(QSize(18, 18))
         bg, border, fg, hover = (
             (C.RED_BG, C.DANGER_BORDER, C.RED, C.DANGER_BORDER) if danger
             else (C.CARD, C.BORDER, C.TEXT, C.CARD_HOVER)
@@ -274,60 +300,95 @@ class StatusTile(QFrame):
 
         top = QHBoxLayout()
         top.setSpacing(13)
-        badge = QLabel(icon)
-        badge.setFixedSize(44, 44)
+        badge = QLabel()
+        badge.setFixedSize(40, 40)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setStyleSheet(f"background:{accent_bg};border-radius:11px;font-size:19px;border:none;")
+        badge.setStyleSheet(f"background:{accent_bg};border-radius:{Radius.CONTROL}px;"
+                            f"font-size:{Type.SECTION}px;border:none;color:{accent};")
+        if _icons.known(icon):
+            badge.setPixmap(_icons.pixmap(icon, 20, accent))
+        else:
+            badge.setText(icon)
         name = QLabel(title)
-        name.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:13px;font-weight:600;border:none;")
+        name.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:{Type.SMALL}px;"
+                           f"font-weight:500;border:none;")
         top.addWidget(badge)
         top.addWidget(name)
         top.addStretch()
         root.addLayout(top)
 
         self._value = QLabel("—")
-        self._value.setStyleSheet(f"color:{accent};font-size:23px;font-weight:800;border:none;")
+        self._value.setStyleSheet(f"color:{C.TEXT};font-size:{Type.HEADING}px;"
+                                  f"font-weight:600;border:none;")
         root.addWidget(self._value)
 
         self._sub = QLabel("")
-        self._sub.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:12px;border:none;")
+        self._sub.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:{Type.SMALL}px;border:none;")
         root.addWidget(self._sub)
 
         self._detail = QLabel("")
-        self._detail.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+        self._detail.setStyleSheet(f"color:{C.TEXT_DIM};font-size:{Type.MICRO}px;border:none;")
         root.addWidget(self._detail)
         root.addStretch()
 
     def set(self, value, sub="", detail="", color=None):
         self._value.setText(str(value))
         self._value.setStyleSheet(
-            f"color:{color or self._accent};font-size:23px;font-weight:800;border:none;"
+            f"color:{color or self._accent};font-size:24px;font-weight:800;border:none;"
         )
         if sub:
             self._sub.setText(sub)
-        self._detail.setText(f"●  {detail}" if detail else "")
+        # The dot in front of this line was a character; the line is a
+        # detail, not a status, so it simply reads better without one.
+        self._detail.setText(detail or "")
 
 
 class NavButton(QPushButton):
     """Sidebar navigation item."""
 
     def __init__(self, icon: str, label: str, parent=None):
-        super().__init__(f"   {icon}    {label}", parent)
-        self._base_text = f"   {icon}    {label}"
+        self._icon_name = icon
+        # "&&", NOT "&". Qt reads a single ampersand in a button's text as a
+        # keyboard mnemonic and does not draw it — so "Help & Support" was
+        # rendered "Help  Support" and "Teams & Chat" as "Teams  Chat", in
+        # both sidebars, for as long as those entries have existed.
+        label = label.replace("&", "&&")
+        text = f"   {label}" if _icons.known(icon) else f"   {icon}    {label}"
+        super().__init__(text, parent)
+        self._base_text = text
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(46)
+        self.setFixedHeight(44)
+        if _icons.known(icon):
+            self.setIcon(_icons.icon(icon, 18, C.TEXT_MUTED))
+            self.setIconSize(QSize(18, 18))
+            # The pixmap is baked at one colour, so the active row would keep
+            # a muted glyph beside its brighter text without this.
+            self.toggled.connect(self._retint)
+        # A soft field and a blue rule down the left edge, matching the admin
+        # console. It used to fill the whole row with solid accent — a large
+        # block of colour that drew more attention than the page it points at.
         self.setStyleSheet(f"""
             QPushButton {{
-                background:transparent; border:none; border-radius:{R_SM}px;
-                color:{C.TEXT_MUTED}; font-size:14px; font-weight:600;
+                background:transparent; border:none;
+                border-left:2px solid transparent;
+                border-radius:{Radius.CONTROL}px;
+                color:{C.TEXT_MUTED}; font-size:{Type.BODY}px; font-weight:500;
                 text-align:left; padding-left:12px;
             }}
-            QPushButton:hover {{ background:{C.ELEVATED}; color:{C.TEXT}; }}
+            QPushButton:hover {{ background:{C.HOVER}; color:{C.TEXT}; }}
             QPushButton:checked {{
-                background:{C.PRIMARY_DIM}; color:#ffffff;
+                background:{C.ACTIVE}; color:{C.TEXT};
+                border-left:2px solid {C.PRIMARY}; font-weight:600;
             }}
+            /* Something is waiting here. Red, because a count nobody notices
+               is the same as no count. */
+            QPushButton[unread="true"] {{ color:{C.RED}; font-weight:600; }}
         """)
+
+    def _retint(self, checked: bool) -> None:
+        self.setIcon(_icons.icon(self._icon_name, 18,
+                                 C.TEXT if checked else C.TEXT_MUTED))
 
     def set_badge(self, count: int) -> None:
         """Show an unread count beside the label, or clear it at zero.
@@ -339,6 +400,14 @@ class NavButton(QPushButton):
         count = max(0, int(count or 0))
         self.setText(self._base_text if count == 0
                      else f"{self._base_text}   ({count if count < 100 else '99+'})")
+
+        # AND IT TURNS RED. The count was drawn in the same muted grey as the
+        # label, so it read as part of the name rather than as something
+        # waiting — reported after it started working: "3 dikha, but dhyan hi
+        # nahi gaya."
+        self.setProperty("unread", "true" if count else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class ActivityRow(QFrame):
@@ -356,16 +425,18 @@ class ActivityRow(QFrame):
         row.setContentsMargins(14, 11, 14, 11)
         row.setSpacing(14)
 
-        dot = QLabel("●")
-        dot.setFixedWidth(14)
-        dot.setStyleSheet(f"color:{color};font-size:14px;border:none;")
+        # Drawn rather than typed — see the console's dot for why. Boxed to
+        # the old 14px width so every row in this list stays on one grid.
+        dot = QLabel()
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet(dot_style(8, color))
 
         col = QVBoxLayout()
         col.setSpacing(2)
         t = QLabel(title)
         t.setStyleSheet(f"color:{C.TEXT};font-size:13px;font-weight:600;border:none;")
         s = QLabel(subtitle)
-        s.setStyleSheet(f"color:{C.TEXT_DIM};font-size:11px;border:none;")
+        s.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
         col.addWidget(t)
         col.addWidget(s)
 
@@ -385,7 +456,7 @@ class PageHeader(QWidget):
         col.setContentsMargins(0, 0, 0, 14)
         col.setSpacing(3)
         t = QLabel(title)
-        t.setStyleSheet(f"color:{C.TEXT};font-size:22px;font-weight:800;")
+        t.setStyleSheet(f"color:{C.TEXT};font-size:24px;font-weight:800;")
         col.addWidget(t)
         if subtitle:
             s = QLabel(subtitle)
@@ -394,11 +465,77 @@ class PageHeader(QWidget):
 
 
 class Card(QFrame):
-    """Generic content card."""
+    """Generic content card.
+
+    THE STYLE IS SCOPED TO THIS FRAME. It used to be a plain `QFrame{...}`
+    rule, which in Qt also styles every QFrame inside — so a divider within a
+    card was given the card's own border and 14px radius and drew itself as a
+    small glowing box. The same fault was found and fixed in the admin panel
+    long before; this copy kept it.
+    """
+
+    _uid = count(1)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        name = f"etsPanelCard{next(Card._uid)}"
+        self.setObjectName(name)
         self.setStyleSheet(
-            f"QFrame{{background:{C.CARD};border:1px solid {C.BORDER};"
+            f"QFrame#{name}{{background:{C.CARD};border:1px solid {C.BORDER};"
             f"border-radius:{R}px;}}"
         )
+
+
+# The console uses 52px rows; this is the same number, so a table on the
+# employee side and a table on the admin side are the same height per row.
+ROW_HEIGHT = 52
+
+
+def fit_columns(table, stretch: int | None = None, pad: int = 30) -> None:
+    """Size every column to the widest thing actually in it.
+
+    THE SAME MEASUREMENT THE ADMIN PANEL MAKES, and it exists twice because
+    the two panels share no base class. Qt's ResizeToContents asks the item
+    delegate, and the delegate knows nothing about the stylesheet — these
+    tables pad cells by twelve pixels a side, twenty-four the delegate never
+    counts. On the admin side that drew "₹36,666." with the paise cut off.
+
+    `stretch` takes the slack ONLY when there is slack: Qt's Stretch divides
+    the available width without regard to what a column needs, so on a table
+    wider than its window it shrinks the very column it was asked to help.
+    """
+    from PySide6.QtGui import QFontMetrics
+    from PySide6.QtWidgets import QHeaderView
+
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    metrics = QFontMetrics(table.font())
+
+    # ROW HEIGHT, WHILE WE ARE HERE. Every table that calls this also wants
+    # rows a widget can fit inside — a status chip needs 21px and Qt's
+    # default row leaves it nine once the cell padding is taken out. Set on
+    # the header so it applies to rows added later, and on the existing rows
+    # so it applies to the ones already there.
+    table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
+    for _row in range(table.rowCount()):
+        table.setRowHeight(_row, ROW_HEIGHT)
+
+    for column in range(table.columnCount()):
+        widest = 0
+        head = table.horizontalHeaderItem(column)
+        if head is not None:
+            widest = int(metrics.horizontalAdvance(head.text().upper()) * 1.25)
+        for row in range(table.rowCount()):
+            item = table.item(row, column)
+            if item is not None:
+                widest = max(widest, metrics.horizontalAdvance(item.text()))
+            else:
+                widget = table.cellWidget(row, column)
+                if widget is not None:
+                    widest = max(widest, widget.sizeHint().width())
+        table.setColumnWidth(column, max(72, widest + pad))
+
+    if stretch is not None and 0 <= stretch < table.columnCount():
+        total = sum(table.columnWidth(c) for c in range(table.columnCount()))
+        if table.viewport().width() > 0 and total < table.viewport().width():
+            header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)

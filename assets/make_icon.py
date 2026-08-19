@@ -1,171 +1,114 @@
 #!/usr/bin/env python3
-"""Amaze ETS ka app icon generate karta hai.
-
-Ek hi source se teeno format nikalte hain, taaki Windows/Mac/Linux pe icon
-kabhi mismatch na ho:
+"""Amaze Connect ka app icon — wahi mark jo app ke andar hai.
 
     assets/icon.png     1024x1024   (Linux / preview / docs)
-    assets/icon.ico     multi-size  (Windows .exe)
-    assets/icon.icns    multi-size  (macOS .app / DMG)
+    assets/icon.ico     multi-size  (Windows .exe, aur balloon notifications)
+    assets/icon.icns    multi-size  (macOS .app / DMG / Notification Center)
 
 Chalane ka tarika:
     python3 assets/make_icon.py
 
-Design: dark rounded-square, blue gradient, beech me "A" monogram, aur uske
-charon taraf ek adhura ring jo tracking/monitoring ko darshata hai. Ring
-jaan-boojh kar halka rakha hai — 16px pe sirf "A" padhna chahiye, baaki
-detail us size pe shor banti hai.
+WHY THIS FILE NO LONGER DRAWS ANYTHING ITSELF.
+
+It used to build its own icon with PIL — a monogram in a rounded square with a
+ring around it — which meant the application icon and the mark inside the
+application were two different drawings that merely resembled each other. They
+drifted, and nobody noticed until both were on screen at once: the Dock showed
+one logo and the sidebar another.
+
+It now renders client/presentation/widgets/brand.py, the same SVG the sidebar
+draws. One source, so they cannot disagree.
+
+THE MACOS NOTIFICATION ICON COMES FROM HERE. macOS takes the picture beside a
+notification from the posting application's bundle, so icon.icns IS the
+notification logo — there is no separate setting for it.
 """
 import os
 import subprocess
 import sys
 import tempfile
 
-from PIL import Image, ImageDraw, ImageFont
-
 HERE = os.path.dirname(os.path.abspath(__file__))
-S = 1024  # master size
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
 
-BG_TOP    = (23, 32, 56)     # deep navy
-BG_BOT    = (12, 17, 32)
-ACCENT    = (59, 130, 246)   # blue-500  (panel ke accent se match)
-ACCENT_2  = (34, 211, 238)   # cyan-400
-WHITE     = (255, 255, 255)
+MASTER = 1024
 
 
-def rounded_mask(size, radius):
-    m = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(m).rounded_rectangle([0, 0, size - 1, size - 1],
-                                        radius=radius, fill=255)
-    return m
+def render_master(path: str) -> None:
+    """The brand mark at 1024px, straight from its own SVG."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QByteArray, Qt
+    from PySide6.QtGui import QGuiApplication, QPainter, QPixmap
+    from PySide6.QtSvg import QSvgRenderer
+
+    app = QGuiApplication.instance() or QGuiApplication([])
+    from client.presentation.widgets import brand
+
+    # THE TILE IS DRAWN EDGE TO EDGE, and macOS/Windows apply their own
+    # rounding and padding to what they are given. The SVG already carries the
+    # rounded corner, so it is handed over as-is rather than being inset —
+    # insetting it here and letting the platform round it again produced a
+    # visibly smaller, double-rounded tile in the Dock.
+    svg = brand._svg(MASTER).encode("utf-8")
+    renderer = QSvgRenderer(QByteArray(svg))
+    target = QPixmap(MASTER, MASTER)
+    target.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(target)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter)
+    painter.end()
+    target.save(path, "PNG")
+    del app
 
 
-def vertical_gradient(size, top, bottom):
-    g = Image.new("RGB", (1, size))
-    for y in range(size):
-        t = y / max(size - 1, 1)
-        g.putpixel((0, y), tuple(int(top[i] + (bottom[i] - top[i]) * t)
-                                 for i in range(3)))
-    return g.resize((size, size), Image.BILINEAR)
+def write_ico(master_png: str, out: str) -> None:
+    from PIL import Image
+
+    image = Image.open(master_png).convert("RGBA")
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64),
+             (128, 128), (256, 256)]
+    image.save(out, format="ICO", sizes=sizes)
 
 
-def diagonal_gradient(size, c1, c2):
-    g = Image.new("RGB", (size, size))
-    px = g.load()
-    for y in range(size):
-        for x in range(size):
-            t = (x + y) / (2 * (size - 1))
-            px[x, y] = tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
-    return g
-
-
-def load_font(px):
-    """Bold sans dhoondo. Har OS pe alag jagah hoti hai, is liye list."""
-    for path in (
-        "/System/Library/Fonts/Supplemental/Futura.ttc",
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "C:/Windows/Fonts/arialbd.ttf",
-    ):
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, px)
-            except Exception:
-                continue
-    return ImageFont.load_default()
-
-
-def build_master(with_ring: bool = True):
-    icon = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-
-    # 1. Background: rounded square with vertical gradient
-    bg = vertical_gradient(S, BG_TOP, BG_BOT).convert("RGBA")
-    icon.paste(bg, (0, 0), rounded_mask(S, int(S * 0.225)))
-
-    if not with_ring:
-        # 48px se neeche ring aur monogram aapas me ghul jaate hain aur icon
-        # ek dhabba lagta hai. Un sizes pe sirf "A" rakhte hain — dock/taskbar
-        # me yahi legible rehta hai. (Yehi approach macOS/Windows ke apne
-        # icons me hai: chhote size ka artwork alag hota hai, resize nahi.)
-        txt = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-        td = ImageDraw.Draw(txt)
-        font = load_font(int(S * 0.70))
-        box = td.textbbox((0, 0), "A", font=font)
-        td.text(((S - (box[2] - box[0])) / 2 - box[0],
-                 (S - (box[3] - box[1])) / 2 - box[1]),
-                "A", font=font, fill=WHITE + (255,))
-        icon.alpha_composite(txt)
-        return icon
-
-    # 2. Tracking ring — adhura, taaki "monitoring / in progress" lage
-    ring = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    rd = ImageDraw.Draw(ring)
-    pad, w = int(S * 0.105), int(S * 0.045)
-    rd.arc([pad, pad, S - pad, S - pad], start=-72, end=252,
-           fill=ACCENT + (255,), width=w)
-    # gradient ko ring ke andar mask karke bhar do
-    grad = diagonal_gradient(S, ACCENT, ACCENT_2).convert("RGBA")
-    icon.alpha_composite(Image.composite(
-        grad, Image.new("RGBA", (S, S), (0, 0, 0, 0)), ring.split()[3]))
-
-    # 3. Ring ke gap pe ek chhota dot — "live" indicator
-    d = ImageDraw.Draw(icon)
-    import math
-    ang = math.radians(-72)
-    cx = S / 2 + (S / 2 - pad) * math.cos(ang)
-    cy = S / 2 + (S / 2 - pad) * math.sin(ang)
-    r = w * 0.85
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=ACCENT_2 + (255,))
-
-    # 4. "A" monogram — yahi 16px pe padha jaata hai
-    txt = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    td = ImageDraw.Draw(txt)
-    font = load_font(int(S * 0.56))
-    box = td.textbbox((0, 0), "A", font=font)
-    td.text(((S - (box[2] - box[0])) / 2 - box[0],
-             (S - (box[3] - box[1])) / 2 - box[1]),
-            "A", font=font, fill=WHITE + (255,))
-    icon.alpha_composite(txt)
-
-    return icon
-
-
-def main():
-    icon  = build_master(with_ring=True)
-    small = build_master(with_ring=False)
-
-    def at(size):
-        """<=48px pe simplified artwork, uske upar full design."""
-        src = small if size <= 48 else icon
-        return src.resize((size, size), Image.LANCZOS)
-
-    png = os.path.join(HERE, "icon.png")
-    icon.save(png)
-    print(f"✅ {png}")
-
-    # Windows .ico — chhote sizes alag se resize karo, warna 16px dhundhla
-    ico = os.path.join(HERE, "icon.ico")
-    sizes = (16, 24, 32, 48, 64, 128, 256)
-    at(256).save(ico, format="ICO", sizes=[(s, s) for s in sizes],
-                 append_images=[at(s) for s in sizes])
-    print(f"✅ {ico}")
-
-    # macOS .icns — iconutil sirf Mac pe hota hai
-    if sys.platform != "darwin":
-        print("ℹ️  .icns skip (macOS pe hi ban sakta hai)")
+def write_icns(master_png: str, out: str) -> None:
+    """iconutil on macOS; a Pillow fallback everywhere else."""
+    if sys.platform == "darwin":
+        with tempfile.TemporaryDirectory() as work:
+            iconset = os.path.join(work, "icon.iconset")
+            os.makedirs(iconset)
+            from PIL import Image
+            image = Image.open(master_png).convert("RGBA")
+            for size in (16, 32, 128, 256, 512):
+                image.resize((size, size), Image.LANCZOS).save(
+                    os.path.join(iconset, f"icon_{size}x{size}.png"))
+                image.resize((size * 2, size * 2), Image.LANCZOS).save(
+                    os.path.join(iconset, f"icon_{size}x{size}@2x.png"))
+            subprocess.run(["iconutil", "-c", "icns", iconset, "-o", out],
+                           check=True)
         return
-    with tempfile.TemporaryDirectory() as tmp:
-        iconset = os.path.join(tmp, "icon.iconset")
-        os.makedirs(iconset)
-        for size in (16, 32, 128, 256, 512):
-            at(size).save(os.path.join(iconset, f"icon_{size}x{size}.png"))
-            at(size * 2).save(os.path.join(iconset, f"icon_{size}x{size}@2x.png"))
-        icns = os.path.join(HERE, "icon.icns")
-        subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns],
-                       check=True)
-        print(f"✅ {icns}")
+
+    from PIL import Image
+    Image.open(master_png).convert("RGBA").save(out, format="ICNS")
+
+
+def main() -> int:
+    png = os.path.join(HERE, "icon.png")
+    render_master(png)
+    print(f"  wrote {png}")
+
+    ico = os.path.join(HERE, "icon.ico")
+    write_ico(png, ico)
+    print(f"  wrote {ico}")
+
+    icns = os.path.join(HERE, "icon.icns")
+    write_icns(png, icns)
+    print(f"  wrote {icns}")
+
+    print("\nThese three are what the Dock, the installer, the Windows "
+          "balloon and the macOS notification all draw from.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

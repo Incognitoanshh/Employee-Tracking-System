@@ -143,12 +143,12 @@ for path in "$MIGRATIONS_DIR"/*.sql; do
     # STDIN, `-f` NAHI — aur ye zaroori hai.
     #
     # `-f` ke saath file ko PSQL kholta hai, aur psql yahan `postgres` user ke
-    # roop me chal raha hai. Wo /home/etsadmin/... ke andar jhaank hi nahi
+    # roop me chal raha hai. Wo $ETS_HOME/... ke andar jhaank hi nahi
     # sakta, to har migration "Permission denied" deti hai — file par, database
     # par nahi. Poora output aisa lagta hai jaise database ne mana kiya ho,
     # jabki file kholi hi nahi gayi.
     #
-    # `< "$path"` ka redirect wo shell karta hai jo etsadmin ka hai aur file
+    # `< "$path"` ka redirect wo shell karta hai jo $ETS_USER ka hai aur file
     # padh sakta hai; psql sirf stdin padhta hai. Isse file ki permission ka
     # sawaal hi khatam ho jaata hai.
     #

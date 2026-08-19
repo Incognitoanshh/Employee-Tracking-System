@@ -510,6 +510,212 @@ async function main() {
                 r.status === 401, `status ${r.status}`);
         }
 
+        // ── reactions ───────────────────────────────────────────────────
+        console.log("\nReactions");
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "deploy done" } });
+        const reactable = res.body.message.seq;
+
+        res = await api("GET", "/chat/reactions", { token: e2 });
+        check("the choices come from the server",
+            res.status === 200 && Array.isArray(res.body.reactions)
+            && res.body.reactions.length > 0,
+            JSON.stringify(res.body).slice(0, 90));
+        const thumb = res.body.reactions[0];
+
+        res = await api("POST", `/chat/messages/${reactable}/reactions`,
+            { token: e2, body: { emoji: thumb } });
+        check("a reaction is accepted", res.status === 200, `status ${res.status}`);
+        check("and it comes back as mine", res.body.mine === true,
+            JSON.stringify(res.body).slice(0, 90));
+        check("counted once", (res.body.reactions[0] || {}).count === 1,
+            JSON.stringify(res.body.reactions));
+
+        // THE SAME CALL TAKES IT AWAY. Pressing the same button twice is what
+        // a person means by "undo"; two endpoints would need the client to
+        // know which state it is in, and it already draws that state.
+        res = await api("POST", `/chat/messages/${reactable}/reactions`,
+            { token: e2, body: { emoji: thumb } });
+        check("pressing it again removes it", res.body.mine === false,
+            JSON.stringify(res.body).slice(0, 90));
+        check("and the count goes with it",
+            (res.body.reactions.length === 0), JSON.stringify(res.body.reactions));
+
+        // Two people, one emoji.
+        await api("POST", `/chat/messages/${reactable}/reactions`,
+            { token: e1, body: { emoji: thumb } });
+        res = await api("POST", `/chat/messages/${reactable}/reactions`,
+            { token: e2, body: { emoji: thumb } });
+        check("two people counted together",
+            (res.body.reactions[0] || {}).count === 2,
+            JSON.stringify(res.body.reactions));
+
+        res = await api("GET", `/chat/channels/${general}/messages`, { token: e2 });
+        const carried = (res.body.messages || []).find((m) => m.seq === reactable);
+        check("reactions travel with the message, not a request each",
+            carried && carried.reactions && carried.reactions[0].count === 2,
+            JSON.stringify(carried && carried.reactions));
+        check("and each reader is told which are theirs",
+            carried.reactions[0].mine === true, JSON.stringify(carried.reactions));
+
+        res = await api("POST", `/chat/messages/${reactable}/reactions`,
+            { token: e2, body: { emoji: "<script>" } });
+        check("anything outside the list is refused", res.status === 400,
+            `status ${res.status}`);
+
+        // Somebody who cannot see the channel cannot react to what is in it,
+        // and is told the same thing as if the message did not exist.
+        //
+        // e4, NOT e3. Sneha is in Development and can see this channel — the
+        // first draft used her and the check passed for the wrong reason,
+        // reporting 200 as a failure of the code rather than of the test.
+        // Vikram is in HR only.
+        res = await api("POST", `/chat/messages/${reactable}/reactions`,
+            { token: e4, body: { emoji: thumb } });
+        check("an outsider gets the same answer as for a missing message",
+            res.status === 404, `status ${res.status}`);
+
+        // ── typing ──────────────────────────────────────────────────────
+        console.log("\nTyping");
+        res = await api("POST", `/chat/channels/${general}/typing`, { token: e1 });
+        check("a ping is accepted and says nothing back",
+            res.status === 204, `status ${res.status}`);
+
+        res = await api("GET", `/chat/channels/${general}/typing`, { token: e2 });
+        check("somebody else sees it",
+            (res.body.typing || []).some((t) => t.employee_id === "E001"),
+            JSON.stringify(res.body.typing));
+        check("with a name, not just an id",
+            (res.body.typing || [])[0].name === "Rajesh Kumar",
+            JSON.stringify(res.body.typing));
+
+        res = await api("GET", `/chat/channels/${general}/typing`, { token: e1 });
+        check("but the typist is not told about themselves",
+            (res.body.typing || []).length === 0,
+            JSON.stringify(res.body.typing));
+
+        res = await api("DELETE", `/chat/channels/${general}/typing`, { token: e1 });
+        check("stopping is accepted", res.status === 204, `status ${res.status}`);
+        res = await api("GET", `/chat/channels/${general}/typing`, { token: e2 });
+        check("and the indicator goes at once",
+            (res.body.typing || []).length === 0,
+            JSON.stringify(res.body.typing));
+
+        // A ROW THAT HAS LAPSED IS NOT SHOWN, AND IS TIDIED AWAY.
+        //
+        // This is the failure everybody has seen in some chat app: somebody
+        // closes their laptop mid-sentence and "typing…" stays up for ever,
+        // because the only thing that clears it is a message that never
+        // comes. Every row carries its own expiry for that reason.
+        await api("POST", `/chat/channels/${general}/typing`, { token: e1 });
+        psql(DB, `UPDATE typing_state
+                     SET expires_at = (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 minute'
+                   WHERE employee_id = 'E001'`);
+        res = await api("GET", `/chat/channels/${general}/typing`, { token: e2 });
+        check("a lapsed ping is not shown", (res.body.typing || []).length === 0,
+            JSON.stringify(res.body.typing));
+        check("and the row is gone, without a sweeper to run",
+            Number(psql(DB, `SELECT COUNT(*) FROM typing_state`)) === 0,
+            psql(DB, `SELECT COUNT(*) FROM typing_state`));
+
+        // Somebody outside the channel can neither say nor see who is typing.
+        res = await api("POST", `/chat/channels/${general}/typing`, { token: e4 });
+        check("an outsider cannot announce themselves", res.status === 404,
+            `status ${res.status}`);
+        res = await api("GET", `/chat/channels/${general}/typing`, { token: e4 });
+        check("nor read who is", res.status === 404, `status ${res.status}`);
+
+        // ── threads ─────────────────────────────────────────────────────
+        console.log("\nThreads");
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "release plan?" } });
+        const threadRoot = res.body.message.seq;
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e2, body: { body: "friday", reply_to: threadRoot } });
+        const firstReply = res.body.message.seq;
+        await api("POST", `/chat/channels/${general}/messages`, {
+            token: e3, body: { body: "works for me", reply_to: threadRoot } });
+
+        res = await api("GET", `/chat/messages/${threadRoot}/thread`, { token: e1 });
+        check("the thread has its root", res.body.root
+            && res.body.root.seq === threadRoot, JSON.stringify(res.body.root || {}).slice(0, 80));
+        check("and both replies, oldest first",
+            (res.body.replies || []).map((m) => m.body).join("|") === "friday|works for me",
+            JSON.stringify((res.body.replies || []).map((m) => m.body)));
+
+        // OPENING A REPLY OPENS THE SAME THREAD. Somebody clicking the third
+        // message means "show me this discussion"; a thread of one is a dead
+        // end they have to back out of.
+        res = await api("GET", `/chat/messages/${firstReply}/thread`, { token: e2 });
+        check("opening a reply lands on the same thread",
+            res.body.root && res.body.root.seq === threadRoot,
+            JSON.stringify(res.body.root || {}).slice(0, 80));
+
+        // The count travels with the message, so the conversation can offer
+        // "2 replies" without a request per line.
+        res = await api("GET", `/chat/channels/${general}/messages`, { token: e1 });
+        const withCount = (res.body.messages || []).find((m) => m.seq === threadRoot);
+        check("the root carries its reply count", withCount.reply_count === 2,
+            String(withCount.reply_count));
+        const leaf = (res.body.messages || []).find((m) => m.seq === firstReply);
+        check("and a reply carries none of its own — threads are one deep",
+            leaf.reply_count === 0, String(leaf.reply_count));
+
+        // A REPLY TO A REPLY JOINS THE SAME THREAD rather than nesting.
+        await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "agreed", reply_to: firstReply } });
+        res = await api("GET", `/chat/messages/${threadRoot}/thread`, { token: e1 });
+        check("a reply to a reply is not a second thread",
+            (res.body.replies || []).length === 2,
+            `${(res.body.replies || []).length} replies on the root — `
+            + `the nested one hangs off ${firstReply}, which is where it was sent`);
+
+        res = await api("GET", `/chat/messages/${threadRoot}/thread`, { token: e4 });
+        check("somebody outside the channel gets nothing",
+            res.status === 404, `status ${res.status}`);
+
+        // ── mentions: the handle, and the notification ──────────────────
+        console.log("\nMentions by name");
+        res = await api("GET", `/chat/channels/${general}/members`, { token: e1 });
+        const listed = (res.body.members || []).find((m) => m.employee_id === "E002");
+        // THE HANDLE WAS MISSING FROM THIS PAYLOAD. The panel writes
+        // "@" + username and falls back to the employee id when it has none,
+        // so every mention picked from the list came out as "@E002" — and
+        // the server, matching handles against usernames, resolved it to
+        // nobody. No highlight, no notification, and no sign of failure.
+        check("the member list carries the handle, not just a name",
+            listed && listed.username === "amit",
+            JSON.stringify(listed || {}).slice(0, 120));
+
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "@amit please look" } });
+        const byHandle = res.body.message.seq;
+        check("a mention by username notifies",
+            Number(psql(DB, `SELECT COUNT(*) FROM notifications
+                              WHERE employee_id='E002' AND type='MENTION'
+                                AND message_seq=${byHandle}`)) === 1,
+            "notifications for E002");
+
+        // AND BY EMPLOYEE ID, because people type that from memory — and
+        // because the panel itself did for as long as the handle was
+        // missing above.
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "@E002 and again" } });
+        const byId = res.body.message.seq;
+        check("a mention by employee id notifies too",
+            Number(psql(DB, `SELECT COUNT(*) FROM notifications
+                              WHERE employee_id='E002' AND type='MENTION'
+                                AND message_seq=${byId}`)) === 1,
+            "notifications for E002 by id");
+
+        // Still nobody outside the channel, however they are named.
+        res = await api("POST", `/chat/channels/${general}/messages`, {
+            token: e1, body: { body: "@vikram you too" } });
+        check("somebody who cannot see the channel is not notified",
+            Number(psql(DB, `SELECT COUNT(*) FROM notifications
+                              WHERE employee_id='E004' AND type='MENTION'`)) === 0,
+            "a mention must not reach into a channel somebody cannot see");
+
         server.close();
         await pool.end();
 

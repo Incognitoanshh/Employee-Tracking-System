@@ -5,11 +5,18 @@ import re
 import requests
 from client.core import http as _http
 from datetime import date, datetime
-from datetime import datetime, timezone, timedelta
-from PySide6.QtCore    import Qt, QThread, Signal, QDate, QTimer
+from datetime import datetime, timezone
+from PySide6.QtCore    import Qt, QThread, Signal, QDate, QTimer, QSize
 from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
-from PySide6.QtGui     import QFont, QColor, QAction, QIcon
+# THE SAME DOWNLOADER THE PREVIEW WINDOW USES. It already streams, already
+# cancels mid-flight and already knows the endpoint; a second copy here would
+# be a second thing to fix when that endpoint changes.
+from client.presentation.windows.screenshot_preview_window import (
+    _DownloadWorker as _ShotDownloadWorker)
+from client.security.crypto_engine import CryptoEngine
+from PySide6.QtGui     import QFont, QColor, QAction, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QSystemTrayIcon,
     QMenu,
@@ -58,6 +65,7 @@ from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
 from client.presentation.theme import ADMIN as _THEME_ADMIN
 from client.presentation import theme as _theme
+from client.presentation.theme import Radius, Space, Type, Weight
 from client.presentation.widgets.avatar import Avatar, ClickableAvatar
 from client.core.config import API_BASE_URL, APP_VERSION
 
@@ -98,30 +106,69 @@ ACCENTS = {
     "red":    "#ef4444",
 }
 
+# HOW THE MENU IS GROUPED.
+#
+# Fifteen entries under one heading called MAIN MENU is a list, not a menu.
+# Nothing tells you that Attendance, Leave and Payroll are three views of the
+# same subject, or that My Leave is about YOU rather than about everybody —
+# and the two were sitting next to each other, one row apart, with almost the
+# same name.
+#
+# The order is by how often it is opened, not by what it is called: the
+# dashboard first, the people and their time next, the monitoring after that,
+# and the reader's own account last, because it is the one thing they can
+# always find.
+NAV_SECTIONS = [
+    ("OVERVIEW",     ["dashboard", "alerts"]),
+    ("PEOPLE",       ["employees", "teams", "mychat"]),
+    ("TIME & PAY",   ["attendance", "leave", "payroll", "reports"]),
+    ("MONITORING",   ["screenshots", "logs"]),
+    ("YOU",          ["myleave", "mypayroll", "profile"]),
+    ("SYSTEM",       ["config"]),
+]
+
+# The status bar's server name lives in client.core.config, because the
+# employee panel says the same thing and said it wrongly in its own way.
+from client.core.config import server_label as _server_label  # noqa: E402
+
+
+def _section_of(key: str) -> str:
+    """Which menu section a page sits in, for the breadcrumb.
+
+    Reads NAV_SECTIONS rather than repeating it: a page moved between
+    sections must not be able to say one thing in the menu and another in
+    the breadcrumb.
+    """
+    for heading, keys in NAV_SECTIONS:
+        if key in keys:
+            return heading.title()
+    return ""
+
+
 PAGES = [
-    {"key": "dashboard",   "icon": "📊", "title": "Dashboard",
+    {"key": "dashboard","icon": "", "title": "Dashboard",
      "subtitle": "Live overview of your workforce and activity."},
-    {"key": "alerts",      "icon": "🔔", "title": "Alerts",
+    {"key": "alerts","icon": "", "title": "Alerts",
      "subtitle": "What needs attention right now — apps that have stopped reporting, shifts nobody logged in for, and unusual idle time."},
-    {"key": "config",      "icon": "⚙️", "title": "Configuration",
+    {"key": "config","icon": "️", "title": "Configuration",
      "subtitle": "Set screenshot intervals, idle thresholds and upload frequency — globally or per employee."},
-    {"key": "employees",   "icon": "👥", "title": "Employees",
+    {"key": "employees","icon": "", "title": "Employees",
      "subtitle": "Manage accounts, roles and live status."},
-    {"key": "attendance",  "icon": "📅", "title": "Attendance",
+    {"key": "attendance","icon": "", "title": "Attendance",
      "subtitle": "Track login, logout times and shift hours."},
-    {"key": "screenshots", "icon": "📸", "title": "Screenshots",
+    {"key": "screenshots", "icon": "", "title": "Screenshots",
      "subtitle": "Browse captured screenshots by employee and date."},
-    {"key": "teams",       "icon": "💬", "title": "Teams & Chat",
+    {"key": "teams","icon": "", "title": "Teams & Chat",
      "subtitle": "Teams, channels and membership. Conversations are readable only by a super admin, and every read is recorded."},
-    {"key": "mychat",      "icon": "🗨️", "title": "My Chat",
+    {"key": "mychat","icon": "️", "title": "My Chat",
      "subtitle": "The channels you are a member of. This is your own conversation — reading somebody else's is done from Teams & Chat, and is recorded."},
-    {"key": "payroll",     "icon": "💰", "title": "Payroll",
+    {"key": "payroll","icon": "", "title": "Payroll",
      "subtitle": "Salaries, and a month's pay built from attendance and approved leave. A finalised month stops moving — anything after it is an adjustment, on the record."},
-    {"key": "leave",       "icon": "🌴", "title": "Leave",
+    {"key": "leave","icon": "", "title": "Leave",
      "subtitle": "Requests waiting on a decision, and every one already decided. Approving or rejecting is recorded against whoever did it."},
-    {"key": "reports",     "icon": "📈", "title": "Reports",
+    {"key": "reports","icon": "", "title": "Reports",
      "subtitle": "Attendance summary over a date range — present, absent, late and hours."},
-    {"key": "logs",        "icon": "📝", "title": "Audit Logs",
+    {"key": "logs","icon": "", "title": "Audit Logs",
      "subtitle": "Detailed activity history for compliance and review."},
     # An administrator is an account like any other, and asked for it in
     # those words: "admin ka bhi profile hona chahiye". The same page the
@@ -130,11 +177,11 @@ PAGES = [
     # the same pages the employee panel shows, because it is the same person
     # asking the same questions about themselves. Without these an admin could
     # approve everybody's leave and had nowhere to ask for their own.
-    {"key": "myleave",     "icon": "🏖️", "title": "My Leave",
+    {"key": "myleave","icon": "️", "title": "My Leave",
      "subtitle": "Your own time off. An administrator cannot decide their own request — a super admin does."},
-    {"key": "mypayroll",   "icon": "🧾", "title": "My Payroll",
+    {"key": "mypayroll","icon": "", "title": "My Payroll",
      "subtitle": "Your own payslips, once a month has been finalised."},
-    {"key": "profile",     "icon": "👤", "title": "My Profile",
+    {"key": "profile","icon": "", "title": "My Profile",
      "subtitle": "Your account, your devices and your week."},
 ]
 
@@ -248,7 +295,7 @@ def _hex_to_rgb(h: str) -> str:
 def _global_stylesheet() -> str:
     return f"""
     QMainWindow {{ background: {C['bg_app']}; }}
-    QWidget {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; color: {C['text_primary']}; }}
+    QWidget {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: {_theme.Type.BODY}px; color: {C['text_primary']}; }}
     QLabel {{ background: transparent; }}
 
     QWidget#sidebar {{ background: {C['bg_sidebar']}; border-right: 1px solid {C['border']}; }}
@@ -258,43 +305,95 @@ def _global_stylesheet() -> str:
     QLineEdit, QComboBox, QDateEdit, QSpinBox {{
         background: {C['bg_surface_alt']};
         border: 1px solid {C['border']};
-        border-radius: 8px;
-        padding: 7px 10px;
+        border-radius: {_theme.Radius.CONTROL}px;
+        padding: 10px 12px;
         color: {C['text_primary']};
+        font-size: {_theme.Type.BODY}px;
         selection-background-color: {C['accent']};
     }}
+    /* A FOCUS RING, not just a coloured edge. Qt has no box-shadow, so the
+       ring is a second border drawn by thickening this one — enough that
+       the focused field is obvious without the layout shifting, which is
+       why the padding above absorbs the extra pixel. */
     QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QSpinBox:focus {{
-        border: 1px solid {C['accent']};
+        border: 2px solid {C['accent']};
+        padding: 9px 11px;
+        background: {C['bg_surface']};
     }}
     QLineEdit::placeholder {{ color: {C['text_muted']}; }}
-    QComboBox::drop-down {{ border: none; width: 22px; }}
+    /* THE BLACK SPOT, AND WHY IT WAS THERE.
+       Touching a sub-control at all takes it off the platform's own drawing
+       and onto the stylesheet's — but only for what the rule mentions. These
+       two set a width and nothing else, so the ARROW inside kept falling
+       back to the native macOS stepper: a dark rounded block that reads as a
+       black smudge on a dark card. It appeared on every row of the
+       configuration page because every row carries a spin box, and it was
+       reported in exactly those terms.
+       Given an image, each arrow is a Lucide chevron like every other arrow
+       in the product, and the button behind it is transparent so the field's
+       own background shows through. */
+    QComboBox::drop-down {{ border: none; width: 22px; background: transparent; }}
+    QComboBox::down-arrow {{
+        image: url("{_icons.icon_file('chevron-down', 12, C['text_muted'])}");
+        width: 12px; height: 12px;
+    }}
     QComboBox QAbstractItemView {{
         background: {C['bg_surface']};
         border: 1px solid {C['border_light']};
-        border-radius: 8px;
+        border-radius: {_theme.Radius.CONTROL}px;
         color: {C['text_primary']};
         selection-background-color: {C['accent']};
         outline: none;
         padding: 4px;
     }}
-    QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: none; }}
+    QSpinBox::up-button, QSpinBox::down-button,
+    QDateEdit::up-button, QDateEdit::down-button {{
+        width: 18px; border: none; background: transparent;
+        margin-right: 4px;
+    }}
+    QSpinBox::up-button, QDateEdit::up-button {{ subcontrol-position: top right; height: 14px; }}
+    QSpinBox::down-button, QDateEdit::down-button {{ subcontrol-position: bottom right; height: 14px; }}
+    QSpinBox::up-arrow, QDateEdit::up-arrow {{
+        image: url("{_icons.icon_file('chevron-up', 10, C['text_muted'])}");
+        width: 10px; height: 10px;
+    }}
+    QSpinBox::down-arrow, QDateEdit::down-arrow {{
+        image: url("{_icons.icon_file('chevron-down', 10, C['text_muted'])}");
+        width: 10px; height: 10px;
+    }}
+    /* Hover tells the stepper apart from decoration. */
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+    QDateEdit::up-button:hover, QDateEdit::down-button:hover {{
+        background: {C['bg_elevated']}; border-radius: {_theme.Radius.CHIP}px;
+    }}
 
     /* BUG FIX: QCheckBox::indicator ka koi rule tha hi nahi. Native indicator
        is dark theme pe bilkul dikhta hi nahi tha — "Verbose logging" ke aage
        khaali jagah dikhti thi aur pata hi nahi chalta tha ki wo ON hai ya OFF. */
-    QCheckBox {{ background: transparent; spacing: 8px; }}
+    QCheckBox {{ background: transparent; spacing: 10px;
+                 font-size: {_theme.Type.BODY}px; color: {C['text_primary']}; }}
     QCheckBox::indicator {{
-        width: 20px; height: 20px;
-        border: 1px solid {C['border_light']};
-        border-radius: 6px;
+        width: 18px; height: 18px;
+        border: 1.5px solid {C['border_light']};
+        border-radius:12px;
         background: {C['bg_surface_alt']};
     }}
-    QCheckBox::indicator:hover {{ border: 1px solid {C['accent']}; }}
+    QCheckBox::indicator:hover {{ border-color: {C['accent']}; }}
+    /* A TICK, NOT A BLUE SQUARE.
+     *
+     * This rule ended in `image: none`, so a checked box was a filled blue
+     * square with nothing in it — on from off told apart by colour alone.
+     * Somebody scanning four of them in a settings panel cannot say which
+     * are on, and a colourblind reader cannot say at all. The mark is an SVG
+     * data URI so it needs no file on disk and cannot go missing from a
+     * build. */
     QCheckBox::indicator:checked {{
         background: {C['accent']};
-        border: 1px solid {C['accent']};
-        image: none;
+        border: 1.5px solid {C['accent']};
+        image: url("{_icons.icon_file("check", 12, "#ffffff")}");
     }}
+    QCheckBox::indicator:disabled {{ border-color: {C['border']};
+                                     background: {C['bg_surface']}; }}
 
     QCalendarWidget QWidget {{ background: {C['bg_surface']}; color: {C['text_primary']}; }}
     QCalendarWidget QToolButton {{ background: transparent; color: {C['text_primary']}; padding: 4px; }}
@@ -306,17 +405,18 @@ def _global_stylesheet() -> str:
     /* Tables */
     QTableWidget {{
         background: {C['bg_surface']};
-        alternate-background-color: {C['bg_surface_alt']};
         gridline-color: transparent;
         border: 1px solid {C['border']};
-        border-radius: 12px;
+        border-radius: {_theme.Radius.CARD}px;
         color: {C['text_primary']};
+        font-size: {_theme.Type.BODY}px;
         selection-background-color: {C['accent_soft']};
         selection-color: {C['text_primary']};
+        outline: none;
     }}
-    /* Row separator halka rakha hai — border wali line har row pe bahut
-       loud lagti thi. Zebra striping (alternate-background) hi structure
-       de deti hai, uske upar full-contrast line shor banti hai. */
+    /* NO ZEBRA STRIPING. Alternating fills draw a pattern across the table
+       that competes with the data in it; a very quiet hover tells you which
+       row you are on, which is the only thing the stripes were doing. */
     QTableWidget::item {{
         /* 4px, not 10px, top and bottom.
          *
@@ -325,106 +425,170 @@ def _global_stylesheet() -> str:
          * a 42px row left 21px for the widget — and every button in every
          * table was drawn 32px tall into a 21px hole and clipped. It looked
          * like a rendering fault rather than a measurement, which is why it
-         * survived two attempts to fix it by changing the button.
-         *
-         * Rows keep their height; text is centred in them either way. */
+         * survived two attempts to fix it by changing the button. */
         padding: 4px 12px;
         border: none;
-        border-bottom: 1px solid {C['bg_surface_alt']};
+        border-bottom: 1px solid {C['border']};
     }}
     QTableWidget::item:selected {{
         background: {C['accent_soft']};
         color: {C['text_primary']};
     }}
-    QTableWidget::item:hover {{ background: {C['bg_elevated']}; }}
+    QTableWidget::item:hover {{ background: {C['hover']}; }}
+    /* THE TICK BOX INSIDE A TABLE IS NOT A QCheckBox.
+     *
+     * The Screenshots list checks rows with an ITEM check state, and that
+     * indicator is `QTableWidget::indicator` — a different sub-control from
+     * the QCheckBox one styled below, and it had no rule at all. So macOS
+     * drew its own: on the light theme, a row of large glossy red circles
+     * down the left of the table, which is how it was found. Same shape,
+     * same accent and same tick as every other box in the product. */
+    QTableWidget::indicator {{
+        width: 16px; height: 16px;
+        border: 1.5px solid {C['border_light']};
+        border-radius: {_theme.Radius.CHIP}px;
+        background: {C['bg_surface_alt']};
+    }}
+    QTableWidget::indicator:hover {{ border-color: {C['accent']}; }}
+    QTableWidget::indicator:checked {{
+        background: {C['accent']}; border: 1.5px solid {C['accent']};
+        image: url("{_icons.icon_file("check", 11, "#ffffff")}");
+    }}
     QHeaderView::section {{
-        background: {C['bg_app']};
+        background: {C['bg_surface']};
         color: {C['text_muted']};
-        padding: 12px 12px;
+        padding: 14px 12px;
         border: none;
-        border-bottom: 1px solid {C['border_light']};
-        font-weight: 700;
-        font-size: 11px;
+        border-bottom: 1px solid {C['border']};
+        font-weight: 600;
+        font-size: {_theme.Type.MICRO}px;
         text-transform: uppercase;
         letter-spacing: 0.6px;
     }}
     QTableCornerButton::section {{ background: {C['bg_surface_alt']}; border: none; }}
 
-    /* Scrollbars */
-    QScrollBar:vertical {{ background: transparent; width: 8px; margin: 4px 2px; }}
-    QScrollBar::handle:vertical {{ background: {C['border_light']}; border-radius: 4px; min-height: 24px; }}
+    /* Scrollbars — thin, and only as visible as they need to be. */
+    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+    QScrollBar::handle:vertical {{ background: {C['border_light']};
+                                   border-radius:12px; min-height: 32px; }}
     QScrollBar::handle:vertical:hover {{ background: {C['text_muted']}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-    QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 2px 4px; }}
-    QScrollBar::handle:horizontal {{ background: {C['border_light']}; border-radius: 4px; min-width: 24px; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+    QScrollBar::handle:horizontal {{ background: {C['border_light']};
+                                     border-radius:12px; min-width: 32px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {C['text_muted']}; }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
-    /* Buttons */
+    /* Buttons — two styles and a soft danger, per the brief. */
     QPushButton {{
-        background: {C['bg_surface_alt']};
+        background: {C['bg_surface']};
         border: 1px solid {C['border']};
-        border-radius: 8px;
-        padding: 7px 14px;
+        border-radius: {_theme.Radius.CONTROL}px;
+        padding: 9px 16px;
         color: {C['text_primary']};
-        font-weight: 600;
+        font-weight: 500;
+        font-size: {_theme.Type.BODY}px;
     }}
-    QPushButton:hover {{ background: {C['bg_elevated']}; }}
-    QPushButton:disabled {{ color: {C['text_muted']}; background: {C['bg_surface']}; border-color: {C['border']}; }}
+    QPushButton:hover {{ background: {C['hover']}; border-color: {C['border_light']}; }}
+    QPushButton:disabled {{ color: {C['text_muted']}; background: {C['bg_surface_alt']};
+                            border-color: {C['border']}; }}
 
-    QPushButton[variant="primary"] {{ background: {C['accent']}; border: 1px solid {C['accent']}; color: white; }}
-    QPushButton[variant="primary"]:hover {{ background: {C['accent_hover']}; }}
+    QPushButton[variant="primary"] {{ background: {C['accent']}; border: 1px solid {C['accent']};
+                                      color: #ffffff; font-weight: 600; }}
+    QPushButton[variant="primary"]:hover {{ background: {C['accent_hover']};
+                                            border-color: {C['accent_hover']}; }}
     QPushButton[variant="primary"]:pressed {{ background: {C['accent_pressed']}; }}
-    QPushButton[variant="primary"]:disabled {{ background: {C['border_light']}; color: {C['text_muted']}; border-color: {C['border_light']}; }}
+    QPushButton[variant="primary"]:disabled {{ background: {C['bg_elevated']};
+                                               color: {C['text_muted']};
+                                               border-color: {C['border']}; }}
 
-    QPushButton[variant="secondary"] {{ background: {C['bg_surface_alt']}; border: 1px solid {C['border_light']}; color: {C['text_primary']}; }}
-    QPushButton[variant="secondary"]:hover {{ background: {C['bg_elevated']}; }}
+    QPushButton[variant="secondary"] {{ background: {C['bg_surface']};
+                                        border: 1px solid {C['border']};
+                                        color: {C['text_primary']}; }}
+    QPushButton[variant="secondary"]:hover {{ background: {C['hover']};
+                                              border-color: {C['border_light']}; }}
 
-    QPushButton[variant="ghost"] {{ background: transparent; border: 1px solid transparent; color: {C['text_secondary']}; }}
-    QPushButton[variant="ghost"]:hover {{ background: {C['bg_elevated']}; color: {C['text_primary']}; }}
+    QPushButton[variant="ghost"] {{ background: transparent; border: 1px solid transparent;
+                                    color: {C['text_secondary']}; }}
+    QPushButton[variant="ghost"]:hover {{ background: {C['hover']};
+                                          color: {C['text_primary']}; }}
 
-    QPushButton[variant="warning"] {{ background: {C['warning_soft']}; border: 1px solid rgba(245,158,11,0.4); color: {C['warning']}; }}
-    QPushButton[variant="warning"]:hover {{ background: rgba(245,158,11,0.24); }}
+    QPushButton[variant="warning"] {{ background: {C['warning_soft']};
+                                      border: 1px solid rgba(245,158,11,0.32);
+                                      color: {C['warning']}; }}
+    QPushButton[variant="warning"]:hover {{ background: rgba(245,158,11,0.20); }}
 
-    QPushButton[variant="danger"] {{ background: {C['danger_soft']}; border: 1px solid rgba(239,68,68,0.4); color: {C['danger']}; }}
-    QPushButton[variant="danger"]:hover {{ background: rgba(239,68,68,0.24); }}
+    /* SOFT, NOT BRIGHT. A saturated red button reads as an error message
+       rather than as a control, and this one sits in the sidebar all day. */
+    QPushButton[variant="danger"] {{ background: {C['danger_soft']};
+                                     border: 1px solid rgba(239,68,68,0.32);
+                                     color: {C['danger']}; font-weight: 600; }}
+    QPushButton[variant="danger"]:hover {{ background: rgba(239,68,68,0.20); }}
 
-    QPushButton[variant="danger-solid"] {{ background: {C['danger_strong']}; border: 1px solid {C['danger_strong']}; color: white; }}
-    QPushButton[variant="danger-solid"]:hover {{ background: #b91c1c; }}
+    QPushButton[variant="danger-solid"] {{ background: {C['danger_strong']};
+                                           border: 1px solid {C['danger_strong']};
+                                           color: white; }}
+    /* From the palette. A literal here belongs to whichever theme it was
+       sampled from, and shows up unchanged in the other one. */
+    QPushButton[variant="danger-solid"]:hover {{ background: {C['danger_strong']};
+                                                 border-color: {C['danger_strong']}; }}
 
     QPushButton[variant="navitem"] {{
         background: transparent;
         border: none;
-        border-left: 3px solid transparent;
+        border-left: 2px solid transparent;
+        border-radius: {_theme.Radius.CONTROL}px;
         text-align: left;
-        padding: 11px 18px 11px 19px;
+        padding: 0px 12px 0px 12px;
         color: {C['text_secondary']};
-        font-weight: 600;
-        font-size: 13px;
-        border-radius: 0px;
+        font-weight: 500;
+        font-size: {_theme.Type.BODY}px;
     }}
-    QPushButton[variant="navitem"]:hover {{ background: {C['bg_elevated']}; color: {C['text_primary']}; }}
-    QPushButton[variant="navitem"]:checked {{ background: {C['selected_bg']}; border-left: 3px solid {C['accent']}; color: {C['selected_text']}; }}
+    /* A WASH, NOT A BLOCK. The hover used a solid elevated colour, which on
+       a 48px row is a large filled rectangle appearing under the pointer —
+       the brief calls it out, and it is the difference between an app that
+       feels responsive and one that feels like it is flashing at you. */
+    QPushButton[variant="navitem"]:hover {{
+        background: {C['hover']};
+        color: {C['text_primary']};
+    }}
+    /* Active: a soft blue field and a blue rule down the left edge. The old
+       one filled the whole row with solid accent and white text, which drew
+       more attention than the page it pointed at. */
+    /* Something is waiting on this page. Red, because the whole point of
+       the count is that it is noticed without being looked for. */
+    QPushButton[variant="navitem"][unread="true"] {{
+        color: {C['danger']};
+        font-weight: 600;
+    }}
+    QPushButton[variant="navitem"]:checked {{
+        background: {C['accent_soft']};
+        border-left: 2px solid {C['accent']};
+        color: {C['text_primary']};
+        font-weight: 600;
+    }}
 
     /* Dialogs / message boxes */
     QDialog {{ background: {C['bg_app']}; }}
     QMessageBox {{ background: {C['bg_surface']}; }}
     QMessageBox QLabel {{ color: {C['text_primary']}; }}
     QMessageBox QPushButton {{
-        min-width: 84px; padding: 7px 14px; border-radius: 8px;
+        min-width: 84px; padding: 7px 14px; border-radius: {_theme.Radius.CONTROL}px;
         background: {C['bg_surface_alt']}; border: 1px solid {C['border_light']}; color: {C['text_primary']};
     }}
     QMessageBox QPushButton:hover {{ background: {C['bg_elevated']}; }}
 
     QToolTip {{
         background: {C['bg_elevated']}; color: {C['text_primary']};
-        border: 1px solid {C['border_light']}; padding: 4px 8px; border-radius: 6px;
+        border: 1px solid {C['border_light']}; padding: 4px 8px; border-radius: {_theme.Radius.CHIP}px;
     }}
 
     QListWidget {{
-        background: {C['bg_surface_alt']}; border: 1px solid {C['border']}; border-radius: 12px;
+        background: {C['bg_surface_alt']}; border: 1px solid {C['border']}; border-radius: {_theme.Radius.CARD}px;
         padding: 6px; outline: none;
     }}
-    QListWidget::item {{ padding: 10px 12px; margin: 2px 0px; border-radius: 8px; color: {C['text_secondary']}; }}
+    QListWidget::item {{ padding: 10px 12px; margin: 2px 0px; border-radius: {_theme.Radius.CONTROL}px; color: {C['text_secondary']}; }}
     QListWidget::item:hover {{ background: {C['bg_elevated']}; color: {C['text_primary']}; }}
     """
 
@@ -463,7 +627,71 @@ def _track_worker(workers_list: list, w) -> None:
 # The shortest a button can be before the global stylesheet's own padding
 # starts cutting it off. Measured, not guessed: with `padding: 7px 14px` and
 # a 13px label, minimumSizeHint().height() comes out at 31.
-_MIN_BUTTON_HEIGHT = 32
+# 36, not 32. The floor was measured against 13px text with 7px padding; the
+# design brief moved those to 14px and 9px, and the same buttons started
+# being clipped again — by four pixels, which reads as a rendering fault
+# rather than as a size. Measured from minimumSizeHint, not guessed.
+# 40 — the floor the design brief sets for a control, and above what any
+# label in this panel needs at 14px with 9px of padding. minimumSizeHint is
+# still consulted below, because it is measured and this is a policy.
+_MIN_BUTTON_HEIGHT = 40
+
+
+def _fit_columns(table: "QTableWidget", stretch: int | None = None,
+                 pad: int = 30) -> None:
+    """Size every column to the widest thing actually in it.
+
+    WHY NOT ResizeToContents ALONE. Qt asks the item delegate for a size
+    hint, and the delegate does not know about the stylesheet — this panel
+    styles cells with `padding: 4px 12px`, twenty-four pixels the delegate
+    never accounts for. So ResizeToContents produced columns eighteen pixels
+    too narrow across the board: Payroll drew "₹36,666." with the paise cut
+    off, and Reports drew its whole Employee column as "…".
+
+    A truncated number on a payroll page is not a cosmetic fault. It is a
+    figure somebody can read and act on.
+
+    `stretch` names a column that takes any slack left over, so a table
+    narrower than its window does not end in dead space.
+    """
+    from PySide6.QtGui import QFontMetrics
+
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    metrics = QFontMetrics(table.font())
+
+    for column in range(table.columnCount()):
+        widest = 0
+        head = table.horizontalHeaderItem(column)
+        if head is not None:
+            # Headers are uppercased and letter-spaced by the stylesheet, so
+            # they measure wider than the string suggests.
+            widest = int(metrics.horizontalAdvance(head.text().upper()) * 1.25)
+        for row in range(table.rowCount()):
+            item = table.item(row, column)
+            if item is not None:
+                widest = max(widest, metrics.horizontalAdvance(item.text()))
+            else:
+                widget = table.cellWidget(row, column)
+                if widget is not None:
+                    widest = max(widest, widget.sizeHint().width())
+        table.setColumnWidth(column, max(72, widest + pad))
+
+    # STRETCH ONLY IF THERE IS SLACK TO TAKE.
+    #
+    # Qt's Stretch mode divides the AVAILABLE width, and it does not respect
+    # what the column needs — so on the Reports table, whose twelve columns
+    # already overflow the window, stretching the Employee column squeezed it
+    # to 100px and drew every name as "…". The column it was meant to help
+    # was the one it destroyed.
+    #
+    # When the content is wider than the viewport the right answer is to let
+    # the table scroll sideways, which it now does.
+    if stretch is not None and 0 <= stretch < table.columnCount():
+        total = sum(table.columnWidth(c) for c in range(table.columnCount()))
+        viewport = table.viewport().width()
+        if viewport > 0 and total < viewport:
+            header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
 
 
 def _btn(text: str, variant: str = "secondary", height: int = 36, width: int | None = None) -> QPushButton:
@@ -476,7 +704,14 @@ def _btn(text: str, variant: str = "secondary", height: int = 36, width: int | N
     # them was clipped, across the Employees, Screenshots, Attendance and
     # Teams tabs. It looked like a rendering glitch rather than a size anyone
     # had chosen, which is why it survived so long.
-    b.setFixedHeight(max(height, _MIN_BUTTON_HEIGHT))
+    # THE BUTTON'S OWN MEASUREMENT, not a constant.
+    #
+    # A fixed floor is only right until the type scale moves. It was 32,
+    # measured against 13px text; the brief moved text to 14px and padding to
+    # 9px, and buttons began clipping again — by one pixel on "Manage ▾",
+    # which is invisible in a diff and looks like a rendering fault on screen.
+    # minimumSizeHint knows what this label needs in this font, today.
+    b.setFixedHeight(max(height, _MIN_BUTTON_HEIGHT, b.minimumSizeHint().height()))
     if width:
         b.setFixedWidth(width)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -528,12 +763,15 @@ def _tune_table(table: "QTableWidget"):
     # the check state changing, so the Screenshots tab's selection is
     # unaffected.
     table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-    table.setAlternatingRowColors(True)
+    table.setAlternatingRowColors(False)  # zebra striping competes with the data
     table.setShowGrid(False)
     table.verticalHeader().setVisible(False)
     # 44, and it has to stay at least ITEM_PADDING*2 + border above the
     # tallest thing a cell can hold — see _MIN_BUTTON_HEIGHT.
-    table.verticalHeader().setDefaultSectionSize(44)
+    # 52: a 40px control, the 4px of item padding above and below it, and the
+    # few pixels Qt takes for the row itself. At 44 the row offered 35px to a
+    # 36px button and clipped every one of them, across four tabs.
+    table.verticalHeader().setDefaultSectionSize(52)
     table.setFocusPolicy(Qt.FocusPolicy.NoFocus)       # dotted focus box hata do
     table.setWordWrap(False)
     table.horizontalHeader().setHighlightSections(False)
@@ -543,6 +781,27 @@ def _tune_table(table: "QTableWidget"):
     # dikhta hai.
     table.horizontalHeader().setDefaultAlignment(
         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    # COLUMNS SIZE TO WHAT IS IN THEM, and the table scrolls sideways rather
+    # than cutting anything off.
+    #
+    # THE FAULT THIS FIXES. Widths were chosen by hand, per table, against a
+    # 13px font. The design brief moved text to 14px and every one of them
+    # became too narrow at once: Payroll drew "₹36,666." with the paise cut
+    # off, Reports drew the whole Employee column as "…", and the headers
+    # read "WORKIN(", "TOTAL HOUI", "SCREENSH(". On a payroll page a
+    # truncated number is not a cosmetic problem — it is a figure somebody
+    # might read and act on.
+    #
+    # ResizeToContents asks the cell what it needs. Tables that want one
+    # column to take the slack set Stretch on it afterwards; this is only the
+    # floor, and a floor that cannot cut a number in half.
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    header.setMinimumSectionSize(72)
+    table.setHorizontalScrollMode(
+        QAbstractItemView.ScrollMode.ScrollPerPixel)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     return table
 
 
@@ -562,8 +821,35 @@ def _cell(text: str, *, mono: bool = False, muted: bool = False,
     else:
         item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     if tooltip:
-        item.setToolTip(tooltip)
+        item.setToolTip(_theme.tip(tooltip))
     return item
+
+
+# The shared chip, so this panel and the leave and payroll pages cannot end
+# up with three different ideas of what a status looks like.
+from client.presentation.widgets.card import card as _card_frame  # noqa: E402
+from client.presentation.widgets import icons as _icons  # noqa: E402
+from client.presentation.widgets.brand import BrandLockup as _BrandLockup  # noqa: E402
+from client.presentation.widgets.badge import (  # noqa: E402
+    badge_cell, badge_label, badge_cell as _badge_cell)
+
+
+def _centred(widget):
+    """A cell widget, centred in its cell.
+
+    setCellWidget fills the whole cell, so a 34px button in a 78px row is
+    drawn stretched from top to bottom unless something holds it in the
+    middle. Every table in this panel that puts a control in a cell wants
+    this, so it lives here rather than in each of them.
+    """
+    holder = QWidget()
+    holder.setStyleSheet("background:transparent;")
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(0)
+    row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    row.addWidget(widget)
+    return holder
 
 
 def _short_filename(name: str) -> str:
@@ -582,27 +868,15 @@ def _short_filename(name: str) -> str:
 
 
 def _card(padding: int = 0) -> QFrame:
-    """Ek surface card.
+    """A surface card.
 
-    BUG FIX: pehle stylesheet plain `QFrame { ... }` tha. Qt me aisa selector
-    sirf is widget pe nahi, iske ANDAR ke har QFrame child pe bhi apply hota
-    hai. Card ke andar rakhi har `_divider()` (jo khud QFrame hai) ko card ka
-    `border: 1px solid` + `border-radius: 14px` mil jaata tha — 1px ki patli
-    line chaaron taraf border wala chamakta box ban jaati thi. Screenshot me
-    yehi "white white lines" dikh rahi thi.
-
-    Ab har card ka apna objectName hai aur selector `QFrame#cardN` — is se
-    style sirf usi card pe lagta hai, children bilkul untouched rehte hain.
+    The objectName scoping this used to do by hand now lives in
+    widgets/card.py, because two other places built cards WITHOUT it and
+    inherited the bug this docstring used to describe on its own: a plain
+    QFrame selector styles every QFrame inside the card too, so each divider
+    became a bordered, rounded box.
     """
-    _CARD_UID[0] += 1
-    name = f"etsCard{_CARD_UID[0]}"
-    f = QFrame()
-    f.setObjectName(name)
-    f.setStyleSheet(
-        f"QFrame#{name} {{ background: {C['bg_surface']};"
-        f" border: 1px solid {C['border']}; border-radius: 14px; }}"
-    )
-    return f
+    return _card_frame(bg=C["bg_surface"], border=C["border"])
 
 
 def _fmt_minutes(total) -> str:
@@ -661,8 +935,8 @@ class _BarChartWidget(QFrame):
         self.update()
 
     def paintEvent(self, event):
-        from PySide6.QtGui import QPainter, QColor, QFont, QPen
-        from PySide6.QtCore import Qt, QRect
+        from PySide6.QtGui import QPainter, QColor, QFont
+        from PySide6.QtCore import QSize, Qt, QRect
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -735,7 +1009,7 @@ class StatCard(QFrame):
     ho rahi hai jabki kuch nahi ho raha.
     """
 
-    def __init__(self, label: str, accent: str, icon: str = "●", value="—",
+    def __init__(self, label: str, accent: str, icon: str = "activity", value="—",
                  sparkline: bool = True):
         super().__init__()
         self._accent = accent
@@ -754,7 +1028,7 @@ class StatCard(QFrame):
         self.setObjectName(name)
         self.setStyleSheet(
             f"QFrame#{name} {{ background: {C['bg_surface']};"
-            f" border: 1px solid {C['border']}; border-radius: 14px; }}"
+            f" border: 1px solid {C['border']}; border-radius:16px; }}"
         )
         # BUG: minimumHeight 100 tha, lekin card ke andar badge (36) + value
         # (24px font) + label + subtitle + spacing + margins milkar 157px
@@ -771,27 +1045,37 @@ class StatCard(QFrame):
         lay.setSpacing(8)
         lay.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
-        badge = QLabel(icon)
+        # Lucide when the caller names one, the raw glyph otherwise, so a
+        # card that has not been migrated still draws something.
+        badge = QLabel()
+        if _icons.known(icon):
+            badge.setPixmap(_icons.pixmap(icon, 18, accent))
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            badge.setText(icon)
         badge.setFixedSize(36, 36)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
-            f"background: rgba({_hex_to_rgb(accent)}, 0.16); border-radius: 10px; font-size: 16px;"
+            f"background: rgba({_hex_to_rgb(accent)}, 0.16); "
+            f"border-radius: {_theme.Radius.CONTROL}px; font-size: {_theme.Type.SECTION}px;"
         )
         lay.addWidget(badge)
 
         self._value_label = QLabel(str(value))
         self._value_label.setStyleSheet(
-            f"color:{C['text_primary']}; font-size:24px; font-weight:700; background:transparent;"
+            f"color:{C['text_primary']}; font-size:{_theme.Type.HEADING}px; "
+            f"font-weight:600; background:transparent;"
         )
         lay.addWidget(self._value_label)
 
         cap = QLabel(label)
-        cap.setStyleSheet(f"color:{C['text_secondary']}; font-size:12px; font-weight:600; background:transparent;")
+        cap.setStyleSheet(f"color:{C['text_secondary']}; font-size:{_theme.Type.MICRO}px; "
+                          f"font-weight:500; background:transparent;")
         lay.addWidget(cap)
 
         self._sub_label = QLabel("")
         self._sub_label.setStyleSheet(
-            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
         )
         lay.addWidget(self._sub_label)
 
@@ -868,7 +1152,19 @@ class _FetchWorker(QThread):
                 self._url,
                 params=self._params,
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=10,
+                # (connect, read) — NOT one number for both.
+                #
+                # A single `timeout=10` gives a dead or firewalled server ten
+                # seconds of silence before it gives up, and this worker runs
+                # a BLOCKING request: Qt's quit() cannot interrupt it, so for
+                # those ten seconds the thread cannot be stopped. Quit the app
+                # in that window and Qt destroys a running QThread, which
+                # aborts the process — "Python quit unexpectedly", with no
+                # traceback and nothing to go on.
+                #
+                # Three seconds is plenty to LEARN a server is unreachable,
+                # while ten still allows a slow report to finish answering.
+                timeout=(3, 10),
             )
 
             # BUG this fixes: the status code was never looked at. A 401, a
@@ -920,7 +1216,19 @@ class _PostWorker(QThread):
                 self._url,
                 json=self._body,
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=10,
+                # (connect, read) — NOT one number for both.
+                #
+                # A single `timeout=10` gives a dead or firewalled server ten
+                # seconds of silence before it gives up, and this worker runs
+                # a BLOCKING request: Qt's quit() cannot interrupt it, so for
+                # those ten seconds the thread cannot be stopped. Quit the app
+                # in that window and Qt destroys a running QThread, which
+                # aborts the process — "Python quit unexpectedly", with no
+                # traceback and nothing to go on.
+                #
+                # Three seconds is plenty to LEARN a server is unreachable,
+                # while ten still allows a slow report to finish answering.
+                timeout=(3, 10),
             )
             self.result.emit(r.json())
         except Exception as e:
@@ -1036,6 +1344,15 @@ class _DeleteWorker(QThread):
             self.error.emit(str(e))
 
 class _ConfigTab(QWidget):
+    """Settings, global and per employee.
+
+    NO AUTO-REFRESH HERE, DELIBERATELY. Every other page polls; this one is a
+    form. A refresh that lands while somebody is halfway through changing the
+    idle threshold would replace what they had typed with what the server
+    still holds, and they would not necessarily notice. The page reloads when
+    it is opened and when Refresh is pressed, which is when the reader is
+    asking for it.
+    """
 
     def __init__(self):
         super().__init__()
@@ -1071,7 +1388,7 @@ class _ConfigTab(QWidget):
         hint.setWordWrap(True)
         hint.setMinimumWidth(240)
         hint.setStyleSheet(
-            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
         )
         text_col.addWidget(name)
         text_col.addWidget(hint)
@@ -1102,7 +1419,7 @@ class _ConfigTab(QWidget):
             unit = QLabel(suffix)
             unit.setFixedWidth(58)
             unit.setStyleSheet(
-                f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+                f"color:{C['text_muted']}; font-size:12px; background:transparent;"
             )
             f_lay.addWidget(unit, 0, Qt.AlignmentFlag.AlignVCenter)
         else:
@@ -1118,27 +1435,45 @@ class _ConfigTab(QWidget):
         lay.setSpacing(4)
 
         head = QHBoxLayout()
-        head.setSpacing(10)
-        badge = QLabel(icon)
-        badge.setFixedSize(30, 30)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setStyleSheet(
-            f"background:{C['accent_soft']}; border-radius:9px; font-size:14px;"
-        )
+        head.setSpacing(Space.SM)
+        # AN EMPTY BADGE IS WORSE THAN NO BADGE.
+        #
+        # This drew whatever string it was handed. When the emoji were
+        # removed the callers were left passing "", so every section on the
+        # Configuration page kept its tinted 30px square with nothing inside
+        # — a row of black holes, reported as exactly that. It now takes an
+        # icon NAME, and a caller that supplies nothing gets no badge at all
+        # rather than an empty one.
+        badge = None
+        if _icons.known(icon):
+            badge = QLabel()
+            badge.setFixedSize(32, 32)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setPixmap(_icons.pixmap(icon, 17, C["accent"]))
+            badge.setStyleSheet(
+                f"background:{C['accent_soft']};"
+                f"border-radius:{_theme.Radius.CONTROL}px;")
         titles = QVBoxLayout()
         titles.setSpacing(0)
         heading = QLabel(title)
         heading.setStyleSheet(
-            f"color:{C['text_primary']}; font-size:14px; font-weight:700;"
+            f"color:{C['text_primary']}; font-size:{_theme.Type.SECTION}px; font-weight:600;"
             f"background:transparent;"
         )
         sub = QLabel(subtitle)
+        # WRAPS. Without this a section's description is one unbreakable line,
+        # and the longest of them asked for 1195px — wider than the page. The
+        # whole Configuration tab then grew a horizontal scrollbar and pushed
+        # every value box off the right-hand edge, so the settings could be
+        # read but not seen.
+        sub.setWordWrap(True)
         sub.setStyleSheet(
-            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
-        )
+            f"color:{C['text_muted']}; font-size:{_theme.Type.SMALL}px;"
+            f"background:transparent;")
         titles.addWidget(heading)
         titles.addWidget(sub)
-        head.addWidget(badge)
+        if badge is not None:
+            head.addWidget(badge)
         head.addLayout(titles)
         head.addStretch()
         lay.addLayout(head)
@@ -1169,7 +1504,7 @@ class _ConfigTab(QWidget):
         self._alert_email_state = QLabel("")
         self._alert_email_state.setWordWrap(True)
         self._alert_email_state.setStyleSheet(
-            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+            f"color:{C['text_muted']};font-size:12px;background:transparent;")
         self._alert_silent = QSpinBox(); self._alert_silent.setRange(1, 720)
         self._alert_late   = QSpinBox(); self._alert_late.setRange(0, 1440)
         self._alert_idle   = QSpinBox(); self._alert_idle.setRange(15, 1440)
@@ -1180,7 +1515,7 @@ class _ConfigTab(QWidget):
         self._alert_status = QLabel("Loading…")
         self._alert_status.setWordWrap(True)
         self._alert_status.setStyleSheet(
-            f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;")
 
         save = _btn("\U0001F4BE  Save alert settings", variant="primary", height=36)
         save.clicked.connect(self._save_alert_settings)
@@ -1193,7 +1528,7 @@ class _ConfigTab(QWidget):
         row_lay.addWidget(save)
 
         return self._build_section(
-            "\U0001F514", "Alerts  ·  applies to everyone",
+            "bell", "Alerts  ·  applies to everyone",
             "The Alerts page shows what needs attention now. These numbers "
             "decide when something is worth saying. Nobody is ever alerted on "
             "a weekly off or a holiday.",
@@ -1224,9 +1559,9 @@ class _ConfigTab(QWidget):
 
     def _email_section(self):
         """Who is told, without having to open the panel to find out."""
-        send_now = _btn("Send now", variant="secondary", height=34, width=120)
+        send_now = _btn("Send now", variant="secondary", height=40, width=120)
         send_now.clicked.connect(self._run_alert_emails)
-        save = _btn("Save", variant="primary", height=34, width=100)
+        save = _btn("Save", variant="primary", height=40, width=100)
         save.clicked.connect(self._save_alert_email_settings)
 
         buttons = QWidget()
@@ -1238,7 +1573,7 @@ class _ConfigTab(QWidget):
         row.addStretch()
 
         return self._build_section(
-            "\U0001F4E7", "Alerts by email",
+            "cloud-upload", "Alerts by email",
             "The same alerts, sent to somebody rather than waiting to be "
             "found. Each person is emailed once per problem per day — the "
             "second time it is still true, nothing is sent, or the mail "
@@ -1278,7 +1613,7 @@ class _ConfigTab(QWidget):
                 # The reason comes from the server and names the missing
                 # setting — far better than "email not working".
                 self._alert_email_state.setText(
-                    "⚠  " + (data.get("unavailable_reason") or "Email is not set up."))
+"" + (data.get("unavailable_reason") or "Email is not set up."))
                 return
             last = recent[0] if recent else None
             self._alert_email_state.setText(
@@ -1382,10 +1717,10 @@ class _ConfigTab(QWidget):
         self._ret_status = QLabel("Loading…")
         self._ret_status.setWordWrap(True)
         self._ret_status.setStyleSheet(
-            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
         )
 
-        save = _btn("💾  Save retention", variant="primary", height=36)
+        save = _btn("Save retention", variant="primary", height=36)
         save.clicked.connect(self._save_retention)
         row = QWidget()
         row.setObjectName("retRow")
@@ -1397,7 +1732,7 @@ class _ConfigTab(QWidget):
         self._ret_save_btn = save
 
         card = self._build_section(
-            "🗄", "Data retention  ·  applies to everyone",
+            "database", "Data retention  ·  applies to everyone",
             "Anything older than these is deleted nightly. Nothing was being "
             "deleted before this existed, so the numbers below decide whether "
             "the disk keeps growing.",
@@ -1576,11 +1911,11 @@ class _ConfigTab(QWidget):
         self._holiday_status = QLabel("")
         self._holiday_status.setWordWrap(True)
         self._holiday_status.setStyleSheet(
-            f"color:{C['text_muted']}; font-size:11px; background:transparent;"
+            f"color:{C['text_muted']}; font-size:12px; background:transparent;"
         )
 
         card = self._build_section(
-            "🎌", "Holidays  ·  applies to everyone",
+            "calendar-off", "Holidays  ·  applies to everyone",
             "No screenshots on these dates, whichever employee is selected above.",
             [entry, self._holiday_list, self._holiday_status],
         )
@@ -1702,7 +2037,12 @@ class _ConfigTab(QWidget):
         self._emp_combo.setFixedHeight(38)
         self._emp_combo.currentIndexChanged.connect(self._on_employee_changed)
 
-        refresh_btn = _btn("↻  Refresh", variant="secondary", height=38, width=110)
+        refresh_btn = _btn("Refresh", variant="secondary", height=38, width=110)
+        # A DRAWN ICON, NOT A CHARACTER. "↻" is a glyph out of the text
+        # font: it sits on the baseline rather than centred on the label,
+        # its weight is whatever the font decided, and it is missing on
+        # machines whose font lacks it. Every other control here is Lucide.
+        refresh_btn.setIcon(_icons.icon("refresh-cw", 15, C["text_primary"]))
         refresh_btn.clicked.connect(self._load_employees)
 
         t_lay.addWidget(scope_label)
@@ -1716,9 +2056,15 @@ class _ConfigTab(QWidget):
         self._scope_banner.setWordWrap(True)
         self._scope_banner.setStyleSheet(
             f"background:{C['accent_soft']}; color:{C['text_secondary']};"
-            f"border:1px solid {C['border']}; border-radius:10px;"
+            f"border:1px solid {C['border']}; border-radius:12px;"
             f"padding:11px 16px; font-size:12px;"
         )
+        # HIDDEN UNTIL IT HAS SOMETHING TO SAY. An empty QLabel still takes
+        # its padding and still paints its background, so before a scope was
+        # chosen the page showed a blank blue bar under the toolbar — a
+        # rectangle of colour meaning nothing. _update_scope_banner puts the
+        # text in and shows it.
+        self._scope_banner.hide()
         body.addWidget(self._scope_banner)
 
         # ── Widgets (naam wahi — save/load logic inhi pe depend karta hai) ──
@@ -1780,14 +2126,14 @@ class _ConfigTab(QWidget):
         self._weekly_preview.setWordWrap(True)
         self._weekly_preview.setObjectName("weeklyPreview")
         self._weekly_preview.setStyleSheet(
-            f"#weeklyPreview {{ color:{C['text_muted']}; font-size:11px;"
+            f"#weeklyPreview {{ color:{C['text_muted']}; font-size:12px;"
             f" background:{C['bg_elevated']}; border:1px solid {C['border']};"
-            f" border-radius:8px; padding:9px 12px; }}"
+            f" border-radius:12px; padding:9px 12px; }}"
         )
 
         # ── Sections ──────────────────────────────────────────────────────
         body.addWidget(self._build_section(
-            "📸", "Screenshot Capture",
+            "camera", "Screenshot Capture",
             "How many captures per day, and how far apart.",
             [
                 self._setting_row("Screenshots per day",
@@ -1805,7 +2151,7 @@ class _ConfigTab(QWidget):
             ]))
 
         body.addWidget(self._build_section(
-            "🖥", "Activity Tracking",
+            "activity", "Activity Tracking",
             "When an employee counts as idle.",
             [
                 self._setting_row("Idle threshold",
@@ -1814,7 +2160,7 @@ class _ConfigTab(QWidget):
             ]))
 
         body.addWidget(self._build_section(
-            "🕐", "Shift Schedule",
+            "clock", "Shift Schedule",
             "Screenshots are only scheduled inside this window (IST).",
             [
                 self._setting_row("Shift start time", "24-hour format, for example 09:00.",
@@ -1843,7 +2189,7 @@ class _ConfigTab(QWidget):
         body.addWidget(self._build_holidays_section())
 
         body.addWidget(self._build_section(
-            "⚙", "Advanced",
+            "settings", "Advanced",
             "Only change these if you need to.",
             [
                 self._setting_row("Verbose logging",
@@ -1855,7 +2201,7 @@ class _ConfigTab(QWidget):
         # ── Save ──────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
-        self._save_btn = _btn("💾  Save Config", variant="primary", height=42, width=170)
+        self._save_btn = _btn("Save Config", variant="primary", height=42, width=170)
         self._save_btn.clicked.connect(self._save_config)
         self._status_label = QLabel("")
         self._status_label.setWordWrap(True)
@@ -1879,7 +2225,7 @@ class _ConfigTab(QWidget):
         self._employees = data.get("data", [])
         self._emp_combo.blockSignals(True)
         self._emp_combo.clear()
-        self._emp_combo.addItem("🌐  Global Default", "global")
+        self._emp_combo.addItem("Global Default", "global")
         for emp in self._employees:
             # BUG FIX: `full_name` field /admin/employees kabhi return hi nahi
             # karta (wo employee_id, username, role deta hai) — is liye har
@@ -1934,15 +2280,18 @@ class _ConfigTab(QWidget):
         dikhte the. Admin ek employee select karke value badalta, aur use
         yakeen nahi hota tha ki ye sirf usi employee pe lagi ya sabpe.
         """
+        # Whatever branch below runs, it ends with text — so this is the one
+        # place that needs to make the banner visible again.
+        self._scope_banner.show()
         emp_id = self._emp_combo.currentData()
         if not emp_id or emp_id == "global":
             self._scope_banner.setStyleSheet(
                 f"background:{C['warning_soft']}; color:{C['text_secondary']};"
-                f"border:1px solid {C['border']}; border-radius:10px;"
+                f"border:1px solid {C['border']}; border-radius:12px;"
                 f"padding:11px 16px; font-size:12px;"
             )
             self._scope_banner.setText(
-                "🌐  <b>Global Default</b> — applies to every employee who has "
+"<b>Global Default</b> — applies to every employee who has "
                 "no override of their own. Employees with an override keep "
                 "their own values."
             )
@@ -1951,19 +2300,19 @@ class _ConfigTab(QWidget):
         label = self._emp_combo.currentText()
         self._scope_banner.setStyleSheet(
             f"background:{C['accent_soft']}; color:{C['text_secondary']};"
-            f"border:1px solid {C['border']}; border-radius:10px;"
+            f"border:1px solid {C['border']}; border-radius:12px;"
             f"padding:11px 16px; font-size:12px;"
         )
         if inherited:
             self._scope_banner.setText(
-                f"👤  <b>{label}</b> — no override of their own yet, so these "
+                f"<b>{label}</b> — no override of their own yet, so these "
                 f"values come from the <b>Global Default</b>. Saving creates "
                 f"an override for this employee only; nobody else is "
                 f"affected."
             )
         else:
             self._scope_banner.setText(
-                f"👤  <b>{label}</b> — these are this employee's own settings. "
+                f"<b>{label}</b> — these are this employee's own settings. "
                 f"Changes here apply to <b>this employee only</b>, nobody "
                 f"else."
             )
@@ -1996,7 +2345,7 @@ class _ConfigTab(QWidget):
             for value, label in ((shift_start, "Shift start"), (shift_end, "Shift end")):
                 if not TIME_RE.match(value):
                     self._status_label.setText(
-                        f"❌ {label} time must be HH:MM (00:00–23:59) — got \"{value}\""
+                        f"{label} time must be HH:MM (00:00–23:59) — got \"{value}\""
                     )
                     self._status_label.setStyleSheet(
                         f"color:{C['danger']}; font-size:12px; background:transparent;"
@@ -2027,7 +2376,7 @@ class _ConfigTab(QWidget):
         offs = sorted(iso for iso, box in self._weekly_offs.items() if box.isChecked())
         if len(offs) == 7:
             self._status_label.setText(
-                "❌ Every day cannot be a weekly off — leave at least one working day."
+" Every day cannot be a weekly off — leave at least one working day."
             )
             self._status_label.setStyleSheet(
                 f"color:{C['danger']}; font-size:12px; background:transparent;"
@@ -2042,21 +2391,21 @@ class _ConfigTab(QWidget):
 
         w.result.connect(self._on_save_done)
         w.error.connect(lambda e: (
-            self._status_label.setText(f"❌ Error: {e}"),
+            self._status_label.setText(f"Error: {e}"),
             self._save_btn.setEnabled(True),
-            self._save_btn.setText("💾  Save Config"),
+            self._save_btn.setText("Save Config"),
         ))
         _track_worker(self._workers, w)
         w.start()
 
     def _on_save_done(self, data: dict):
         self._save_btn.setEnabled(True)
-        self._save_btn.setText("💾  Save Config")
+        self._save_btn.setText("Save Config")
         if data.get("success"):
             self._status_label.setStyleSheet(f"color: {C['success']}; font-size:12px; background:transparent;")
             saved = self._describe_saved()
             self._status_label.setText(
-                f"✅ Saved{saved}{getattr(self, '_pending_note', '')}")
+                f"Saved{saved}{getattr(self, '_pending_note', '')}")
             # Read it back from the server rather than trusting the form.
             # "Saved" on its own does not prove the value survived the round
             # trip, and a weekly off that silently failed to stick is exactly
@@ -2074,7 +2423,7 @@ class _ConfigTab(QWidget):
             # admin's only conclusion is that the page is broken.
             self._status_label.setStyleSheet(f"color: {C['danger']}; font-size:12px; background:transparent;")
             self._status_label.setText(
-                f"❌ {data.get('message') or data.get('error') or 'Save failed'}")
+                f"{data.get('message') or data.get('error') or 'Save failed'}")
 
     def _reload_after_save(self):
         """Re-read the config from the server, keeping the status line.
@@ -2129,9 +2478,9 @@ class _ConfigTab(QWidget):
 
         w = _PostWorker(f"{API_BASE_URL}/admin/force-logout", {"employee_id": emp_id})
         w.result.connect(lambda d: self._status_label.setText(
-            "✅ Force logout set!" if d.get("success") else f"❌ {d.get('error')}"
+" Force logout set!" if d.get("success") else f"{d.get('error')}"
         ))
-        w.error.connect(lambda e: self._status_label.setText(f"❌ {e}"))
+        w.error.connect(lambda e: self._status_label.setText(f"{e}"))
         _track_worker(self._workers, w)
         w.start()
 
@@ -2140,6 +2489,44 @@ class _ConfigTab(QWidget):
 #  Screenshots Tab
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── screenshot thumbnails ────────────────────────────────────────────────
+#
+# The size of the picture in the list, and the picture itself once fetched.
+# One cache for the tab: paging back and forth is the common way to use this
+# list, and without it every step back re-downloads and re-decrypts twenty
+# images that have not changed.
+THUMB_W, THUMB_H = 104, 58
+_THUMB_CACHE: dict[str, QPixmap] = {}
+_THUMB_FAILED: set[str] = set()
+
+
+class _ThumbCell(QLabel):
+    """The picture in a row — a placeholder until its bytes arrive."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(THUMB_W, THUMB_H)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setScaledContents(False)
+        self.setStyleSheet(
+            f"QLabel {{ background:{C['bg_surface_alt']};"
+            f"border:1px solid {C['border']};"
+            f"border-radius:{_theme.Radius.CHIP}px;"
+            f"color:{C['text_muted']};font-size:{_theme.Type.MICRO}px; }}")
+        self.setText("…")
+
+    def show_image(self, pixmap: QPixmap) -> None:
+        self.setText("")
+        self.setPixmap(pixmap.scaled(
+            THUMB_W - 2, THUMB_H - 2,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+    def show_nothing(self, why: str = "no preview") -> None:
+        self.setPixmap(QPixmap())
+        self.setText(why)
+
+
 class _ScreenshotsTab(QWidget):
 
     def __init__(self):
@@ -2147,6 +2534,10 @@ class _ScreenshotsTab(QWidget):
         self._workers: list = []
         self._page = 1
         self._user_searched = False
+        # Thumbnails still to fetch, and the one being fetched. See
+        # _next_thumb for why there is only ever one.
+        self._thumb_queue: list = []
+        self._thumb_worker = None
         self._build_ui()
 
     def _build_ui(self):
@@ -2156,8 +2547,8 @@ class _ScreenshotsTab(QWidget):
 
         toolbar = _card()
         filter_row = QHBoxLayout(toolbar)
-        filter_row.setContentsMargins(18, 12, 18, 12)
-        filter_row.setSpacing(10)
+        filter_row.setContentsMargins(Space.MD, Space.SM, Space.MD, Space.SM)
+        filter_row.setSpacing(Space.SM)
 
         filter_row.addWidget(_muted_label("Employee ID"))
         self._emp_filter = QLineEdit()
@@ -2171,10 +2562,10 @@ class _ScreenshotsTab(QWidget):
         self._date_filter.setFixedWidth(130)
         filter_row.addWidget(self._date_filter)
 
-        search_btn = _btn("🔍  Search", variant="primary", height=34, width=110)
+        search_btn = _btn("Search", variant="primary", height=40, width=110)
         search_btn.clicked.connect(self._on_search_clicked)
         filter_row.addWidget(search_btn)
-        clear_btn = _btn("✕  Clear", variant="secondary", height=34, width=80)
+        clear_btn = _btn("Clear", variant="secondary", height=40, width=80)
         clear_btn.clicked.connect(self._on_clear_clicked)
         filter_row.addWidget(clear_btn)
         # A tick box per row and one that takes the page. Dragging a
@@ -2186,7 +2577,7 @@ class _ScreenshotsTab(QWidget):
         self._select_all.stateChanged.connect(self._toggle_select_all)
         filter_row.addWidget(self._select_all)
 
-        self._delete_btn = _btn("🗑  Delete selected", variant="danger", height=36)
+        self._delete_btn = _btn("Delete selected", variant="danger", height=36)
         self._delete_btn.clicked.connect(self._delete_selected)
         self._delete_btn.setEnabled(False)
         filter_row.addWidget(self._delete_btn)
@@ -2194,8 +2585,19 @@ class _ScreenshotsTab(QWidget):
         filter_row.addStretch()
         root.addWidget(toolbar)
 
-        self._table = _tune_table(QTableWidget(0, 5))
-        self._table.setHorizontalHeaderLabels(["", "ID", "Employee", "File", "Captured"])
+        # SEVEN COLUMNS, TWO OF THEM NEW: a thumbnail and a view button.
+        #
+        # The list said what had been captured and showed none of it, so
+        # finding one screenshot meant opening rows until the right one came
+        # up. The thumbnail is the whole point of a screenshot list.
+        #
+        # The new columns are APPENDED. Everything that reads this table by
+        # index — the preview opener, the selection, the delete — counts from
+        # the left, and putting a column in the middle is how the tick box
+        # once shifted them all and opened the preview for an empty id.
+        self._table = _tune_table(QTableWidget(0, 7))
+        self._table.setHorizontalHeaderLabels(
+            ["", "ID", "Employee", "File", "Captured", "Preview", ""])
         # Dragging still works for a quick pair, but the tick boxes are what
         # make a careful selection possible.
         self._table.setSelectionMode(
@@ -2210,6 +2612,13 @@ class _ScreenshotsTab(QWidget):
         self._table.setColumnWidth(1, 70)
         self._table.setColumnWidth(2, 110)
         self._table.setColumnWidth(4, 210)
+        self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(5, THUMB_W + 24)
+        self._table.setColumnWidth(6, 64)
+        # Tall enough for the thumbnail, which is what now sets the rhythm of
+        # this table rather than the text in it.
+        self._table.verticalHeader().setDefaultSectionSize(THUMB_H + 20)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.cellDoubleClicked.connect(self._open_preview)
@@ -2218,9 +2627,12 @@ class _ScreenshotsTab(QWidget):
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
-        self._prev_btn  = _btn("◀  Prev", variant="secondary", height=32, width=92)
+        self._prev_btn  = _btn("Prev", variant="secondary", height=36, width=96)
+        self._prev_btn.setIcon(_icons.icon("chevron-left", 14, C["text_primary"]))
         self._prev_btn.clicked.connect(self._prev_page)
-        self._next_btn  = _btn("Next  ▶", variant="secondary", height=32, width=92)
+        self._next_btn  = _btn("Next", variant="secondary", height=36, width=96)
+        self._next_btn.setIcon(_icons.icon("chevron-right", 14, C["text_primary"]))
+        self._next_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._next_btn.clicked.connect(self._next_page)
         self._page_label = _muted_label("Page 1")
         pag_row.addWidget(self._prev_btn)
@@ -2277,6 +2689,35 @@ class _ScreenshotsTab(QWidget):
             # None:` block ke ANDAR thi — tz-aware timestamp par timestamp
             # kabhi format hi nahi hota tha. Ab shared helper.
             self._table.setItem(i, 4, _cell(_fmt_ts(row.get("created_at")), muted=True))
+
+            # THE PICTURE, and a button that opens it full size. The button
+            # calls the same opener a double-click has always used, so there
+            # is one way in and nothing new to keep working.
+            shot_id = str(row.get("id", ""))
+            thumb = _ThumbCell()
+            self._table.setCellWidget(i, 5, _centred(thumb))
+            if shot_id in _THUMB_CACHE:
+                thumb.show_image(_THUMB_CACHE[shot_id])
+            elif shot_id in _THUMB_FAILED:
+                thumb.show_nothing()
+            else:
+                self._thumb_queue.append((shot_id, thumb))
+
+            eye = QPushButton()
+            eye.setIcon(_icons.icon("eye", 16, C["text_secondary"]))
+            eye.setIconSize(QSize(16, 16))
+            eye.setFixedSize(34, 34)
+            eye.setCursor(Qt.CursorShape.PointingHandCursor)
+            eye.setToolTip("Open this screenshot")
+            eye.setStyleSheet(
+                f"QPushButton {{ background:transparent;border:1px solid {C['border']};"
+                f"border-radius:{_theme.Radius.CHIP}px; }}"
+                f"QPushButton:hover {{ border-color:{C['accent']};"
+                f"background:{C['hover']}; }}")
+            eye.clicked.connect(
+                lambda _checked=False, r=i: self._open_preview(r, 0))
+            self._table.setCellWidget(i, 6, _centred(eye))
+
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 20 < total)
@@ -2286,6 +2727,82 @@ class _ScreenshotsTab(QWidget):
         self._select_all.setChecked(False)
         self._select_all.blockSignals(False)
         self._on_selection_changed()
+        # Sized to the content, after it exists — see _fit_columns. The file
+        # name column takes whatever is left: without a stretch column the
+        # table stopped halfway across its card and left a wide empty band on
+        # the right, which is what the list looked like before.
+        _fit_columns(self._table, stretch=3)
+        self._next_thumb()
+
+    # ── thumbnails ──────────────────────────────────────────────────────
+
+    def _next_thumb(self):
+        """Fetch the queued thumbnails, ONE AT A TIME.
+
+        Twenty rows means twenty encrypted downloads. Firing them together
+        would put twenty threads and twenty connections up at once for a
+        picture the size of a postage stamp, and this panel has already been
+        bitten by threads outliving the widget that started them. One in
+        flight, the next started when it lands: the pictures fill in from the
+        top, which is the order somebody reads them in anyway.
+
+        `_thumb_page` is the generation. A reply for the page somebody has
+        already left is dropped rather than painted into whatever row now
+        sits at that index.
+        """
+        if self._thumb_worker is not None or not self._thumb_queue:
+            return
+        shot_id, cell = self._thumb_queue.pop(0)
+        page = self._page
+
+        worker = _ShotDownloadWorker(shot_id)
+        self._thumb_worker = worker
+
+        def done(blob):
+            self._thumb_worker = None
+            if page == self._page:
+                self._paint_thumb(shot_id, cell, blob)
+            self._next_thumb()
+
+        def failed(_error):
+            self._thumb_worker = None
+            _THUMB_FAILED.add(shot_id)
+            try:
+                cell.show_nothing()
+            except RuntimeError:
+                pass                      # the row is gone; nothing to draw on
+            self._next_thumb()
+
+        worker.result.connect(done)
+        worker.error.connect(failed)
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _paint_thumb(self, shot_id: str, cell, blob):
+        """Decrypt, decode, and put it in the cell — or say there is none."""
+        try:
+            data = bytes(blob)
+            # Screenshots are stored encrypted; the preview window does the
+            # same two steps, and an unencrypted file must still open.
+            if not self._is_image(data):
+                try:
+                    data = CryptoEngine.decrypt_bytes(data)
+                except Exception:
+                    pass
+            picture = QPixmap()
+            if not picture.loadFromData(data) or picture.isNull():
+                _THUMB_FAILED.add(shot_id)
+                cell.show_nothing()
+                return
+            _THUMB_CACHE[shot_id] = picture
+            cell.show_image(picture)
+        except RuntimeError:
+            # The table was rebuilt under us — the cell is a dead C++ object.
+            pass
+
+    @staticmethod
+    def _is_image(data: bytes) -> bool:
+        return data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff"
 
     def _selected_ids(self) -> list[int]:
         """Rows that are ticked, or failing that, rows that are highlighted.
@@ -2325,7 +2842,7 @@ class _ScreenshotsTab(QWidget):
         count = len(self._selected_ids())
         self._delete_btn.setEnabled(count > 0)
         self._delete_btn.setText(
-            "🗑  Delete selected" if count == 0 else f"🗑  Delete {count}")
+"Delete selected" if count == 0 else f"Delete {count}")
 
     def _delete_selected(self):
         ids = self._selected_ids()
@@ -2379,11 +2896,6 @@ class _ScreenshotsTab(QWidget):
         self._user_searched = False
         self._emp_filter.clear()
         self._date_filter.setDate(QDate.currentDate())
-        # Clear means clear. Leaving the dropdown set was how a "no results"
-        # page looked like a broken list rather than an active filter.
-        self._status_filter.blockSignals(True)
-        self._status_filter.setCurrentIndex(0)
-        self._status_filter.blockSignals(False)
         self._load(page=1)
         
     def _prev_page(self): self._load(self._page - 1)
@@ -2426,6 +2938,11 @@ class _ScreenshotsTab(QWidget):
 
 class _DashboardTab(QWidget):
 
+    # Emitted with a page key. The dashboard does not know what index a page
+    # has, and hard-coded indices here are exactly what made all five Quick
+    # Actions open the wrong page.
+    open_page = Signal(str)
+
     def __init__(self):
         super().__init__()
         self._workers: list = []
@@ -2467,13 +2984,12 @@ class _DashboardTab(QWidget):
         scroll.setWidget(host)
         outer.addWidget(scroll)
 
+        # THE UNSCOPED VERSION LIVED HERE. `QFrame{...}` reaches every frame
+        # inside the card, so the dividers on this dashboard were drawing
+        # themselves as bordered rounded boxes — the fault the panel's own
+        # _card had already been fixed for, in one place only.
         def card_frame():
-            f = QFrame()
-            f.setStyleSheet(
-                f"QFrame{{background:{C['bg_surface']};border:1px solid {C['border']};"
-                f"border-radius:14px;}}"
-            )
-            return f
+            return _card_frame(bg=C["bg_surface"], border=C["border"])
 
         # ── Today's Summary strip ────────────────────────────────────────
         summary = card_frame()
@@ -2481,10 +2997,12 @@ class _DashboardTab(QWidget):
         sl.setContentsMargins(18, 15, 18, 16)
         sl.setSpacing(13)
         head = QHBoxLayout()
-        ico = QLabel("📈"); ico.setStyleSheet("font-size:15px;border:none;background:transparent;")
+        ico = QLabel()
+        ico.setPixmap(_icons.pixmap("bar-chart-3", 17, C["accent"]))
+        ico.setStyleSheet("border:none;background:transparent;")
         ttl = QLabel("Today's Summary")
         ttl.setStyleSheet(
-            f"color:{C['text_primary']};font-size:15px;font-weight:700;"
+            f"color:{C['text_primary']};font-size:16px;font-weight:700;"
             f"border:none;background:transparent;"
         )
         head.addWidget(ico); head.addWidget(ttl); head.addStretch()
@@ -2494,11 +3012,11 @@ class _DashboardTab(QWidget):
         from client.presentation.theme import C as TC
 
         strip = QHBoxLayout(); strip.setSpacing(12)
-        self.m_employees = MiniStat("👥", "Employees",   TC.BLUE,   TC.BLUE_BG)
-        self.m_online    = MiniStat("🟢", "Online Now",  TC.GREEN,  TC.GREEN_BG)
-        self.m_shots     = MiniStat("🖼", "Screenshots", TC.PURPLE, TC.PURPLE_BG)
-        self.m_logs      = MiniStat("📝", "Activity Logs", TC.CYAN, TC.CYAN_BG)
-        self.m_coverage  = MiniStat("🎯", "Coverage",    TC.AMBER,  TC.AMBER_BG)
+        self.m_employees = MiniStat("users", "Employees",   TC.BLUE,   TC.BLUE_BG)
+        self.m_online    = MiniStat("circle-check", "Online Now",  TC.GREEN,  TC.GREEN_BG)
+        self.m_shots     = MiniStat("image", "Screenshots", TC.PURPLE, TC.PURPLE_BG)
+        self.m_logs      = MiniStat("clipboard-list", "Activity Logs", TC.CYAN, TC.CYAN_BG)
+        self.m_coverage  = MiniStat("crosshair", "Coverage",    TC.AMBER,  TC.AMBER_BG)
         for c in (self.m_employees, self.m_online, self.m_shots,
                   self.m_logs, self.m_coverage):
             strip.addWidget(c)
@@ -2517,23 +3035,25 @@ class _DashboardTab(QWidget):
         m_lay.setSpacing(12)
 
         m_head = QHBoxLayout(); m_head.setSpacing(10)
-        m_ico = QLabel("👤"); m_ico.setFixedSize(28, 28)
+        m_ico = QLabel(); m_ico.setFixedSize(30, 30)
         m_ico.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        m_ico.setStyleSheet(f"background:{C['accent_soft']}; border-radius:9px; font-size:14px;")
+        m_ico.setPixmap(_icons.pixmap("user", 16, C["accent"]))
+        m_ico.setStyleSheet(f"background:{C['accent_soft']};"
+                            f"border-radius:{_theme.Radius.CONTROL}px;")
         m_ttl = QLabel("Your Session")
         m_ttl.setStyleSheet(
-            f"color:{C['text_primary']}; font-size:15px; font-weight:700; background:transparent;"
+            f"color:{C['text_primary']}; font-size:16px; font-weight:700; background:transparent;"
         )
         m_sub = QLabel("Your own tracking status — admins are tracked too")
-        m_sub.setStyleSheet(f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+        m_sub.setStyleSheet(f"color:{C['text_muted']}; font-size:12px; background:transparent;")
         m_head.addWidget(m_ico); m_head.addWidget(m_ttl)
         m_head.addSpacing(8); m_head.addWidget(m_sub); m_head.addStretch()
         m_lay.addLayout(m_head)
 
         my_row = QHBoxLayout(); my_row.setSpacing(12)
-        self.m_session  = MiniStat("⏱", "Session Duration", TC.AMBER,  TC.AMBER_BG)
-        self.m_activity = MiniStat("🖥", "Activity Status",  TC.GREEN,  TC.GREEN_BG)
-        self.m_myshots  = MiniStat("📸", "Screenshots Today", TC.PURPLE, TC.PURPLE_BG)
+        self.m_session  = MiniStat("timer", "Session Duration", TC.AMBER,  TC.AMBER_BG)
+        self.m_activity = MiniStat("monitor", "Activity Status",  TC.GREEN,  TC.GREEN_BG)
+        self.m_myshots  = MiniStat("camera", "Screenshots Today", TC.PURPLE, TC.PURPLE_BG)
         for c in (self.m_session, self.m_activity, self.m_myshots):
             my_row.addWidget(c)
         m_lay.addLayout(my_row)
@@ -2541,10 +3061,10 @@ class _DashboardTab(QWidget):
 
         # ── Status tiles ─────────────────────────────────────────────────
         tiles = QHBoxLayout(); tiles.setSpacing(14)
-        self.t_server   = StatusTile("🖥", "Server Status",   TC.GREEN, TC.GREEN_BG)
-        self.t_database = StatusTile("🗄", "Database",        TC.GREEN, TC.CYAN_BG)
-        self.t_tracking = StatusTile("🎯", "Tracking",        TC.GREEN, TC.BLUE_BG)
-        self.t_sync     = StatusTile("☁️", "Sync Health",     TC.GREEN, TC.PURPLE_BG)
+        self.t_server   = StatusTile("server", "Server Status",   TC.GREEN, TC.GREEN_BG)
+        self.t_database = StatusTile("database", "Database",        TC.GREEN, TC.CYAN_BG)
+        self.t_tracking = StatusTile("crosshair", "Tracking",        TC.GREEN, TC.BLUE_BG)
+        self.t_sync     = StatusTile("cloud", "Sync Health",     TC.GREEN, TC.PURPLE_BG)
         for tl in (self.t_server, self.t_database, self.t_tracking, self.t_sync):
             tiles.addWidget(tl)
         root.addLayout(tiles)
@@ -2558,20 +3078,22 @@ class _DashboardTab(QWidget):
         # nothing else was available.
         today_header = QLabel("Today")
         today_header.setStyleSheet(
-            f"color:{C['text_primary']};font-weight:700;font-size:15px;"
-            f"background:transparent;")
+            f"color:{C['text_primary']};font-weight:700;"
+            f"font-size:{_theme.Type.SECTION}px;background:transparent;")
         root.addWidget(today_header)
 
         today_grid = QGridLayout()
         today_grid.setSpacing(14)
+        # Present + Leave + Absent + Day Off adds up to the headcount, which
+        # is the property that makes a wrong card findable.
         # The same colours the attendance page uses for the same words, so
         # the two screens cannot teach different meanings for one green.
-        self._card_present  = StatCard("Present",     ACCENTS["green"],  "✅", sparkline=False)
-        self._card_active   = StatCard("Active Now",  ACCENTS["green"],  "🟢", sparkline=False)
-        self._card_leave    = StatCard("On Leave",    ACCENTS["violet"], "🌴", sparkline=False)
-        self._card_absent   = StatCard("Absent",      ACCENTS["red"],    "⛔", sparkline=False)
-        self._card_late     = StatCard("Late",        ACCENTS["amber"],  "⏰", sparkline=False)
-        self._card_day_off  = StatCard("Day Off",     ACCENTS["slate"],  "🗓", sparkline=False)
+        self._card_present  = StatCard("Present",     ACCENTS["green"],  "circle-check", sparkline=False)
+        self._card_active   = StatCard("Active Now",  ACCENTS["green"],  "activity", sparkline=False)
+        self._card_leave    = StatCard("On Leave",    ACCENTS["violet"], "palmtree", sparkline=False)
+        self._card_absent   = StatCard("Absent",      ACCENTS["red"],    "circle-slash", sparkline=False)
+        self._card_late     = StatCard("Late",        ACCENTS["amber"],  "clock", sparkline=False)
+        self._card_day_off  = StatCard("Day Off",     ACCENTS["slate"],  "calendar-off", sparkline=False)
         for i, c in enumerate([
             self._card_present, self._card_active, self._card_leave,
             self._card_absent, self._card_late, self._card_day_off,
@@ -2580,14 +3102,32 @@ class _DashboardTab(QWidget):
             today_grid.setColumnStretch(i, 1)
         root.addLayout(today_grid)
 
-        # ── Legacy stat cards (existing feature — hataya nahi) ───────────
+        # ── The company, and what has been collected ─────────────────────
+        #
+        # THESE ARE NOT THE SAME QUESTION AS THE ROW ABOVE, and two green
+        # cards on one screen made it look as though they were. "Active Now"
+        # counts open shifts; "Online Now" counts people signed in on a
+        # device. They differ legitimately — an administrator at their desk
+        # with no shift open is online and not active — and with no subtitles
+        # the only conclusion available was that one of them was wrong.
+        section = QLabel("Coverage & collection")
+        section.setStyleSheet(
+            f"color:{C['text_primary']};font-weight:700;"
+            f"font-size:{_theme.Type.SECTION}px;background:transparent;")
+        root.addWidget(section)
+
         grid = QGridLayout()
         grid.setSpacing(14)
-        self._card_total_employees = StatCard("Total Employees",      ACCENTS["blue"],   "👥", sparkline=False)
-        self._card_online          = StatCard("Online Now",           ACCENTS["green"],  "🟢", sparkline=False)
-        self._card_offline         = StatCard("Offline",              ACCENTS["slate"],  "🌙", sparkline=False)
-        self._card_total_screens   = StatCard("Screenshots Captured", ACCENTS["violet"], "📸", sparkline=False)
-        self._card_total_logs      = StatCard("Activity Logs",        ACCENTS["cyan"],   "📝", sparkline=False)
+        self._card_total_employees = StatCard("Total Employees",      ACCENTS["blue"],   "users", sparkline=False)
+        self._card_online          = StatCard("Online Now",           ACCENTS["green"],  "activity", sparkline=False)
+        self._card_offline         = StatCard("Offline",              ACCENTS["slate"],  "moon", sparkline=False)
+        self._card_total_screens   = StatCard("Screenshots Captured", ACCENTS["violet"], "camera", sparkline=False)
+        self._card_total_logs      = StatCard("Activity Logs",        ACCENTS["cyan"],   "clipboard-list", sparkline=False)
+        self._card_online.set_subtitle("signed in on a device")
+        self._card_offline.set_subtitle("no live session")
+        self._card_total_employees.set_subtitle("on the books")
+        self._card_total_screens.set_subtitle("all time")
+        self._card_total_logs.set_subtitle("all time")
         for i, c in enumerate([
             self._card_total_employees, self._card_online, self._card_offline,
             self._card_total_screens, self._card_total_logs,
@@ -2599,7 +3139,7 @@ class _DashboardTab(QWidget):
         # ── Charts ───────────────────────────────────────────────────────
         charts_header = QLabel("Last 7 Days Overview")
         charts_header.setStyleSheet(
-            f"color:{C['text_primary']}; font-weight:700; font-size:15px; background:transparent;"
+            f"color:{C['text_primary']}; font-weight:700; font-size:16px; background:transparent;"
         )
         root.addWidget(charts_header)
         charts_row = QHBoxLayout()
@@ -2612,6 +3152,37 @@ class _DashboardTab(QWidget):
         charts_row.addWidget(self._chart_activity)
         root.addLayout(charts_row)
 
+        # ── What needs attention ─────────────────────────────────────────
+        #
+        # The alerts existed only on their own page, which meant they were
+        # seen by somebody who had already decided to go looking. The three
+        # most severe are here, where the day starts.
+        #
+        # THREE, AND A COUNT. A dashboard that reprints the whole alerts page
+        # is the alerts page, and the reason to open the real one disappears.
+        alerts_card = card_frame()
+        ac = QVBoxLayout(alerts_card)
+        ac.setContentsMargins(18, 15, 18, 16)
+        ac.setSpacing(10)
+        ah = QHBoxLayout()
+        at = QLabel("Needs attention")
+        at.setStyleSheet(
+            f"color:{C['text_primary']};font-size:{_theme.Type.SECTION}px;"
+            f"font-weight:700;border:none;background:transparent;")
+        self._alerts_count = QLabel("")
+        self._alerts_count.setStyleSheet(
+            f"color:{C['text_muted']};font-size:{_theme.Type.SMALL}px;"
+            f"border:none;background:transparent;")
+        ah.addWidget(at); ah.addWidget(self._alerts_count); ah.addStretch()
+        open_alerts = _btn("Open Alerts", variant="secondary", height=36, width=110)
+        open_alerts.clicked.connect(lambda: self.open_page.emit("alerts"))
+        ah.addWidget(open_alerts)
+        ac.addLayout(ah)
+        self._alerts_body = QVBoxLayout()
+        self._alerts_body.setSpacing(6)
+        ac.addLayout(self._alerts_body)
+        root.addWidget(alerts_card)
+
         # ── Recent Activity ──────────────────────────────────────────────
         feed_card = card_frame()
         fc = QVBoxLayout(feed_card)
@@ -2620,7 +3191,7 @@ class _DashboardTab(QWidget):
         fh = QHBoxLayout(); fh.setContentsMargins(20, 15, 16, 10)
         fl = QLabel("Recent Activity")
         fl.setStyleSheet(
-            f"color:{C['text_primary']};font-weight:700;font-size:15px;"
+            f"color:{C['text_primary']};font-weight:700;font-size:16px;"
             f"border:none;background:transparent;"
         )
         self._feed_count = QLabel("")
@@ -2647,18 +3218,27 @@ class _DashboardTab(QWidget):
         qc.setSpacing(12)
         qt = QLabel("Quick Actions")
         qt.setStyleSheet(
-            f"color:{C['text_primary']};font-size:15px;font-weight:700;"
+            f"color:{C['text_primary']};font-size:16px;font-weight:700;"
             f"border:none;background:transparent;"
         )
         qc.addWidget(qt)
         qrow = QHBoxLayout(); qrow.setSpacing(12)
+        # BY KEY, NOT BY NUMBER.
+        #
+        # These were hard-coded indices into PAGES — 2 for Employees, 1 for
+        # Configuration, and so on. A page was inserted into PAGES at some
+        # point and the numbers stayed where they were, so ALL FIVE buttons
+        # opened the page before the one they named: "Employees" opened
+        # Configuration, "Configuration" opened Alerts, "Audit Logs" opened
+        # Screenshots. Nothing raised, and the button that took you somewhere
+        # else still took you somewhere plausible, which is why it survived.
         self._quick_buttons = {}
         for icon, label, key in (
-            ("👥", "Employees", 2),
-            ("⚙", "Configuration", 1),
-            ("📅", "Attendance", 3),
-            ("📷", "Screenshots", 4),
-            ("📋", "Audit Logs", 5),
+            ("users", "Employees", "employees"),
+            ("settings", "Configuration", "config"),
+            ("calendar-days", "Attendance", "attendance"),
+            ("camera", "Screenshots", "screenshots"),
+            ("clipboard-list", "Audit Logs", "logs"),
         ):
             btn = QuickAction(icon, label)
             self._quick_buttons[label] = (btn, key)
@@ -2666,6 +3246,65 @@ class _DashboardTab(QWidget):
         qc.addLayout(qrow)
         root.addWidget(qa)
         root.addStretch()
+
+    def _load_alerts(self):
+        """The three most severe, and how many there are altogether."""
+        worker = _FetchWorker(f"{API_BASE_URL}/admin/alerts", {})
+
+        def fill(data):
+            payload = data or {}
+            alerts = payload.get("alerts") or []
+            while self._alerts_body.count():
+                item = self._alerts_body.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            if not payload.get("enabled", True):
+                self._alerts_count.setText("")
+                self._alerts_body.addWidget(_muted_label(
+                    "Alerts are switched off in Configuration."))
+                return
+            if not alerts:
+                self._alerts_count.setText("")
+                # NOT AN EMPTY BOX. "Nothing" and "failed to load" look
+                # identical when a panel is simply blank.
+                self._alerts_body.addWidget(_muted_label(
+                    "Nothing needs attention right now."))
+                return
+
+            self._alerts_count.setText(f"·  {len(alerts)} in total")
+            # Severity first, so the card cannot fill with three low ones
+            # while something serious sits below the cut.
+            # LOWERCASED FIRST. The server sends "HIGH", not "high" —
+            # measured against the running API, not assumed. Without this
+            # every alert fell through to the default: sorted last and drawn
+            # as a blue "info" chip, including the critical ones.
+            order = {"critical": 0, "high": 1, "warning": 2, "info": 3}
+            worst = sorted(alerts, key=lambda a: order.get(
+                str(a.get("severity") or "").lower(), 9))[:3]
+            for alert in worst:
+                row = QHBoxLayout()
+                row.setSpacing(_theme.Space.SM)
+                severity = str(alert.get("severity") or "info").lower()
+                chip = badge_label(
+                    {"critical": "rejected", "high": "rejected",
+                     "warning": "pending"}.get(severity, "info"),
+                    severity.title())
+                text = QLabel(str(alert.get("title") or alert.get("message") or ""))
+                text.setStyleSheet(
+                    f"color:{C['text_secondary']};font-size:{_theme.Type.SMALL}px;"
+                    f"border:none;background:transparent;")
+                text.setWordWrap(True)
+                row.addWidget(chip)
+                row.addWidget(text, 1)
+                holder = QWidget()
+                holder.setLayout(row)
+                self._alerts_body.addWidget(holder)
+
+        worker.result.connect(fill)
+        worker.error.connect(lambda _e: None)
+        _track_worker(self._workers, worker)
+        worker.start()
 
     def _load_charts(self):
         w = _FetchWorker(f"{API_BASE_URL}/dashboard/charts")
@@ -2712,6 +3351,7 @@ class _DashboardTab(QWidget):
         """Sirf cards + feed — charts apne alag (slow) timer pe chalte hain."""
         self._load_summary()
         self._load_today()
+        self._load_alerts()
         self._load_feed()
         self._load_own_shots()
 
@@ -2925,6 +3565,15 @@ class _PayrollTab(QWidget):
         self._build_ui()
         self._set_default_month()
 
+        # AUTO-REFRESH. Two administrators can have a month open at once, and one of them can finalise it. Sixty seconds is soon enough that the other does not go on editing a run that has already been frozen.
+        #
+        # Sixty seconds, not thirty: this page is read, not watched, and a
+        # table that reorders itself under the pointer is its own problem.
+        self._auto = QTimer(self)
+        self._auto.setInterval(60000)
+        self._auto.timeout.connect(self._load)
+        self._auto.start()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 22)
@@ -2947,7 +3596,7 @@ class _PayrollTab(QWidget):
             ("Generate draft", self._generate, "primary"),
             ("Finalize", self._finalize, "danger"),
         ):
-            btn = _btn(text, variant=variant, height=32,
+            btn = _btn(text, variant=variant, height=36,
                        width=130 if len(text) > 8 else 90)
             btn.clicked.connect(slot)
             bar.addWidget(btn)
@@ -2955,6 +3604,12 @@ class _PayrollTab(QWidget):
                 self._finalize_btn = btn
 
         bar.addStretch()
+        # THE MONTH'S STATE AS A CHIP, not as a word inside a sentence.
+        # "2026-07 · FINALISED · 27 working days" buried the one thing that
+        # decides what may still be changed — and whether an employee can see
+        # their payslip — in the middle of a line of grey text.
+        self._status_chip = badge_label("draft", "Not generated")
+        bar.addWidget(self._status_chip)
         self._headline = _muted_label("")
         bar.addWidget(self._headline)
         root.addWidget(toolbar)
@@ -2966,7 +3621,6 @@ class _PayrollTab(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setAlternatingRowColors(True)
         self._table.setShowGrid(False)
         self._table.verticalHeader().setVisible(False)
         self._table.cellDoubleClicked.connect(self._row_menu)
@@ -2976,10 +3630,10 @@ class _PayrollTab(QWidget):
         self._totals = _muted_label("")
         footer.addWidget(self._totals)
         footer.addStretch()
-        summary = _btn("Summary…", variant="secondary", height=32, width=110)
+        summary = _btn("Summary…", variant="secondary", height=36, width=110)
         summary.clicked.connect(self._summary_dialog)
         footer.addWidget(summary)
-        salaries = _btn("Salaries…", variant="secondary", height=32, width=110)
+        salaries = _btn("Salaries…", variant="secondary", height=36, width=110)
         salaries.clicked.connect(self._salary_dialog)
         footer.addWidget(salaries)
         hint = _muted_label("Double-click a row for overtime and adjustments")
@@ -3015,16 +3669,25 @@ class _PayrollTab(QWidget):
         self._status = (run or {}).get("status", "NONE")
 
         if not run:
-            self._headline.setText("Not generated yet")
+            self._status_chip.setStyleSheet(_theme.badge("neutral"))
+            self._status_chip.setText("Not generated")
+            self._headline.setText("")
             self._table.setRowCount(0)
             self._totals.setText("")
             self._finalize_btn.setEnabled(False)
             return
 
         finalised = self._status == "FINALIZED"
+        self._status_chip.setStyleSheet(
+            _theme.badge("finalized" if finalised else "draft"))
+        self._status_chip.setText("Finalised" if finalised else "Draft")
+        self._status_chip.setToolTip(
+            "Finalised. The figures are frozen; changes go through "
+            "adjustments, which stay on the record."
+            if finalised else
+            "Draft. It can still be regenerated, and employees cannot see it.")
         self._headline.setText(
-            f"{run['month']}  ·  {'FINALISED' if finalised else 'DRAFT'}"
-            f"  ·  {run.get('working_days')} working days")
+            f"{run['month']}  ·  {run.get('working_days')} working days")
         # A FINALISED MONTH CANNOT BE FINALISED AGAIN. The button goes rather
         # than refusing — the same rule the leave page follows.
         self._finalize_btn.setEnabled(not finalised)
@@ -3074,6 +3737,8 @@ class _PayrollTab(QWidget):
             f"{len(lines)} employees   ·   gross ₹{float(totals.get('gross', 0)):,.2f}"
             f"   ·   deductions ₹{float(totals.get('deductions', 0)):,.2f}"
             f"   ·   TOTAL PAYOUT ₹{float(totals.get('net', 0)):,.2f}")
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table, stretch=0)
 
     # ── the workflow ────────────────────────────────────────────────────
     def _generate(self):
@@ -3218,7 +3883,6 @@ class _PayrollTab(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Payroll summary — {month}")
         dialog.setMinimumSize(640, 520)
-        dialog.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(12)
@@ -3297,7 +3961,6 @@ class _PayrollTab(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("Salaries")
         dialog.setMinimumSize(720, 460)
-        dialog.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(12)
@@ -3403,6 +4066,15 @@ class _LeaveTab(QWidget):
         self._build_ui()
         self._load()
 
+        # AUTO-REFRESH. Requests arrive from employees while this page is open. Without this an administrator watching the queue saw nothing new until they pressed Refresh — and the queue is the entire reason the page exists.
+        #
+        # Sixty seconds, not thirty: this page is read, not watched, and a
+        # table that reorders itself under the pointer is its own problem.
+        self._auto = QTimer(self)
+        self._auto.setInterval(60000)
+        self._auto.timeout.connect(self._load)
+        self._auto.start()
+
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 22, 28, 22)
@@ -3430,11 +4102,11 @@ class _LeaveTab(QWidget):
         self._search.returnPressed.connect(lambda: self._load(1))
         bar.addWidget(self._search)
 
-        find = _btn("🔍  Search", variant="primary", height=32, width=110)
+        find = _btn("Search", variant="primary", height=36, width=110)
         find.clicked.connect(lambda: self._load(1))
         bar.addWidget(find)
 
-        clear = _btn("✕ Clear", variant="secondary", height=32, width=90)
+        clear = _btn("Clear", variant="secondary", height=36, width=90)
         clear.clicked.connect(self._clear)
         bar.addWidget(clear)
 
@@ -3449,15 +4121,17 @@ class _LeaveTab(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setAlternatingRowColors(True)
         self._table.setShowGrid(False)
         self._table.verticalHeader().setVisible(False)
         root.addWidget(self._table, 1)
 
         pager = QHBoxLayout()
-        self._prev = _btn("◀ Prev", variant="secondary", height=32, width=90)
+        self._prev = _btn("Prev", variant="secondary", height=36, width=96)
+        self._prev.setIcon(_icons.icon("chevron-left", 14, C["text_primary"]))
         self._prev.clicked.connect(lambda: self._load(self._page - 1))
-        self._next = _btn("Next ▶", variant="secondary", height=32, width=90)
+        self._next = _btn("Next", variant="secondary", height=36, width=96)
+        self._next.setIcon(_icons.icon("chevron-right", 14, C["text_primary"]))
+        self._next.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._next.clicked.connect(lambda: self._load(self._page + 1))
         self._page_label = _muted_label("Page 1")
         pager.addWidget(self._prev)
@@ -3498,7 +4172,7 @@ class _LeaveTab(QWidget):
         self._page_label.setText(f"Page {self._page}  •  Total: {data.get('total', 0)}")
         pending = data.get("pending", 0)
         self._count.setText(
-            f"🕒  {pending} waiting" if pending else "Nothing waiting")
+            f"{pending} waiting" if pending else "Nothing waiting")
 
         self._table.setRowCount(len(rows))
         for i, row in enumerate(rows):
@@ -3512,18 +4186,16 @@ class _LeaveTab(QWidget):
             self._table.setItem(i, 5, _cell(
                 f"{float(days):g}" if days is not None else "", align_right=True))
 
+            # The fourth copy of the status colours, now the same one chip
+            # the leave page and attendance use. CANCELLED was missing from
+            # this dict and read as plain grey text, identical to a status
+            # that had simply failed to load.
             status = str(row.get("status", ""))
-            state = QTableWidgetItem(status.title())
-            state.setForeground(QColor({
-                "PENDING": C["warning"], "APPROVED": C["success"],
-                "REJECTED": C["danger"], "REVOKED": C["danger"],
-            }.get(status, C["text_muted"])))
-            font = state.font(); font.setBold(True); state.setFont(font)
-            if row.get("reason"):
-                state.setToolTip(f"Reason: {row['reason']}"
-                                 + (f"\n\nRemarks: {row['remarks']}"
-                                    if row.get("remarks") else ""))
-            self._table.setItem(i, 6, state)
+            self._table.setCellWidget(i, 6, badge_cell(
+                status, status.title(),
+                (f"Reason: {row['reason']}"
+                 + (f"\n\nRemarks: {row['remarks']}" if row.get("remarks") else ""))
+                if row.get("reason") else None))
 
             actions = QWidget()
             lay = QHBoxLayout(actions)
@@ -3545,6 +4217,8 @@ class _LeaveTab(QWidget):
                 lay.addWidget(undo)
             lay.addStretch()
             self._table.setCellWidget(i, 7, actions)
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table, stretch=1)
 
     def _decide(self, row: dict, what: str):
         who = row.get("employee_name") or row.get("employee_id")
@@ -3624,11 +4298,11 @@ class _LogsTab(QWidget):
         self._date_filter.setFixedWidth(130)
         filter_row.addWidget(self._date_filter)
 
-        search_btn = _btn("🔍  Search", variant="primary", height=34, width=110)
+        search_btn = _btn("Search", variant="primary", height=40, width=110)
         search_btn.clicked.connect(self._on_search_clicked)
         filter_row.addWidget(search_btn)
 
-        self._export_btn = _btn("📥  Export CSV", variant="secondary", height=34, width=140)
+        self._export_btn = _btn("Export CSV", variant="secondary", height=40, width=140)
         self._export_btn.clicked.connect(self._export_logs_csv)
         filter_row.addWidget(self._export_btn)
 
@@ -3650,9 +4324,12 @@ class _LogsTab(QWidget):
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
-        self._prev_btn  = _btn("◀  Prev", variant="secondary", height=32, width=92)
+        self._prev_btn  = _btn("Prev", variant="secondary", height=36, width=96)
+        self._prev_btn.setIcon(_icons.icon("chevron-left", 14, C["text_primary"]))
         self._prev_btn.clicked.connect(self._prev_page)
-        self._next_btn  = _btn("Next  ▶", variant="secondary", height=32, width=92)
+        self._next_btn  = _btn("Next", variant="secondary", height=36, width=96)
+        self._next_btn.setIcon(_icons.icon("chevron-right", 14, C["text_primary"]))
+        self._next_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._next_btn.clicked.connect(self._next_page)
         self._page_label = _muted_label("Page 1")
         pag_row.addWidget(self._prev_btn)
@@ -3702,6 +4379,8 @@ class _LogsTab(QWidget):
         self._page_label.setText(f"Page {self._page}  •  Total: {total}")
         self._prev_btn.setEnabled(self._page > 1)
         self._next_btn.setEnabled(self._page * 50 < total)
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table, stretch=2)
 
     def _export_logs_csv(self):
         if not self._logs:
@@ -3726,7 +4405,7 @@ class _LogsTab(QWidget):
 
         def _done(all_rows):
             self._export_btn.setEnabled(True)
-            self._export_btn.setText("📥  Export CSV")
+            self._export_btn.setText("Export CSV")
             headers = ["ID", "Employee ID", "Activity", "Timestamp (IST)"]
             rows = [[r.get("id", ""), r.get("employee_id", ""),
                      r.get("activity", ""), _fmt_ts(r.get("created_at"))]
@@ -3739,7 +4418,7 @@ class _LogsTab(QWidget):
 
         def _fail(e):
             self._export_btn.setEnabled(True)
-            self._export_btn.setText("📥  Export CSV")
+            self._export_btn.setText("Export CSV")
             QMessageBox.warning(self, "Export failed", str(e))
 
         w = _ExportWorker(f"{API_BASE_URL}/admin/logs", params, page_size=50)
@@ -3822,11 +4501,12 @@ class _AlertsTab(QWidget):
 
         self._headline = QLabel("Checking…")
         self._headline.setStyleSheet(
-            f"color:{C['text_primary']};font-size:14px;font-weight:700;background:transparent;")
+            f"color:{C['text_primary']};font-size:13px;font-weight:700;background:transparent;")
         bar.addWidget(self._headline)
         bar.addStretch()
 
-        self._again = _btn("\u21bb  Check now", variant="secondary", height=34)
+        self._again = _btn("Check now", variant="secondary", height=40)
+        self._again.setIcon(_icons.icon("refresh-cw", 15, C["text_primary"]))
         self._again.clicked.connect(self.refresh)
         bar.addWidget(self._again)
         root.addWidget(bar_card)
@@ -3849,7 +4529,7 @@ class _AlertsTab(QWidget):
             "One disappears when it stops being true. Thresholds live in Configuration.")
         self._note.setWordWrap(True)
         self._note.setStyleSheet(
-            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+            f"color:{C['text_muted']};font-size:12px;background:transparent;")
         root.addWidget(self._note)
 
     # ── data ────────────────────────────────────────────────────────────
@@ -3872,7 +4552,7 @@ class _AlertsTab(QWidget):
         if data.get("enabled") is False:
             self._headline.setText("Alerts are switched off in Configuration.")
         elif not self._alerts:
-            self._headline.setText("\u2713  Nothing needs attention.")
+            self._headline.setText("Nothing needs attention.")
         else:
             counts = data.get("counts") or {}
             parts = [f"{counts.get(k, 0)} {k.lower()}" for k in ("HIGH", "MEDIUM", "LOW")
@@ -3891,9 +4571,18 @@ class _AlertsTab(QWidget):
             what.setForeground(QColor(C[colour_key]))
             self._table.setItem(row, 2, what)
             self._table.setItem(row, 3, _cell(alert.get("detail") or "", muted=True))
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table)
 
 
 class _ReportsTab(QWidget):
+    """Attendance over a range, generated on request.
+
+    NO AUTO-REFRESH, DELIBERATELY. A report is the answer to a question
+    somebody asked with the Generate button; re-running it on a timer would
+    make a costly query every minute and could move the rows out from under
+    whoever is reading them.
+    """
 
     # LEAVE IS ITS OWN COLUMN, beside Absent rather than inside it. They are
     # different facts about a day and were the same number until leave
@@ -3949,9 +4638,9 @@ class _ReportsTab(QWidget):
         self._kind.addItem("Admin actions (audit)", "audit")
         self._kind.currentIndexChanged.connect(lambda _i: self._on_kind_changed())
 
-        run = _btn("📊  Generate", variant="primary", height=36)
+        run = _btn("Generate", variant="primary", height=36)
         run.clicked.connect(self.refresh)
-        self._export_btn = _btn("⬇  Export CSV", variant="secondary", height=36)
+        self._export_btn = _btn("Export CSV", variant="secondary", height=36)
         self._export_btn.clicked.connect(self._export)
         self._export_btn.setEnabled(False)
 
@@ -4122,6 +4811,8 @@ class _ReportsTab(QWidget):
             f"{data.get('from')} to {data.get('to')}.\n"
             f"By action: {actions}\nBy person: {people}"
             + ("\nOnly the first 5000 are shown." if data.get("truncated") else ""))
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table, stretch=0)
 
     def _populate(self, data: dict):
         # Coming back from the audit report — restore the attendance columns.
@@ -4151,13 +4842,19 @@ class _ReportsTab(QWidget):
             self._table.setItem(i, 2, _cell(str(row.get("working_days", 0)),
                                             mono=True, align_right=True))
 
+            # NUMBERS STAY NUMBERS. A chip belongs on a status, not on a
+            # count — a column of right-aligned figures is read by scanning
+            # down it, and twelve pills break that. Only the colours come
+            # from the shared mapping, so "absent red" is the same red here
+            # as on the attendance page.
             present = _cell(str(row.get("present_days", 0)), mono=True, align_right=True)
-            present.setForeground(QColor(C["success"]))
+            present.setForeground(QColor(_theme.status_fg("present")))
             self._table.setItem(i, 3, present)
 
             leave_days = row.get("leave_days", 0)
             leave = _cell(f"{float(leave_days or 0):g}", mono=True, align_right=True)
-            leave.setForeground(QColor(C["accent"] if leave_days else C["text_muted"]))
+            leave.setForeground(QColor(_theme.status_fg("on_leave") if leave_days
+                                       else C["text_muted"]))
             leave_dates = row.get("leave_dates") or []
             if leave_dates:
                 leave.setToolTip("Approved leave on:\n" + "\n".join(leave_dates))
@@ -4165,7 +4862,8 @@ class _ReportsTab(QWidget):
 
             absent_days = row.get("absent_days", 0)
             absent = _cell(str(absent_days), mono=True, align_right=True)
-            absent.setForeground(QColor(C["danger"] if absent_days else C["text_muted"]))
+            absent.setForeground(QColor(_theme.status_fg("absent") if absent_days
+                                        else C["text_muted"]))
             dates = row.get("absent_dates") or []
             if dates:
                 # The count alone prompts "which days?" every single time.
@@ -4174,7 +4872,8 @@ class _ReportsTab(QWidget):
 
             late_days = row.get("late_days", 0)
             late = _cell(str(late_days), mono=True, align_right=True)
-            late.setForeground(QColor(C["warning"] if late_days else C["text_muted"]))
+            late.setForeground(QColor(_theme.status_fg("late") if late_days
+                                      else C["text_muted"]))
             self._table.setItem(i, 6, late)
 
             self._table.setItem(i, 7, _cell(
@@ -4212,6 +4911,8 @@ class _ReportsTab(QWidget):
             f"Weekly offs and holidays are not counted as absences. "
             f"Hover an absent count to see the dates."
         )
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table, stretch=0)
 
     def _export(self):
         if not self._rows:
@@ -4307,17 +5008,36 @@ class _AttendanceTab(QWidget):
         filter_row.setContentsMargins(18, 12, 18, 12)
         filter_row.setSpacing(10)
 
-        filter_row.addWidget(_muted_label("Employee ID"))
+        # NO LABEL BESIDE EVERY CONTROL.
+        #
+        # The row was label, control, label, control, label, control, three
+        # buttons — eleven widgets on one line. On a 1400px window they no
+        # longer fitted, Qt squeezed each below its minimum, and the labels
+        # were drawn ON TOP of the fields: "From" over the date box, "Show"
+        # over the dropdown. A placeholder says the same thing inside the
+        # control and costs no width.
         self._emp_filter = QLineEdit()
-        self._emp_filter.setPlaceholderText("e.g. EMP001")
-        self._emp_filter.setFixedWidth(150)
-        filter_row.addWidget(self._emp_filter)
+        self._emp_filter.setPlaceholderText("Search id or name")
+        self._emp_filter.setMinimumWidth(180)
+        self._emp_filter.setClearButtonEnabled(True)
+        self._emp_filter.returnPressed.connect(self._on_search_clicked)
+        filter_row.addWidget(self._emp_filter, 1)
 
-        filter_row.addWidget(_muted_label("Date"))
+        # A RANGE, NOT A DAY. Attendance is read in weeks and months; one day
+        # at a time made "last week" seven separate searches.
+        filter_row.addWidget(_muted_label("From"))
         self._date_filter = QDateEdit(QDate.currentDate())
         self._date_filter.setCalendarPopup(True)
-        self._date_filter.setFixedWidth(130)
+        self._date_filter.setDisplayFormat("dd MMM yyyy")
+        self._date_filter.setFixedWidth(132)
         filter_row.addWidget(self._date_filter)
+
+        filter_row.addWidget(_muted_label("to"))
+        self._date_to = QDateEdit(QDate.currentDate())
+        self._date_to.setCalendarPopup(True)
+        self._date_to.setDisplayFormat("dd MMM yyyy")
+        self._date_to.setFixedWidth(132)
+        filter_row.addWidget(self._date_to)
 
         # THE RECORD'S STATE ONLY.
         #
@@ -4329,9 +5049,8 @@ class _AttendanceTab(QWidget):
         # against their own shift, in one place; a filter for it would have
         # to repeat that rule in SQL, and a Late filter that disagreed with
         # the Late column would be worse than no filter at all.
-        filter_row.addWidget(_muted_label("Show"))
         self._status_filter = QComboBox()
-        self._status_filter.setFixedWidth(150)
+        self._status_filter.setFixedWidth(160)
         for _label, _value in (("All records", ""),
                                ("Active now", "active"),
                                ("Not signed out", "incomplete"),
@@ -4345,15 +5064,21 @@ class _AttendanceTab(QWidget):
             lambda _i: self._load(page=1))
         filter_row.addWidget(self._status_filter)
 
-        search_btn = _btn("🔍  Search", variant="primary", height=34, width=110)
+        search_btn = _btn("Search", variant="primary", height=40, width=112)
+        search_btn.setIcon(_icons.icon("search", 16, "#ffffff"))
+        search_btn.setIconSize(QSize(16, 16))
         search_btn.clicked.connect(self._on_search_clicked)
         filter_row.addWidget(search_btn)
 
-        clear_btn = _btn("✕  Clear", variant="secondary", height=34, width=80)
+        clear_btn = _btn("Clear", variant="secondary", height=40, width=92)
+        clear_btn.setIcon(_icons.icon("x", 16, C["text_secondary"]))
+        clear_btn.setIconSize(QSize(16, 16))
         clear_btn.clicked.connect(self._on_clear_clicked)
         filter_row.addWidget(clear_btn)
 
-        self._export_btn = _btn("📥  Export CSV", variant="secondary", height=34, width=140)
+        self._export_btn = _btn("Export", variant="secondary", height=40, width=112)
+        self._export_btn.setIcon(_icons.icon("download", 16, C["text_secondary"]))
+        self._export_btn.setIconSize(QSize(16, 16))
         self._export_btn.clicked.connect(self._export_attendance_csv)
         filter_row.addWidget(self._export_btn)
 
@@ -4375,29 +5100,31 @@ class _AttendanceTab(QWidget):
         header.setStretchLastSection(False)
         for column in range(10):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-        # THE NAME STRETCHES, AND HAS A FLOOR.
+        # THE NAME TAKES WHAT IS LEFT, AND NEVER LESS THAN IT NEEDS.
         #
-        # Stretch alone is not enough: nine fixed columns took almost the
-        # whole width and left the name about fifty pixels, so every person
-        # in the list read "S…", "R…", "A…" — a Name column that shows no
-        # names. A minimum section size keeps it legible, and the table
-        # scrolls sideways on a narrow window instead of crushing it.
+        # It was the stretch column with nine fixed ones beside it, so it got
+        # whatever remained — about fifty pixels — and every person read
+        # "Priy…", "Sha…", "Raj…". A Name column that cannot show a name is
+        # not a Name column. The fixed widths below are smaller than they
+        # were, and the two chip columns are wide enough for their own
+        # contents: "Completed" was being drawn as "omplete".
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setMinimumSectionSize(72)
-        self._table.setColumnWidth(0, 52)
-        self._table.setColumnWidth(1, 108)
-        # "17 Aug 2026" in full. It was 100 and elided to "17 Aug 2…", which
-        # is a date column that cannot be trusted at a glance.
-        self._table.setColumnWidth(3, 116)
-        self._table.setColumnWidth(4, 104)
-        self._table.setColumnWidth(5, 92)
-        self._table.setColumnWidth(6, 92)
-        self._table.setColumnWidth(8, 104)
-        # Wider than the rest: this one carries "Overtime 2h 15m".
-        self._table.setColumnWidth(9, 140)
-        # A running clock has to be monospaced or the row twitches sideways
-        # every second as the digits change width.
-        self._table.setColumnWidth(7, 96)
+        header.setMinimumSectionSize(64)
+        # THE HEADER STAYS PUT while the rows scroll. Qt does this for a
+        # QTableWidget by default; setting it here is a statement of intent so
+        # nobody turns the header into a scrolling row later.
+        header.setSectionsMovable(False)
+        header.setHighlightSections(False)
+        self._table.setColumnWidth(0, 52)     # id
+        self._table.setColumnWidth(1, 116)    # employee id
+        self._table.setColumnWidth(3, 104)    # date
+        self._table.setColumnWidth(4, 104)    # shift window
+        self._table.setColumnWidth(5, 88)     # check in
+        self._table.setColumnWidth(6, 88)     # check out
+        self._table.setColumnWidth(7, 92)     # hours
+        self._table.setColumnWidth(8, 128)    # attendance chip
+        self._table.setColumnWidth(9, 150)    # shift chip
+        self._table.verticalHeader().setDefaultSectionSize(52)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.itemDoubleClicked.connect(self._row_detail)
@@ -4405,9 +5132,12 @@ class _AttendanceTab(QWidget):
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
-        self._prev_btn  = _btn("◀  Prev", variant="secondary", height=32, width=92)
+        self._prev_btn  = _btn("Prev", variant="secondary", height=36, width=96)
+        self._prev_btn.setIcon(_icons.icon("chevron-left", 14, C["text_primary"]))
         self._prev_btn.clicked.connect(self._prev_page)
-        self._next_btn  = _btn("Next  ▶", variant="secondary", height=32, width=92)
+        self._next_btn  = _btn("Next", variant="secondary", height=36, width=96)
+        self._next_btn.setIcon(_icons.icon("chevron-right", 14, C["text_primary"]))
+        self._next_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._next_btn.clicked.connect(self._next_page)
         self._page_label = _muted_label("Page 1")
         pag_row.addWidget(self._prev_btn)
@@ -4424,6 +5154,7 @@ class _AttendanceTab(QWidget):
         self._user_searched = False
         self._emp_filter.clear()
         self._date_filter.setDate(QDate.currentDate())
+        self._date_to.setDate(QDate.currentDate())
         # Clear means clear. Leaving the dropdown set was how a "no results"
         # page looked like a broken list rather than an active filter.
         self._status_filter.blockSignals(True)
@@ -4507,7 +5238,8 @@ class _AttendanceTab(QWidget):
             if row.get("attendance_status") == "active" \
                     and row.get("elapsed_seconds") is not None:
                 hours.setText(_fmt_elapsed(row["elapsed_seconds"]))
-                hours.setForeground(QColor(C["success"]))
+                # The same green the Active chip uses, from the same place.
+                hours.setForeground(QColor(_theme.status_fg("active")))
                 hours.setToolTip("Still running — counted from the server's clock.")
             else:
                 hours.setText(self._hours_for(row))
@@ -4521,43 +5253,35 @@ class _AttendanceTab(QWidget):
             # happened to the record and how the shift went are now separate,
             # and neither borrows the other's words.
             record_status = row.get("attendance_status")
-            record = _cell(("● " if record_status == "active" else "")
-                           + (row.get("attendance_label") or "—"))
-            record.setForeground(QColor({
-                "active":     C["success"],
-                "completed":  C["text_secondary"],
-                "incomplete": C["warning"],
-            }.get(record_status, C["text_muted"])))
-            if record_status == "incomplete":
-                record.setToolTip(
-                    "This shift was never closed — the app was shut down "
-                    "without signing out, or the machine went offline.\n\n"
-                    "It closes automatically once the session has been gone "
-                    "long enough, at the last moment the person was seen.")
-            self._table.setItem(i, 8, record)
+            self._table.setCellWidget(i, 8, _badge_cell(
+                record_status,
+                # The badge already carries the state in its colour and its
+                # word; the dot in front was a third telling of the same
+                # thing, drawn from the text font.
+                (row.get("attendance_label") or "—"),
+                "This shift was never closed — the app was shut down without "
+                "signing out, or the machine went offline.\n\nIt closes "
+                "automatically once the session has been gone long enough, at "
+                "the last moment the person was seen."
+                if record_status == "incomplete" else None))
 
             # Older servers send neither field. A dash is the honest answer
             # there — better than colouring every row as if it were on time.
-            shift_status = row.get("shift_status") or row.get("status")
-            shift = _cell(row.get("shift_label") or row.get("status_label") or "—")
-            shift.setForeground(QColor({
-                "late":          C["danger"],
-                "early_exit":    C["warning"],
-                "overtime":      C["accent"],
-                "on_time":       C["success"],
-                "half_day":      C["accent"],
-                "on_leave":      C["accent"],
-                "day_off":       C["text_muted"],
-                "extra":         C["text_muted"],
-                "outside_shift": C["warning"],
-            }.get(shift_status, C["text_muted"])))
+            # ONE MAPPING, IN theme.status_colors. This was a dict of nine
+            # colours written here, another in the leave page and a third in
+            # payroll — so the same green meant three different things.
+            #
             # Late AND left early: the headline is lateness, but the rest is
-            # not thrown away — it is here, where somebody looking into a
-            # particular row will find it.
+            # not thrown away — it is in the tooltip, where somebody looking
+            # into a particular row will find it.
+            shift_status = row.get("shift_status") or row.get("status")
             notes = row.get("shift_notes") or []
-            if notes:
-                shift.setToolTip("Also: " + ", ".join(str(n) for n in notes))
-            self._table.setItem(i, 9, shift)
+            self._table.setCellWidget(i, 9, _badge_cell(
+                shift_status,
+                row.get("shift_label") or row.get("status_label") or "—",
+                "Also: " + ", ".join(str(n) for n in notes) if notes else None))
+        # Sized to the content, after it exists — see _fit_columns.
+        _fit_columns(self._table, stretch=2)
 
     def _row_detail(self, item):
         """One shift, opened out — and the only place it can be corrected.
@@ -4575,7 +5299,6 @@ class _AttendanceTab(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Shift #{row.get('id')} — {row.get('employee_id')}")
         dialog.setMinimumWidth(520)
-        dialog.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(14)
@@ -4625,7 +5348,7 @@ class _AttendanceTab(QWidget):
             "audit log.")
         note.setWordWrap(True)
         note.setStyleSheet(
-            f"color:{C['text_muted']};font-size:11px;background:transparent;")
+            f"color:{C['text_muted']};font-size:12px;background:transparent;")
         layout.addWidget(note)
 
         edit_row = QHBoxLayout()
@@ -4644,13 +5367,13 @@ class _AttendanceTab(QWidget):
         message = QLabel("")
         message.setWordWrap(True)
         message.setStyleSheet(
-            f"color:{C['warning']};font-size:11px;background:transparent;")
+            f"color:{C['warning']};font-size:12px;background:transparent;")
         layout.addWidget(message)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        apply_btn = _btn("Save end time", variant="primary", height=32, width=140)
-        close_btn = _btn("Close", variant="secondary", height=32, width=90)
+        apply_btn = _btn("Save end time", variant="primary", height=36, width=140)
+        close_btn = _btn("Close", variant="secondary", height=36, width=90)
         close_btn.clicked.connect(dialog.reject)
         buttons.addWidget(close_btn)
         buttons.addWidget(apply_btn)
@@ -4663,7 +5386,7 @@ class _AttendanceTab(QWidget):
                 return
             apply_btn.setEnabled(False)
             message.setStyleSheet(
-                f"color:{C['text_muted']};font-size:11px;background:transparent;")
+                f"color:{C['text_muted']};font-size:12px;background:transparent;")
             message.setText("Saving…")
 
             worker = _RequestWorker(
@@ -4677,7 +5400,7 @@ class _AttendanceTab(QWidget):
                 else:
                     apply_btn.setEnabled(True)
                     message.setStyleSheet(
-                        f"color:{C['danger']};font-size:11px;background:transparent;")
+                        f"color:{C['danger']};font-size:12px;background:transparent;")
                     # The server's own words. It knows which rule was broken —
                     # repeating them here would let the two drift apart.
                     message.setText(result.get("message") or "That could not be saved.")
@@ -4782,7 +5505,7 @@ class _AttendanceTab(QWidget):
 
         def _done(all_rows):
             self._export_btn.setEnabled(True)
-            self._export_btn.setText("📥  Export CSV")
+            self._export_btn.setText("Export CSV")
             headers = ["ID", "Employee ID", "Login Time (IST)", "Logout Time (IST)",
                        "Total Hours", "Status", "Late (minutes)"]
             rows = []
@@ -4811,7 +5534,7 @@ class _AttendanceTab(QWidget):
 
         def _fail(e):
             self._export_btn.setEnabled(True)
-            self._export_btn.setText("📥  Export CSV")
+            self._export_btn.setText("Export CSV")
             QMessageBox.warning(self, "Export failed", str(e))
 
         w = _ExportWorker(f"{API_BASE_URL}/attendance/all", params, page_size=50)
@@ -4826,7 +5549,6 @@ class EmployeeDetailsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Employee Details")
         self.setMinimumWidth(760)
-        self.setStyleSheet(f"QDialog {{ background: {C['bg_app']}; }}")
         self._employee = employee
 
         self._workers: list[QThread] = []
@@ -4890,7 +5612,7 @@ class EmployeeDetailsDialog(QDialog):
                  or self._employee.get("username") or "—")
         title = QLabel(str(shown))
         title.setTextFormat(Qt.TextFormat.PlainText)
-        title.setStyleSheet(f"color:{C['text_primary']}; font-size:17px; font-weight:700; background:transparent;")
+        title.setStyleSheet(f"color:{C['text_primary']}; font-size:18px; font-weight:700; background:transparent;")
         who.addWidget(title)
         sub = QLabel(f"{self._employee.get('employee_id', '—')}  ·  "
                      f"{self._employee.get('username', '—')}")
@@ -4903,7 +5625,7 @@ class EmployeeDetailsDialog(QDialog):
         role_pill = QLabel(str(self._employee.get('role', '—')).replace("_", " ").title())
         role_pill.setStyleSheet(
             f"background:{C['accent_soft']}; color:{C['accent_hover']}; padding:4px 12px; "
-            "border-radius:10px; font-size:11px; font-weight:700;"
+            "border-radius:12px; font-size:12px; font-weight:700;"
         )
         name_row.addWidget(role_pill)
         h_lay.addLayout(name_row)
@@ -4928,7 +5650,7 @@ class EmployeeDetailsDialog(QDialog):
             row, column = index % 3, (index // 3) * 2
             label = QLabel(caption)
             label.setStyleSheet(
-                f"color:{C['text_muted']}; font-size:11px; background:transparent;")
+                f"color:{C['text_muted']}; font-size:12px; background:transparent;")
             value = QLabel("—")
             # PLAIN TEXT. These are values somebody typed, and a QLabel
             # renders HTML by default — a name written as markup would be
@@ -4952,9 +5674,9 @@ class EmployeeDetailsDialog(QDialog):
         stats_grid = QGridLayout()
         stats_grid.setSpacing(14)
         self._active_time = StatCard("Active Time",   ACCENTS["green"],  "⏱")
-        self._idle_time   = StatCard("Idle Time",      ACCENTS["amber"], "💤")
-        self._shot_count  = StatCard("Screenshots",    ACCENTS["violet"], "📸")
-        self._log_count   = StatCard("Activity Logs",  ACCENTS["cyan"],  "📝")
+        self._idle_time   = StatCard("Idle Time",      ACCENTS["amber"], "")
+        self._shot_count  = StatCard("Screenshots",    ACCENTS["violet"], "")
+        self._log_count   = StatCard("Activity Logs",  ACCENTS["cyan"],"")
         for i, c in enumerate([self._active_time, self._idle_time, self._shot_count, self._log_count]):
             stats_grid.addWidget(c, 0, i)
         root.addLayout(stats_grid)
@@ -4968,7 +5690,7 @@ class EmployeeDetailsDialog(QDialog):
         self._logs_table.horizontalHeader().setStretchLastSection(True)
         self._logs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._logs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._logs_table.setAlternatingRowColors(True)
+        self._logs_table.setAlternatingRowColors(False)  # zebra striping competes with the data
         self._logs_table.setShowGrid(False)
         self._logs_table.verticalHeader().setVisible(False)
         root.addWidget(self._logs_table, 1)
@@ -5205,7 +5927,7 @@ class _EmployeesTab(QWidget):
         header.setSpacing(10)
 
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍  Search by name, Employee ID, username or role")
+        self._search_input.setPlaceholderText("Search by name, Employee ID, username or role")
         self._search_input.setFixedHeight(38)
         self._search_input.textChanged.connect(self._on_search_changed)
         header.addWidget(self._search_input, 1)
@@ -5215,7 +5937,7 @@ class _EmployeesTab(QWidget):
             f"color:{C['text_secondary']};font-size:12px;font-weight:600;background:transparent;"
         )
 
-        self._export_btn = _btn("📥  Export CSV", variant="secondary", height=38, width=140)
+        self._export_btn = _btn("Export CSV", variant="secondary", height=38, width=140)
         self._export_btn.clicked.connect(self._export_employees_csv)
         header.addWidget(self._export_btn)
 
@@ -5248,16 +5970,19 @@ class _EmployeesTab(QWidget):
 
         # Action buttons 30px ke hain + 4px upar-neeche margin = 38px. 42px
         # ki default row me wo thik se saans nahi le pate.
-        self._table.verticalHeader().setDefaultSectionSize(48)
+        self._table.verticalHeader().setDefaultSectionSize(52)
 
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         root.addWidget(self._table, 1)
 
         pag_row = QHBoxLayout()
-        self._prev_btn = _btn("◀  Prev", variant="secondary", height=32, width=92)
+        self._prev_btn = _btn("Prev", variant="secondary", height=36, width=96)
+        self._prev_btn.setIcon(_icons.icon("chevron-left", 14, C["text_primary"]))
         self._prev_btn.clicked.connect(self._prev_page)
-        self._next_btn = _btn("Next  ▶", variant="secondary", height=32, width=92)
+        self._next_btn = _btn("Next", variant="secondary", height=36, width=96)
+        self._next_btn.setIcon(_icons.icon("chevron-right", 14, C["text_primary"]))
+        self._next_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._next_btn.clicked.connect(self._next_page)
         self._page_label = _muted_label("Page 1")
         pag_row.addWidget(self._prev_btn)
@@ -5269,19 +5994,19 @@ class _EmployeesTab(QWidget):
     def _role_label(self, role: str) -> str:
         r = (role or "").lower()
         if r == "super_admin":
-            return "👑 Super Admin"
+            return " Super Admin"
         if r == "admin":
-            return "🛡 Admin"
+            return " Admin"
         return "Employee"
 
     def _status_to_text_color(self, status: str):
         s = (status or "").lower()
         if s in ("online", "online_user"):
-            return "🟢 Online", C["success"]
+            return " Online", C["success"]
         if s in ("idle", "idling"):
-            return "🟡 Idle", C["warning"]
+            return " Idle", C["warning"]
         if s in ("offline", "logged_out", "disconnected"):
-            return "🔴 Offline", C["danger"]
+            return " Offline", C["danger"]
         return f"{status}", C["text_secondary"]
 
     def _load_employees(self, page: int | None = None):
@@ -5316,9 +6041,9 @@ class _EmployeesTab(QWidget):
             a_max  = limits.get("admin", 20)
             near = (supers >= s_max) or (admins >= a_max)
             self._role_summary.setText(
-                f"👑 {supers}/{s_max} super admins     "
-                f"🛡 {admins}/{a_max} admins     "
-                f"👤 {emps} employees"
+                f"{supers}/{s_max} super admins"
+                f"{admins}/{a_max} admins"
+                f"{emps} employees"
             )
             self._role_summary.setStyleSheet(
                 f"color:{C['warning'] if near else C['text_secondary']};"
@@ -5447,15 +6172,15 @@ class _EmployeesTab(QWidget):
             actions_layout.setContentsMargins(6, 4, 6, 4)
             actions_layout.setSpacing(8)
 
-            view_btn = _btn("View", variant="secondary", height=30, width=88)
+            view_btn = _btn("View", variant="secondary", height=36, width=88)
             view_btn.clicked.connect(lambda _=False, e=emp: self._open_details(e))
 
-            manage_btn = _btn("Manage  ▾", variant="secondary", height=30, width=108)
+            manage_btn = _btn("Manage  ▾", variant="secondary", height=36, width=108)
             menu = QMenu(manage_btn)
             menu.setStyleSheet(
                 f"QMenu{{background:{C['bg_surface']};border:1px solid {C['border']};"
-                f"border-radius:8px;padding:6px;color:{C['text_primary']};}}"
-                "QMenu::item{padding:8px 18px;border-radius:6px;font-size:13px;}"
+                f"border-radius:12px;padding:6px;color:{C['text_primary']};}}"
+                "QMenu::item{padding:8px 18px;border-radius:12px;font-size:13px;}"
                 f"QMenu::item:selected{{background:{C['accent']};color:#ffffff;}}"
                 f"QMenu::item:disabled{{color:{C['text_muted']};}}"
                 f"QMenu::separator{{height:1px;background:{C['border']};margin:5px 4px;}}"
@@ -5476,7 +6201,7 @@ class _EmployeesTab(QWidget):
             # one afterwards.
             can_rename = i_am_super or (not tgt_super and (not tgt_admin or is_self))
             add_action(
-                "✏️  Edit name",
+"️  Edit name",
                 lambda _=False, e=emp: self._edit_profile(e),
                 enabled=can_rename,
                 tip="" if can_rename else (
@@ -5490,8 +6215,8 @@ class _EmployeesTab(QWidget):
             verbose_on = bool(emp.get("verbose_logging"))
             can_config = i_am_super or (not tgt_super and (not tgt_admin or is_self))
             add_action(
-                "🔕  Turn verbose logging OFF" if verbose_on
-                else "🔔  Turn verbose logging ON",
+"Turn verbose logging OFF" if verbose_on
+                else "Turn verbose logging ON",
                 lambda _=False, e=emp: self._toggle_verbose(e),
                 enabled=can_config,
                 tip="" if can_config else (
@@ -5530,7 +6255,7 @@ class _EmployeesTab(QWidget):
                                if tgt_super else
                                "Admins cannot suspend other admins — ask a super admin.")
             add_action(
-                "▶  Unsuspend account" if suspended else "⏸  Suspend account",
+                "Unsuspend account" if suspended else "Suspend account",
                 lambda _=False, e=emp, now=suspended: self._set_suspended(e, not now),
                 enabled=can_suspend,
                 tip=suspend_tip,
@@ -5541,7 +6266,7 @@ class _EmployeesTab(QWidget):
             # resetting another admin's password would be a way to become
             # them, so the server refuses it and the menu greys it out.
             add_action(
-                "🔑  Reset password",
+"Reset password",
                 lambda _=False, e=emp: self._reset_password(e),
                 enabled=can_config,
                 tip="" if can_config else (
@@ -5553,17 +6278,17 @@ class _EmployeesTab(QWidget):
             if i_am_super and not is_self:
                 menu.addSeparator()
                 if tgt_super:
-                    add_action("⬇  Remove super admin",
+                    add_action("Remove super admin",
                                lambda _=False, e=emp: self._change_role(e, "admin"))
                 else:
                     add_action(
-                        "⬇  Make employee" if tgt_admin else "⬆  Make admin",
+"Make employee" if tgt_admin else "Make admin",
                         lambda _=False, e=emp: self._change_role(e),
                     )
                     if tgt_admin:
                         # POWER TRANSFER — super admin apni power kisi doosre
                         # admin ko de sakta hai; isi ke baad wo khud hat sakta hai.
-                        add_action("👑  Make super admin",
+                        add_action("Make super admin",
                                    lambda _=False, e=emp: self._change_role(e, "super_admin"))
 
             menu.addSeparator()
@@ -5578,7 +6303,7 @@ class _EmployeesTab(QWidget):
                 delete_tip = "Only a super admin can manage this account."
             elif tgt_admin and not i_am_super:
                 delete_tip = "Admins cannot modify other admin accounts."
-            add_action("🗑  Delete employee",
+            add_action("Delete employee",
                        lambda _=False, e=emp: self._delete_employee(e),
                        enabled=can_delete, tip=delete_tip)
 
@@ -5612,7 +6337,7 @@ class _EmployeesTab(QWidget):
         w.result.connect(lambda d: QMessageBox.information(
             self,
             "Force Logout",
-            "✅ Force logout set!" if d.get('success') else f"❌ {d.get('error')}"
+" Force logout set!" if d.get('success') else f"{d.get('error')}"
         ))
         w.error.connect(lambda e: QMessageBox.warning(self, "Error", f"Force logout failed: {e}"))
         _track_worker(self._workers, w)
@@ -5709,7 +6434,7 @@ class _EmployeesTab(QWidget):
 
             heading = QLabel(f"Temporary password for <b>{username}</b>")
             heading.setStyleSheet(
-                f"color:{C['text_primary']}; font-size:14px; background:transparent;"
+                f"color:{C['text_primary']}; font-size:13px; background:transparent;"
             )
             layout.addWidget(heading)
 
@@ -5720,7 +6445,7 @@ class _EmployeesTab(QWidget):
             field.setObjectName("tempPwd")
             field.setStyleSheet(
                 f"#tempPwd {{ background:{C['bg_elevated']}; color:{C['text_primary']};"
-                f" border:1px solid {C['accent']}; border-radius:8px;"
+                f" border:1px solid {C['accent']}; border-radius:12px;"
                 f" font-family:'SF Mono','Menlo','Consolas',monospace;"
                 f" font-size:16px; letter-spacing:1px; }}"
             )
@@ -5740,14 +6465,14 @@ class _EmployeesTab(QWidget):
 
             buttons = QHBoxLayout()
             buttons.addStretch()
-            copy_btn = _btn("📋  Copy", variant="primary", height=36)
+            copy_btn = _btn("Copy", variant="primary", height=36)
             done_btn = _btn("Done", variant="secondary", height=36)
 
             def copy_it():
                 QApplication.clipboard().setText(temporary)
-                copy_btn.setText("✓  Copied")
+                copy_btn.setText("Copied")
                 # Back to normal so a second copy is obviously possible.
-                QTimer.singleShot(1800, lambda: copy_btn.setText("📋  Copy"))
+                QTimer.singleShot(1800, lambda: copy_btn.setText("Copy"))
 
             copy_btn.clicked.connect(copy_it)
             done_btn.clicked.connect(dialog.accept)
@@ -5779,7 +6504,7 @@ class _EmployeesTab(QWidget):
         )
         w.result.connect(lambda d: (
             self._load_employees() if d.get("success")
-            else QMessageBox.warning(self, "Error", f"❌ {d.get('error', 'Toggle failed')}")
+            else QMessageBox.warning(self, "Error", f"{d.get('error', 'Toggle failed')}")
         ))
         w.error.connect(lambda e: QMessageBox.warning(self, "Error", f"Toggle failed: {e}"))
         _track_worker(self._workers, w)
@@ -5795,7 +6520,7 @@ class _EmployeesTab(QWidget):
 
         extra = ""
         if new_role == "super_admin":
-            extra = ("\n\n⚠️  A super administrator has full access. "
+            extra = ("\n\n️  A super administrator has full access. "
                      "You cannot be removed by any other user.")
 
         reply = QMessageBox.question(
@@ -5968,7 +6693,7 @@ class _EmployeesTab(QWidget):
             "they appear in chat, reports and the audit log from now on — "
             "messages already sent keep the name they were sent under.")
         note.setWordWrap(True)
-        note.setStyleSheet(f"color:{C['text_muted']};font-size:11px;background:transparent;")
+        note.setStyleSheet(f"color:{C['text_muted']};font-size:12px;background:transparent;")
         layout.addWidget(note)
         layout.addSpacing(12)
 
@@ -6225,16 +6950,27 @@ class _Sidebar(QFrame):
     def __init__(self):
         super().__init__()
         self.setObjectName("sidebar")
-        self.setFixedWidth(248)
+        # 270 per the brief. The old 248 was chosen when the entries were a
+        # flat list with no icons.
+        self.setFixedWidth(270)
         self.logout_btn: QPushButton | None = None
         self.password_btn: QPushButton | None = None
         self._user_searched = False
         self._build()
 
     def select(self, index: int) -> None:
-        """Programmatically ek page pe jao (Dashboard ke Quick Actions se)."""
-        if 0 <= index < len(getattr(self, "_buttons", [])):
-            self._buttons[index].setChecked(True)
+        """Programmatically ek page pe jao (Dashboard ke Quick Actions se).
+
+        THROUGH THE BUTTON GROUP, NOT THROUGH self._buttons[index].
+        `index` is a position in PAGES; _buttons is in the order the menu
+        DRAWS them, and since the menu is grouped into sections those two are
+        no longer the same number. Indexing the list would open the right page
+        and highlight the wrong entry — the sort of thing that looks like a
+        rendering glitch and is actually a wrong lookup.
+        """
+        button = self._group.button(index)
+        if button is not None:
+            button.setChecked(True)
             self.pageChanged.emit(index)
 
     def _build(self):
@@ -6242,36 +6978,52 @@ class _Sidebar(QFrame):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Brand
+        # Brand — one line, not three.
+        #
+        # "AMAZE" / "Connect" / "Admin Console" stacked in three weights and
+        # three colours took 90px of the sidebar to say a name that is also
+        # in the window's title bar. A mark and a word is what products of
+        # this kind put here.
+        # ONE LOCK-UP, in widgets/brand.py, so the sidebar, the login window
+        # and anywhere else showing the brand cannot drift apart. The tile
+        # used to be the letter "A" set in the interface font on a flat blue
+        # square — which reads as a placeholder, because the one thing a mark
+        # must not look like is text in a box.
         brand = QWidget()
-        b_lay = QVBoxLayout(brand)
-        b_lay.setContentsMargins(24, 28, 24, 20)
-        b_lay.setSpacing(2)
-
-        badge = QLabel("AMAZE")
-        badge.setStyleSheet(f"color:{C['accent']}; font-size:13px; font-weight:800; background:transparent;")
-        title = QLabel("Connect")
-        title.setWordWrap(True)
-        title.setStyleSheet(f"color:{C['text_primary']}; font-size:16px; font-weight:700; background:transparent;")
-        sub = QLabel("Admin Console")
-        sub.setStyleSheet(f"color:{C['text_muted']}; font-size:11px; font-weight:600; background:transparent;")
-
-        b_lay.addWidget(badge)
-        b_lay.addWidget(title)
-        b_lay.addWidget(sub)
+        b_lay = QHBoxLayout(brand)
+        b_lay.setContentsMargins(Space.MD, Space.MD, Space.MD, Space.SM)
+        b_lay.setSpacing(0)
+        b_lay.addWidget(_BrandLockup("Admin Console", 40))
         root.addWidget(brand)
-        root.addWidget(_divider())
 
-        # Nav
+        # Nav — INSIDE A SCROLL AREA.
+        #
+        # On a 900px window the last entry was cut in half: fifteen rows plus
+        # six headings plus the user card do not fit, and a fixed column
+        # simply clipped whatever came last. Configuration was unreachable
+        # without resizing the window, which is the worst kind of bug —
+        # invisible on the machine it was built on.
+        nav_scroll = QScrollArea()
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # A SCROLLBAR THAT CAN BE SEEN. The panel's global rule draws it in
+        # the border colour, which on the sidebar's own background is very
+        # nearly invisible — so a menu that scrolled looked like a menu that
+        # ended. Wider and lighter, here only.
+        nav_scroll.setStyleSheet(
+            f"QScrollArea{{background:transparent;border:none;}}"
+            f"QScrollBar:vertical{{background:transparent;width:8px;margin:4px 2px;}}"
+            f"QScrollBar::handle:vertical{{background:{C['text_muted']};"
+            f"border-radius:12px;min-height:40px;}}"
+            f"QScrollBar::handle:vertical:hover{{background:{C['text_secondary']};}}"
+            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}")
         nav_wrap = QWidget()
+        nav_wrap.setStyleSheet("background:transparent;")
         nav_lay = QVBoxLayout(nav_wrap)
-        nav_lay.setContentsMargins(0, 18, 0, 0)
+        nav_lay.setContentsMargins(Space.SM, Space.SM, Space.SM, Space.SM)
         nav_lay.setSpacing(2)
-
-        eyebrow = QLabel("MAIN MENU")
-        eyebrow.setStyleSheet(f"color:{C['text_muted']}; font-size:10px; font-weight:700; background:transparent;")
-        eyebrow.setContentsMargins(19, 0, 0, 10)
-        nav_lay.addWidget(eyebrow)
 
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
@@ -6280,20 +7032,80 @@ class _Sidebar(QFrame):
         # its own button without counting menu entries.
         self._nav_by_key: dict = {}
         self._nav_base_text: dict = {}
-        for i, page in enumerate(PAGES):
-            label = f"{page['icon']}    {page['title']}"
-            btn = QPushButton(label)
-            btn.setProperty("variant", "navitem")
-            btn.setCheckable(True)
-            btn.setFixedHeight(42)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._group.addButton(btn, i)
-            nav_lay.addWidget(btn)
-            self._buttons.append(btn)
-            self._nav_by_key[page["key"]] = btn
-            self._nav_base_text[page["key"]] = label
 
-        self._buttons[0].setChecked(True)
+        # THE BUTTON'S ID IS ITS INDEX IN PAGES, NOT ITS POSITION ON SCREEN.
+        # The menu is grouped now, so the two are no longer the same number —
+        # and everything else in this panel (select(), the page stack, the
+        # profile jump) indexes into PAGES. Reordering the sections must not
+        # be able to open the wrong page.
+        by_key = {page["key"]: (i, page) for i, page in enumerate(PAGES)}
+        placed = set()
+
+        def add_section(heading: str, keys: list):
+            entries = [by_key[k] for k in keys if k in by_key]
+            if not entries:
+                return
+            label = QLabel(heading)
+            label.setStyleSheet(
+                f"color:{C['text_muted']};font-size:{Type.MICRO}px;"
+                f"font-weight:600;background:transparent;letter-spacing:0.6px;")
+            # SPACE ABOVE, NOT BELOW. A heading sitting hard against the last
+            # entry of the previous section reads as a label for that entry —
+            # which is exactly how it looked: "PEOPLE" appeared to belong to
+            # Alerts.
+            label.setContentsMargins(Space.SM, 0, 0, 2)
+            nav_lay.addSpacing(Space.XS)
+            nav_lay.addWidget(label)
+            for index, page in entries:
+                # && for the same reason NavButton documents: Qt would eat
+                # the ampersand in "Teams & Chat" as a mnemonic.
+                btn = QPushButton(f"   {page['title'].replace('&', '&&')}")
+                btn.setProperty("variant", "navitem")
+                btn.setCheckable(True)
+                # 40. Fifteen rows, six headings and a user card do not fit a
+                # 950px window at 44, so everything below Monitoring could be
+                # reached only by scrolling — past a hairline scrollbar nobody
+                # notices. Four pixels a row is sixty pixels back.
+                btn.setFixedHeight(40)
+                btn.setIconSize(QSize(18, 18))
+                btn.setIcon(_icons.icon(page["key"], 18, C["text_secondary"]))
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                # WRAPPED. These subtitles are sentences; unwrapped, the
+                # Payroll one drew 953px wide across the whole window.
+                btn.setToolTip(_theme.tip(page["subtitle"]))
+                self._group.addButton(btn, index)
+                nav_lay.addWidget(btn)
+                self._buttons.append(btn)
+                self._nav_by_key[page["key"]] = btn
+                self._nav_base_text[page["key"]] = \
+                    f"   {page['title'].replace('&', '&&')}"
+                placed.add(page["key"])
+
+        # THE ICON FOLLOWS THE ROW'S STATE. An icon is baked into a pixmap at
+        # one colour, so the active row would keep a muted glyph beside white
+        # text without this.
+        def _retint(checked_button):
+            for key, button in self._nav_by_key.items():
+                button.setIcon(_icons.icon(
+                    key, 18,
+                    C["text_primary"] if button is checked_button
+                    else C["text_secondary"]))
+
+        self._group.buttonToggled.connect(
+            lambda button, on: _retint(button) if on else None)
+
+        for heading, keys in NAV_SECTIONS:
+            add_section(heading, keys)
+
+        # ANY PAGE NOT LISTED IN A SECTION STILL APPEARS. Adding a page and
+        # forgetting to file it would otherwise make it unreachable — a menu
+        # that silently hides features is worse than an ugly one.
+        add_section("OTHER", [p["key"] for p in PAGES if p["key"] not in placed])
+
+        # The dashboard, by key. _buttons[0] happens to be the same button
+        # today and would stop being it the moment the sections are reordered.
+        if self._nav_by_key.get("dashboard") is not None:
+            self._nav_by_key["dashboard"].setChecked(True)
         self._group.idClicked.connect(self.pageChanged.emit)
 
         # An unread count on the menu itself.
@@ -6308,13 +7120,17 @@ class _Sidebar(QFrame):
         # drifts when the sidebar is resized, and this cannot.
 
         nav_lay.addStretch()
-        root.addWidget(nav_wrap, 1)
+        nav_scroll.setWidget(nav_wrap)
+        root.addWidget(nav_scroll, 1)
 
         # Footer
         footer = QWidget()
         f_lay = QVBoxLayout(footer)
-        f_lay.setContentsMargins(16, 12, 16, 18)
-        f_lay.setSpacing(12)
+        # Tighter than it was. The card, its two buttons and their margins
+        # took a quarter of the sidebar's height, which is what pushed the
+        # last two sections of the menu out of sight on a 950px window.
+        f_lay.setContentsMargins(Space.SM, Space.XS, Space.SM, Space.SM)
+        f_lay.setSpacing(Space.XS)
         f_lay.addWidget(_divider())
 
         role_row = QHBoxLayout()
@@ -6344,7 +7160,7 @@ class _Sidebar(QFrame):
         name = QLabel(display_name)
         name.setStyleSheet(f"color:{C['text_primary']}; font-size:12px; font-weight:700; background:transparent;")
         role = QLabel(role_text)
-        role.setStyleSheet(f"color:{C['text_muted']}; font-size:10px; background:transparent;")
+        role.setStyleSheet(f"color:{C['text_muted']}; font-size:12px; background:transparent;")
         role_col.addWidget(name)
         role_col.addWidget(role)
 
@@ -6358,14 +7174,32 @@ class _Sidebar(QFrame):
         role_row.addWidget(avatar)
         role_row.addLayout(role_col)
         role_row.addStretch()
+        # A signed-in user is, by definition, online. Small and green, the
+        # way every product of this kind marks it.
+        # A DRAWN DOT, NOT THE CHARACTER "●". Its size came from the font,
+        # so it changed with the type scale and never sat level with the text
+        # beside it — and a font without the glyph draws nothing at all.
+        dot = QLabel()
+        dot.setToolTip("Signed in")
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet(_theme.dot_style(8, C["success"]))
+        role_row.addWidget(dot)
         f_lay.addLayout(role_row)
 
         # Admins are accounts too — before this there was no way for one to
         # change their own password anywhere in the app.
-        self.password_btn = _btn("🔑  Change Password", variant="secondary", height=34)
+        # Lucide, not emoji. A 🔑 and a 🔒 are drawn by the operating
+        # system's colour font: they arrive at their own weight and their own
+        # palette, and two of them side by side never match each other or the
+        # text they sit beside.
+        self.password_btn = _btn("Change Password", variant="secondary", height=40)
+        self.password_btn.setIcon(_icons.icon("key-round", 16, C["text_secondary"]))
+        self.password_btn.setIconSize(QSize(16, 16))
         f_lay.addWidget(self.password_btn)
 
-        self.logout_btn = _btn("🔒  Logout", variant="danger", height=38)
+        self.logout_btn = _btn("Logout", variant="danger", height=40)
+        self.logout_btn.setIcon(_icons.icon("log-out", 16, C["danger"]))
+        self.logout_btn.setIconSize(QSize(16, 16))
         f_lay.addWidget(self.logout_btn)
 
         root.addWidget(footer)
@@ -6385,6 +7219,19 @@ class _Sidebar(QFrame):
         button.setText(base if count == 0
                        else f"{base}   ({count if count < 100 else '99+'})")
 
+        # AND IT TURNS RED.
+        #
+        # The count was drawn in the same grey as every other menu entry, so
+        # it read as part of the label rather than as something waiting.
+        # Reported after it worked: "3 dikha, but dhyan hi nahi gaya."
+        #
+        # A dynamic property rather than a stylesheet per button: Qt can
+        # restyle by property, and setting a sheet on one row would lose the
+        # hover and active rules the sidebar's own sheet gives it.
+        button.setProperty("unread", "true" if count else "false")
+        button.style().unpolish(button)
+        button.style().polish(button)
+
 
 class _TopHeader(QFrame):
     """
@@ -6402,6 +7249,7 @@ class _TopHeader(QFrame):
     sync_clicked    = Signal()
     theme_clicked   = Signal()
     profile_clicked = Signal()
+    bell_clicked    = Signal()
 
     def __init__(self):
         super().__init__()
@@ -6412,59 +7260,102 @@ class _TopHeader(QFrame):
         lay.setContentsMargins(28, 0, 28, 0)
         lay.setSpacing(10)
 
+        # THE HEADING NAMES THE PAGE, NOT THE PRODUCT.
+        #
+        # It said "Amaze Connect" on all fifteen pages. The product's name is
+        # already in the sidebar and on the window's own title bar; repeating
+        # it here spent the largest text on the screen saying the one thing
+        # the reader could not possibly need, and left the actual page name in
+        # small grey type below it, prefixed by an emoji.
+        #
+        # A breadcrumb above it says where that page sits — Amaze Connect ›
+        # Time & Pay — which is the piece a grouped menu makes meaningful.
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
-        self._title = QLabel("Amaze Connect")
+        self._crumb = QLabel("Amaze Connect")
+        self._crumb.setStyleSheet(
+            f"color:{C['text_muted']};font-size:{_theme.Type.MICRO}px;"
+            f"font-weight:{_theme.Weight.SEMIBOLD};background:transparent;"
+            f"letter-spacing:0.4px;")
+        self._title = QLabel("Dashboard")
         self._title.setStyleSheet(
-            f"color:{C['text_primary']}; font-size:22px; font-weight:800; background:transparent;"
-        )
-        self._subtitle = QLabel("Real-time Monitoring & Management")
+            f"color:{C['text_primary']};font-size:{_theme.Type.TITLE}px;"
+            f"font-weight:800;background:transparent;")
+        self._subtitle = QLabel("")
         self._subtitle.setStyleSheet(
-            f"color:{C['text_secondary']}; font-size:12px; background:transparent;"
-        )
+            f"color:{C['text_secondary']};font-size:{_theme.Type.SMALL}px;"
+            f"background:transparent;")
+        text_col.addWidget(self._crumb)
         text_col.addWidget(self._title)
         text_col.addWidget(self._subtitle)
         lay.addLayout(text_col)
         lay.addStretch()
 
-        def action(icon, label, slot):
-            btn = QPushButton(f"  {icon}   {label}")
+        def action(icon_name, label, slot):
+            btn = QPushButton(f"  {label}")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setFixedHeight(44)
+            btn.setFixedHeight(40)
+            btn.setIcon(_icons.icon(icon_name, 16, C["text_secondary"]))
+            btn.setIconSize(QSize(16, 16))
             btn.setStyleSheet(
-                f"QPushButton{{background:{C['bg_surface']};border:1px solid {C['border']};"
-                f"border-radius:10px;color:{C['text_primary']};font-size:13px;"
-                f"font-weight:600;padding:0 16px;}}"
-                f"QPushButton:hover{{background:{C['bg_elevated']};border-color:{C['accent']};}}"
+                f"QPushButton{{background:{C['bg_surface']};"
+                f"border:1px solid {C['border']};"
+                f"border-radius:{_theme.Radius.CONTROL}px;color:{C['text_primary']};"
+                f"font-size:{_theme.Type.BODY}px;font-weight:500;padding:0 16px;}}"
+                f"QPushButton:hover{{background:{C['hover']};"
+                f"border-color:{C['border_light']};}}"
                 f"QPushButton:disabled{{color:{C['text_muted']};}}"
             )
             btn.clicked.connect(slot)
             lay.addWidget(btn)
             return btn
 
+        # WHAT NEEDS SOMEBODY, AND HOW MANY OF IT.
+        #
+        # There was no such indicator at all: leave requests waited until an
+        # administrator happened to open the Leave page, and shifts left open
+        # were found only by scrolling attendance. Both are things a person
+        # has to do, and neither had anywhere to say so.
+        #
+        # It shows a number or it shows nothing. A bell that is always lit
+        # stops being read within a week.
+        self.btn_bell = QPushButton("")
+        self.btn_bell.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_bell.setFixedSize(40, 40)
+        self.btn_bell.setIcon(_icons.icon("bell", 18, C["text_secondary"]))
+        self.btn_bell.setIconSize(QSize(18, 18))
+        self.btn_bell.setToolTip("Nothing is waiting.")
+        self.btn_bell.clicked.connect(self.bell_clicked.emit)
+        self._style_bell(0)
+        lay.addWidget(self.btn_bell)
+
         # The theme switch sits first, before the actions, because it is the
         # only one that changes how everything looks rather than what it says.
-        self.btn_theme = QPushButton("☀" if _theme.is_light() else "☾")
+        self.btn_theme = QPushButton("")
         self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_theme.setFixedSize(44, 44)
+        self.btn_theme.setFixedSize(40, 40)
+        self.btn_theme.setIcon(_icons.icon(
+            "sun" if _theme.is_light() else "moon", 18, C["text_secondary"]))
+        self.btn_theme.setIconSize(QSize(18, 18))
         self.btn_theme.setToolTip(
             "Switch to the dark theme" if _theme.is_light()
             else "Switch to the light theme")
         self.btn_theme.setStyleSheet(
             f"QPushButton{{background:{C['bg_surface']};border:1px solid {C['border']};"
-            f"border-radius:10px;color:{C['text_primary']};font-size:18px;}}"
-            f"QPushButton:hover{{border-color:{C['accent']};}}")
+            f"border-radius:{_theme.Radius.CONTROL}px;}}"
+            f"QPushButton:hover{{background:{C['hover']};"
+            f"border-color:{C['border_light']};}}")
         self.btn_theme.clicked.connect(self.theme_clicked.emit)
         lay.addWidget(self.btn_theme)
 
-        self.btn_refresh = action("↻", "Refresh", self.refresh_clicked.emit)
-        self.btn_export  = action("📥", "Export", self.export_clicked.emit)
-        self.btn_sync    = action("☁", "Sync Now", self.sync_clicked.emit)
+        self.btn_refresh = action("refresh-cw", "Refresh", self.refresh_clicked.emit)
+        self.btn_export  = action("download", "Export", self.export_clicked.emit)
+        self.btn_sync    = action("cloud-upload", "Sync Now", self.sync_clicked.emit)
 
         chip = QFrame()
         chip.setStyleSheet(
             f"QFrame{{background:{C['bg_surface']};border:1px solid {C['border']};"
-            f"border-radius:10px;}}"
+            f"border-radius:12px;}}"
         )
         cl = QHBoxLayout(chip)
         cl.setContentsMargins(12, 7, 16, 7)
@@ -6494,22 +7385,54 @@ class _TopHeader(QFrame):
             "Super Admin" if getattr(SessionManager, "role", "") == "super_admin" else "Admin"
         )
         self._chip_role.setStyleSheet(
-            f"color:{C['success']};font-size:11px;font-weight:600;border:none;"
+            f"color:{C['success']};font-size:12px;font-weight:600;border:none;"
         )
         who.addWidget(self._chip_id); who.addWidget(self._chip_role)
         cl.addWidget(avatar); cl.addLayout(who)
         lay.addWidget(chip)
 
-    def set_page(self, icon: str, title: str, subtitle: str):
-        # Page badalne par tagline update hoti hai; brand title fixed rehta hai.
-        #
-        # BUG FIX: pehle poori subtitle string seedha set hoti thi. Lambi
-        # subtitles (jaise Configuration ki) header ke action buttons ke
-        # NEECHE chali jaati thin — screen pe aadha text kata hua dikhta tha
-        # ("...upload frequency — g"). Ab available width ke hisaab se
-        # elide (…) hoti hai aur poora text tooltip me milta hai.
-        self._page_text = f"{icon}  {title}  ·  {subtitle}"
-        self._subtitle.setToolTip(self._page_text)
+    def _style_bell(self, count: int):
+        colour = _theme.status_fg("pending") if count else C["text_muted"]
+        border = C["accent"] if count else C["border"]
+        self.btn_bell.setStyleSheet(
+            f"QPushButton{{background:{C['bg_surface']};border:1px solid {border};"
+            f"border-radius:{_theme.Radius.CONTROL}px;color:{colour};"
+            f"font-size:{_theme.Type.MICRO}px;font-weight:600;}}"
+            f"QPushButton:hover{{background:{C['hover']};}}")
+
+    def set_attention(self, items: list):
+        """`items` is [(count, "what it is"), ...] — only non-zero ones.
+
+        The tooltip lists them rather than the button showing a total alone:
+        "3" tells somebody there is work; "2 leave requests, 1 shift never
+        signed out" tells them which page to open.
+        """
+        items = [(n, what) for n, what in items if n]
+        total = sum(n for n, _what in items)
+        self.btn_bell.setText("" if not total else
+                              f"  {total if total < 100 else '99+'}")
+        self.btn_bell.setIcon(_icons.icon(
+            "bell", 18,
+            _theme.status_fg("pending") if total else C["text_secondary"]))
+        self.btn_bell.setFixedSize(40 if not total else 64, 40)
+        self.btn_bell.setToolTip(
+            "Nothing is waiting." if not items else
+            "\n".join(f"{n}  {what}" for n, what in items))
+        self._style_bell(total)
+
+    def set_page(self, icon: str, title: str, subtitle: str, section: str = ""):
+        """Name the page, say where it sits, and describe it underneath.
+
+        The long subtitles still elide. That fix is kept as it was:
+        Configuration's runs to two lines of prose, and set loose it slid
+        under the header's buttons and was drawn cut off mid-word
+        ("...upload frequency — g"). The full text is in the tooltip.
+        """
+        self._crumb.setText(
+            f"Amaze Connect  ›  {section}" if section else "Amaze Connect")
+        self._title.setText(f"{icon}  {title}" if icon else title)
+        self._page_text = subtitle
+        self._subtitle.setToolTip(subtitle)
         self._relayout_subtitle()
 
     def _relayout_subtitle(self):
@@ -6517,8 +7440,23 @@ class _TopHeader(QFrame):
         text = getattr(self, "_page_text", "")
         if not text:
             return
-        # Buttons + chip ki jagah chhod ke jo bacha usi me fit karo.
-        available = max(200, self.width() - 700)
+        # THE RESERVE IS MEASURED, NOT GUESSED.
+        #
+        # It was a flat 700px for "the buttons and the chip". Those grew — a
+        # bell, a wider profile card, 14px labels — and the subtitle was cut
+        # mid-word with no ellipsis to show it: "…built from attendance and".
+        # Asking the row what it actually occupies cannot go stale that way.
+        reserved = 0
+        for child in (getattr(self, "btn_bell", None),
+                      getattr(self, "btn_theme", None),
+                      getattr(self, "btn_refresh", None),
+                      getattr(self, "btn_export", None),
+                      getattr(self, "btn_sync", None)):
+            if child is not None:
+                reserved += child.width() + _theme.Space.SM
+        # The identity chip on the right, plus the page's own margins.
+        reserved += 260
+        available = max(220, self.width() - reserved)
         metrics = QFontMetrics(self._subtitle.font())
         self._subtitle.setText(
             metrics.elidedText(text, Qt.TextElideMode.ElideRight, available)
@@ -6686,13 +7624,21 @@ class AdminConfigPanel(QMainWindow):
         sb = QHBoxLayout(status)
         sb.setContentsMargins(28, 0, 28, 0)
         ver = QLabel(f"Amaze Connect · Admin Console v{APP_VERSION}")
-        ver.setStyleSheet(f"color:{C['text_muted']};font-size:11px;border:none;background:transparent;")
-        self._status_server = QLabel("●  Connected to Production Server")
+        ver.setStyleSheet(f"color:{C['text_muted']};font-size:12px;border:none;background:transparent;")
+        # THE SERVER IT IS ACTUALLY TALKING TO.
+        #
+        # This said "Connected to Production Server" whatever it was connected
+        # to — a test build pointed at a laptop said it too. A status bar that
+        # cannot be wrong about the one thing it reports is worth more than a
+        # reassuring sentence, and "which server is this build on" is the
+        # first question asked when two people see different data.
+        self._status_server = QLabel(_server_label())
+        self._status_server.setToolTip(API_BASE_URL)
         self._status_server.setStyleSheet(
-            f"color:{C['success']};font-size:11px;border:none;background:transparent;"
-        )
-        enc = QLabel("🔒  Encryption: AES-256 GCM")
-        enc.setStyleSheet(f"color:{C['text_muted']};font-size:11px;border:none;background:transparent;")
+            f"color:{C['success']};font-size:{_theme.Type.MICRO}px;"
+            f"border:none;background:transparent;")
+        enc = QLabel("Encryption: AES-256 GCM")
+        enc.setStyleSheet(f"color:{C['text_muted']};font-size:12px;border:none;background:transparent;")
         sb.addWidget(ver); sb.addStretch()
         sb.addWidget(self._status_server); sb.addStretch()
         sb.addWidget(enc)
@@ -6723,13 +7669,27 @@ class AdminConfigPanel(QMainWindow):
         widgets and must re-attach these — but must NOT start a second
         scheduler or a second idle tracker.
         """
-        # Dashboard ke Quick Actions ko sidebar navigation se joda
-        for label, (btn, page_index_) in getattr(
+        # Dashboard ke Quick Actions ko sidebar navigation se joda.
+        # The key is resolved to an index HERE, once, against the live PAGES
+        # list — so inserting a page can never again silently repoint every
+        # one of these buttons at its neighbour.
+        for label, (btn, page_key) in getattr(
             self._dashboard_tab, "_quick_buttons", {}
         ).items():
+            index = next((i for i, page in enumerate(PAGES)
+                          if page["key"] == page_key), None)
+            if index is None:
+                continue
             btn.clicked.connect(
-                lambda _=False, idx=page_index_: self.sidebar.select(idx)
+                lambda _=False, idx=index: self.sidebar.select(idx)
             )
+
+        # The dashboard asks for a page BY KEY; the index is resolved here,
+        # against the live PAGES list.
+        self._dashboard_tab.open_page.connect(
+            lambda key: self.sidebar.select(
+                next((i for i, page in enumerate(PAGES)
+                      if page["key"] == key), 0)))
 
         self.sidebar.pageChanged.connect(self._on_page_changed)
         def _open_profile():
@@ -6741,6 +7701,24 @@ class AdminConfigPanel(QMainWindow):
         self.sidebar.logout_btn.clicked.connect(self.logout)
         self.sidebar.password_btn.clicked.connect(self._change_own_password)
         self.header.refresh_clicked.connect(self._refresh_current_page)
+
+        # The bell opens whichever page the biggest item belongs to. A bell
+        # that shows a count and does nothing when pressed is worse than no
+        # bell — it says there is work and refuses to say where.
+        self.header.bell_clicked.connect(self._open_attention)
+
+        # WHAT NEEDS ATTENTION, POLLED ONCE A MINUTE.
+        #
+        # Not on every page change: an administrator moving between pages
+        # would fire it constantly, and the two counts it reads are the same
+        # two on every page. A minute is well inside the time anybody takes
+        # to act on a leave request.
+        self._attention_timer = QTimer(self)
+        self._attention_timer.setInterval(60_000)
+        self._attention_timer.timeout.connect(self._load_attention)
+        self._attention_timer.start()
+        self._attention = {"leave": 0, "open_shifts": 0}
+        QTimer.singleShot(1200, self._load_attention)
         self.header.export_clicked.connect(self._export_current_page)
         self.header.sync_clicked.connect(self._sync_now)
         self.header.theme_clicked.connect(self._toggle_theme)
@@ -6750,7 +7728,21 @@ class AdminConfigPanel(QMainWindow):
     def _toggle_theme(self):
         """Switch palette, rebuild everything inside the window."""
         page_index = self.stack.currentIndex() if hasattr(self, "stack") else 0
+
+        # The chat page's own state travels across the rebuild — which channel
+        # was open, and anything typed but not sent. See TeamPage.snapshot.
+        chat_state = None
+        chat_page = getattr(self, "_mychat_tab", None)
+        if chat_page is not None and hasattr(chat_page, "snapshot"):
+            try:
+                chat_state = chat_page.snapshot()
+            except Exception:
+                chat_state = None
+
         _theme.toggle_theme()
+        # Icons are pixmaps baked at one colour; the cache would otherwise
+        # hand out the old theme's glyphs for the rest of the session.
+        _icons.clear_cache()
         self.setStyleSheet(_global_stylesheet())
         # Only the TABS are torn down — NOT the scheduler or the idle tracker.
         #
@@ -6766,6 +7758,13 @@ class AdminConfigPanel(QMainWindow):
         self._stop_tab_work()
         self._build_central()
         self._wire_central(page_index)
+
+        fresh_chat = getattr(self, "_mychat_tab", None)
+        if chat_state and fresh_chat is not None and hasattr(fresh_chat, "restore"):
+            try:
+                fresh_chat.restore(chat_state)
+            except Exception:
+                pass
 
         # The cards fed by signals rather than by a fetch have to be redrawn
         # by hand — nothing will send them their value again on its own.
@@ -6865,6 +7864,82 @@ class AdminConfigPanel(QMainWindow):
             card.set_value(str(count), "Captured today")
             card.push_point(count)
 
+    def _load_attention(self):
+        """Two counts: leave waiting on a decision, and shifts never closed.
+
+        BOTH ARE THINGS A PERSON HAS TO DO, which is the test for belonging
+        here. Alerts are deliberately not counted: they are conditions, they
+        come and go on their own, and adding them would keep the bell lit
+        permanently — at which point nobody reads it.
+        """
+        def pending(data):
+            summary = (data or {}).get("data") or {}
+            self._attention["leave"] = int(summary.get("pending") or 0)
+            self._push_attention()
+
+        def open_shifts(data):
+            board = (data or {}).get("data") or {}
+            self._attention["open_shifts"] = int(board.get("not_signed_out") or 0)
+            self._push_attention()
+
+        # The panel creates this list lazily elsewhere, and this runs on a
+        # timer that can fire before that happens.
+        self._workers = getattr(self, "_workers", [])
+        for url, handler in ((f"{API_BASE_URL}/dashboard/summary", pending),
+                             (f"{API_BASE_URL}/dashboard/today", open_shifts)):
+            worker = _FetchWorker(url, {})
+            worker.result.connect(handler)
+            # Silent on failure. A count that could not be fetched must not
+            # put an error in front of somebody doing something else.
+            worker.error.connect(lambda _e: None)
+            _track_worker(self._workers, worker)
+            worker.start()
+
+    def _push_attention(self):
+        self.header.set_attention([
+            (self._attention["leave"], "leave requests waiting on a decision"),
+            (self._attention["open_shifts"], "shifts never signed out"),
+        ])
+
+    def _open_attention(self):
+        """Offer what is waiting, and let the reader pick.
+
+        IT USED TO GUESS. Whichever count was larger won, so a bell showing
+        "1" opened Attendance when the reader expected Leave — the number is
+        a total, and a total cannot say which page it belongs to. Reported as
+        exactly that.
+
+        A menu costs one extra click and removes the guess. With nothing
+        waiting it goes straight to Alerts, because then there is nothing to
+        choose between.
+        """
+        items = [
+            (self._attention["leave"], "leave requests waiting on a decision",
+             "leave"),
+            (self._attention["open_shifts"], "shifts never signed out",
+             "attendance"),
+        ]
+        waiting = [(count, what, key) for count, what, key in items if count]
+
+        def go(key):
+            index = next((i for i, page in enumerate(PAGES)
+                          if page["key"] == key), 0)
+            self.sidebar.select(index)
+
+        if not waiting:
+            go("alerts")
+            return
+
+        menu = QMenu(self)
+        for count, what, key in waiting:
+            action = menu.addAction(f"{count}  {what}")
+            action.triggered.connect(lambda _checked=False, k=key: go(k))
+        menu.addSeparator()
+        everything = menu.addAction("Open Alerts")
+        everything.triggered.connect(lambda _checked=False: go("alerts"))
+        menu.exec(self.header.btn_bell.mapToGlobal(
+            self.header.btn_bell.rect().bottomLeft()))
+
     def _refresh_current_page(self):
         """Header ka Refresh — jo page khula hai usi ka data reload."""
         self.header.set_busy(True, "refresh")
@@ -6897,17 +7972,17 @@ class AdminConfigPanel(QMainWindow):
 
         def ok(_r):
             self.header.set_busy(False)
-            self._status_server.setText("●  Connected to Production Server")
+            self._status_server.setText(_server_label())
             self._status_server.setStyleSheet(
-                f"color:{C['success']};font-size:11px;border:none;background:transparent;"
-            )
+                f"color:{C['success']};font-size:{_theme.Type.MICRO}px;"
+                f"border:none;background:transparent;")
             self._dashboard_tab._load_all()
 
         def fail(error):
             self.header.set_busy(False)
-            self._status_server.setText("●  Server unreachable")
+            self._status_server.setText("Server unreachable")
             self._status_server.setStyleSheet(
-                f"color:{C['danger']};font-size:11px;border:none;background:transparent;"
+                f"color:{C['danger']};font-size:12px;border:none;background:transparent;"
             )
             QMessageBox.warning(self, "Sync failed", str(error))
 
@@ -6921,7 +7996,8 @@ class AdminConfigPanel(QMainWindow):
     def _on_page_changed(self, idx: int):
         self.stack.setCurrentIndex(idx)
         page = PAGES[idx]
-        self.header.set_page(page["icon"], page["title"], page["subtitle"])
+        self.header.set_page(page["icon"], page["title"], page["subtitle"],
+                             _section_of(page["key"]))
 
         # Saari tabs panel khulte waqt EK BAAR load hoti hain. Uske baad tab
         # switch karne pe kuch nahi hota tha — Attendance pe jaate to wahi
@@ -7264,21 +8340,21 @@ class AdminConfigPanel(QMainWindow):
         self.tray.setToolTip("Amaze Connect — Control Center")
 
         menu = QMenu()
-        act_open = QAction("🖥  Open Control Center", menu)
+        act_open = QAction("Open Control Center", menu)
         act_open.triggered.connect(self._restore_from_tray)
         menu.addAction(act_open)
 
-        act_refresh = QAction("↻  Refresh Current Page", menu)
+        act_refresh = QAction(_icons.icon("refresh-cw", 15, C["text_primary"]), "Refresh Current Page", menu)
         act_refresh.triggered.connect(self._refresh_current_page)
         menu.addAction(act_refresh)
 
         menu.addSeparator()
 
-        act_logout = QAction("↪  Logout", menu)
+        act_logout = QAction(_icons.icon("log-out", 15, C["danger"]), "Logout", menu)
         act_logout.triggered.connect(self.logout)
         menu.addAction(act_logout)
 
-        act_quit = QAction("🚪  Quit Amaze Connect", menu)
+        act_quit = QAction("Quit Amaze Connect", menu)
         act_quit.triggered.connect(self._quit_from_tray)
         menu.addAction(act_quit)
 

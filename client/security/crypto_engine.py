@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
-from client.core.config import SCREENSHOT_ENCRYPTION_KEY, STORAGE_DIR
+from client.core.config import (
+    SCREENSHOT_ENCRYPTION_KEY, SCREENSHOT_ENCRYPTION_KEY_RETIRED, STORAGE_DIR)
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -13,6 +14,37 @@ KEY_FILE = KEY_DIR / "device.key"
 
 AES_KEY_LENGTH = 32
 NONCE_LENGTH   = 12
+
+
+def _decode_key(text: str) -> bytes | None:
+    """A 32-byte key from base64 OR hex, or None if it is neither.
+
+    THE TRAP THIS REMOVES. .env.example said "64 hex characters: openssl rand
+    -hex 32" and the loader ran base64.b64decode on it. Hex digits are all
+    valid base64 characters, so the decode SUCCEEDED and produced 48 bytes —
+    the wrong length — and the application refused to start with "Encryption
+    key must be 32 bytes", which says nothing about the format being wrong.
+
+    Somebody following the documented instruction ended up with an app that
+    would not open, during a key rotation, which is the worst possible moment
+    to be debugging an encoding. Both forms are accepted now; the
+    documentation was corrected too.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return None
+    # Hex first: a 64-character hex string is unambiguous, while base64 would
+    # happily decode it into something of the wrong size.
+    if len(text) == AES_KEY_LENGTH * 2:
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            pass
+    try:
+        key = base64.b64decode(text, validate=True)
+    except Exception:
+        return None
+    return key if len(key) == AES_KEY_LENGTH else None
 
 
 def _load_or_create_key() -> bytes:
@@ -30,10 +62,14 @@ def _load_or_create_key() -> bytes:
 
     # If env key is set, that is the source of truth.
     if env_key:
-        key = base64.b64decode(env_key)
-        if len(key) != AES_KEY_LENGTH:
+        key = _decode_key(env_key)
+        if key is None:
             raise RuntimeError(
-                f"Encryption key must be {AES_KEY_LENGTH} bytes"
+                f"SCREENSHOT_ENCRYPTION_KEY must decode to {AES_KEY_LENGTH} "
+                f"bytes — either {AES_KEY_LENGTH * 2} hex characters "
+                f"(openssl rand -hex {AES_KEY_LENGTH}) or base64 "
+                f"(openssl rand -base64 {AES_KEY_LENGTH}). "
+                f"What is set decodes to neither."
             )
         return key
 
@@ -96,6 +132,40 @@ def _get_aesgcm() -> AESGCM:
     return AESGCM(_load_or_create_key())
 
 
+def _retired_keys() -> list[bytes]:
+    """Keys that no longer encrypt anything, but can still read old files.
+
+    WHY ROTATION NEEDED THIS. Changing SCREENSHOT_ENCRYPTION_KEY used to make
+    every screenshot already captured unreadable — decrypt_bytes knew one key
+    and it was the current one. So rotating a key meant destroying the data
+    it protected, which is why keys do not get rotated, which is why a leaked
+    one stays in service. A key you cannot afford to change is a key you are
+    stuck with.
+
+    With this, rotation is: put the new key in SCREENSHOT_ENCRYPTION_KEY, move
+    the old one to SCREENSHOT_ENCRYPTION_KEY_RETIRED, restart. New captures
+    use the new key from that moment; everything already stored still opens.
+    When the retention window has passed the last file the old key made, drop
+    it from the list and it is gone.
+
+    Malformed entries are skipped rather than raised on: a typo in a retired
+    key must not stop an application from starting, because the one key that
+    matters — the current one — is validated separately and loudly.
+    """
+    raw = SCREENSHOT_ENCRYPTION_KEY_RETIRED
+    if not raw:
+        return []
+    keys = []
+    for chunk in str(raw).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        key = _decode_key(chunk)
+        if key is not None:
+            keys.append(key)
+    return keys
+
+
 class CryptoEngine:
 
     @staticmethod
@@ -111,10 +181,23 @@ class CryptoEngine:
             raise ValueError(f"Blob too short: {len(blob)} bytes")
         nonce = blob[:NONCE_LENGTH]
         ct    = blob[NONCE_LENGTH:]
+        # The current key first — almost everything was written with it.
         try:
             return _get_aesgcm().decrypt(nonce, ct, None)
         except Exception as exc:
-            raise ValueError(f"AES-GCM decryption failed: {exc}") from exc
+            failure = exc
+
+        # THEN THE RETIRED ONES, IN ORDER. This is what makes rotating a key
+        # something other than throwing away the data it protected. AES-GCM
+        # verifies its own tag, so a key that did not make this file fails —
+        # it cannot quietly return the wrong bytes.
+        for retired in _retired_keys():
+            try:
+                return AESGCM(retired).decrypt(nonce, ct, None)
+            except Exception:
+                continue
+
+        raise ValueError(f"AES-GCM decryption failed: {failure}") from failure
 
     @staticmethod
     def save_encrypted(plaintext: bytes, dest_path: str | Path) -> Path:
