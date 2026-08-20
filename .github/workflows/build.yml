@@ -270,7 +270,30 @@ jobs:
           plutil -insert NSScreenCaptureUsageDescription \
             -string "Amaze Connect captures periodic screenshots of your work session while you are signed in, as configured by your administrator." \
             "dist/Amaze Connect.app/Contents/Info.plist"
-          plutil -p "dist/Amaze Connect.app/Contents/Info.plist" | grep -E "BundleIdentifier|ScreenCapture"
+          # THE VERSION THE SYSTEM SHOWS. PyInstaller writes 0.0.0 and never
+          # asks the code, so Get Info and the About box said 0.0.0 on a
+          # build called v1.0.1. Taken from the same constant the app reports
+          # about itself, so the two cannot disagree.
+          APP_VERSION="$(grep -oE 'APP_VERSION = "[^"]+"' client/core/config/__init__.py | cut -d'"' -f2)"
+          plutil -replace CFBundleShortVersionString -string "$APP_VERSION" \
+            "dist/Amaze Connect.app/Contents/Info.plist"
+          plutil -replace CFBundleVersion -string "$APP_VERSION" \
+            "dist/Amaze Connect.app/Contents/Info.plist"
+
+          # RE-SIGN, BECAUSE EDITING Info.plist BROKE THE SIGNATURE.
+          #
+          # PyInstaller ad-hoc signs the bundle, and every plutil line above
+          # modifies it afterwards. macOS then refuses the app outright:
+          #
+          #   invalid Info.plist (plist or signature have been modified)
+          #
+          # That is not a warning somebody can click past — it is a refusal,
+          # and it was in the v1.0.1 build that shipped. Verified on the
+          # downloaded DMG, not assumed.
+          codesign --force --deep --sign - "dist/Amaze Connect.app"
+          codesign --verify --deep --strict --verbose=2 "dist/Amaze Connect.app"
+          plutil -p "dist/Amaze Connect.app/Contents/Info.plist" \
+            | grep -E "BundleIdentifier|ScreenCapture|CFBundleShortVersion"
 
       - name: Create DMG Installer
         run: |
