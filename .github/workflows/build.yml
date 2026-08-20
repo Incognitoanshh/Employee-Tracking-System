@@ -349,10 +349,24 @@ jobs:
           sudo apt-get install -y \
             libegl1 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
-            libxcb-xinerama0 libxcb-shape0 libgl1
+            libxcb-xinerama0 libxcb-shape0 libgl1 \
+            python3-tk scrot
+          # scrot aur python3-tk pyautogui ke liye: Linux par screenshot
+          # wahi leta hai, aur wo in dono ke bina kaam nahi karta.
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
           pip install PySide6 python-dotenv pyinstaller
+          # requirements.txt EK MAC PAR `pip freeze` SE BANA HAI.
+          #
+          # Usme pyobjc hai, jo Linux par build hi nahi hota — "PyObjC
+          # requires macOS to build", aur poora job wahin ruk jaata hai. Ye
+          # pehli Linux build isi par giri.
+          #
+          # Windows job pehle se yahi karta hai (findstr /V /I "pyobjc"). Do
+          # jagah ek hi cheez, do shell me — jaisa is file me pehle se hai.
+          if [ -f requirements.txt ]; then
+            grep -vi "pyobjc" requirements.txt > req_linux.txt
+            pip install -r req_linux.txt
+          fi
 
       - name: Create client .env file
         run: |
