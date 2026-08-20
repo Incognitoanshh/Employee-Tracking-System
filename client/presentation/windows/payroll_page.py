@@ -27,6 +27,7 @@ from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
 from client.presentation.theme import C, table_style
 from client.presentation.widgets.panel_widgets import Card, PageHeader, fit_columns
+from time import monotonic
 
 
 def _headers() -> dict:
@@ -132,6 +133,25 @@ class PayrollPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # SHOWN TWICE MEANS FETCHED TWICE, AND IT WAS.
+        #
+        # A page in a QStackedWidget gets a showEvent when the stack makes it
+        # current AND again when the window itself is shown, so every one of
+        # these pages asked the server for the same data twice, six
+        # milliseconds apart. Seen in the production access log during a real
+        # login: leave/mine, payroll/mine, profile/me, profile/photo and
+        # work-summary each appear in pairs.
+        #
+        # On a link where a round trip is half a second — which is what an
+        # office in India talking to a server in Finland actually costs —
+        # that is the difference between waiting and waiting twice.
+        #
+        # Two seconds, not longer: opening a page is still meant to bring
+        # fresh data, and somebody who comes back to a page a minute later
+        # should get it.
+        if monotonic() - getattr(self, "_last_refresh", 0.0) < 2.0:
+            return
+        self._last_refresh = monotonic()
         self.refresh()
 
     def refresh(self):
