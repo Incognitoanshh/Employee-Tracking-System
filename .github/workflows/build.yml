@@ -434,6 +434,12 @@ jobs:
              "release/Amaze-Connect-${VERSION}-Windows-Setup.exe"
           cp "installers/Mac-DMG/Amaze-Connect.dmg" \
              "release/Amaze-Connect-${VERSION}-macOS.dmg"
+          # LINUX BHI — ye pehle chhoot gaya tha. build-linux job jodi gayi
+          # aur wo bani bhi, par release yahan sirf do file uthata tha, to
+          # release page par Linux dikha hi nahi. Job ka pass ho jaana iska
+          # matlab nahi ki uska nateeja kahin pahuncha.
+          cp "installers/Linux-Tarball/AmazeConnect-linux-x86_64.tar.gz" \
+             "release/Amaze-Connect-${VERSION}-Linux-x86_64.tar.gz"
           ls -lh release
 
       - name: Check the version in the tag matches the one in the code
