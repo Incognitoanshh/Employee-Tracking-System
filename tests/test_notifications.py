@@ -231,10 +231,19 @@ def main():
     _sp.run = _record_osascript
 
     def delivered_titles(tray):
-        """Everything shown, however it got there."""
+        """Everything shown, however it got there — title AND body.
+
+        On macOS these are whole osascript commands, which carry both. On
+        Windows and Linux the tray is handed them separately, so they are
+        joined here. The checks below look for wording, and wording has to be
+        findable the same way on every platform — a first version of this
+        searched only the titles and passed on macOS (where the command
+        string happens to contain the body) while failing on the Linux
+        runner.
+        """
         if sys.platform == "darwin":
             return list(_delivered)
-        return [t for t, _b in tray.shown]
+        return [f"{t} {b}" for t, b in tray.shown]
 
     def delivered_count(tray):
         return len(_delivered) if sys.platform == "darwin" else len(tray.shown)
