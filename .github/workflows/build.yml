@@ -322,8 +322,79 @@ jobs:
   #  dead, and the last release had to be assembled by hand: download both
   #  artifacts, then upload them again to the release page. This does that
   #  part, so a tag is all it takes.
+  # ── LINUX ─────────────────────────────────────────────────────────────
+  #
+  # Ek tarball, .deb nahi: is app ko install karne ki zaroorat nahi — folder
+  # kholiye aur chalaiye. .deb banane ka matlab hai package metadata,
+  # dependencies aur ek install step, jo abhi kisi ne maanga nahi.
+  #
+  # Qt ko Linux par kuch system libraries chahiye jo runner par pehle se
+  # nahi hoti; wo neeche install ki jaati hain, warna build to ban jaati hai
+  # par chalne par "could not load the Qt platform plugin xcb" deti hai.
+  build-linux:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install the libraries Qt needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-shape0 libgl1
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install PySide6 python-dotenv pyinstaller
+
+      - name: Create client .env file
+        run: |
+          echo "APP_NAME=Amaze Connect" > client/.env
+          echo "SCREENSHOT_MIN_INTERVAL=300" >> client/.env
+          echo "SCREENSHOT_MAX_INTERVAL=600" >> client/.env
+          echo "IDLE_THRESHOLD=60" >> client/.env
+          echo "API_BASE_URL=https://connect.amazeinternet.com/api" >> client/.env
+          echo "SCREENSHOT_ENCRYPTION_KEY=${{ secrets.SCREENSHOT_ENCRYPTION_KEY }}" >> client/.env
+
+      - name: Build Linux Executable
+        run: |
+          # --onedir, mac aur windows ki tarah — onefile har launch par poora
+          # bundle temp me kholta hai, jo dheema hai aur har baar disk likhta.
+          pyinstaller --onedir --windowed \
+            --add-data "client/.env:." --add-data "assets:assets" \
+            --name="AmazeConnect" client/main.py
+
+      - name: Make it runnable, and say how
+        run: |
+          cd dist
+          cat > AmazeConnect/README.txt <<'TXT'
+          Amaze Connect — Linux
+
+          Chalane ke liye:
+              ./AmazeConnect/AmazeConnect
+
+          Agar permission na ho:
+              chmod +x AmazeConnect/AmazeConnect
+          TXT
+          chmod +x AmazeConnect/AmazeConnect
+          tar czf AmazeConnect-linux-x86_64.tar.gz AmazeConnect
+          ls -lh AmazeConnect-linux-x86_64.tar.gz
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-Tarball
+          path: dist/AmazeConnect-linux-x86_64.tar.gz
+
   release:
-    needs: [build-windows, build-mac]
+    needs: [build-windows, build-mac, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:

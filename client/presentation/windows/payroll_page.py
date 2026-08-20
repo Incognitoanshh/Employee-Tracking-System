@@ -26,7 +26,7 @@ from client.core import http as _http
 from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
 from client.presentation.theme import C, table_style
-from client.presentation.widgets.panel_widgets import Card, PageHeader, fit_columns
+from client.presentation.widgets.panel_widgets import keep_fresh, Card, PageHeader, fit_columns
 from time import monotonic
 
 
@@ -79,6 +79,10 @@ class PayrollPage(QWidget):
         self._panel = panel
         self._workers: list[_Worker] = []
         self._build()
+
+        # Jo dikh raha hai wo taaza rahe — dusre panel me liya gaya
+        # faisla (leave approve, force logout) yahan bina page badle aaye.
+        keep_fresh(self)
 
     def _run(self, fn, on_done, on_fail=None, *args, **kwargs):
         worker = _Worker(fn, *args, **kwargs)

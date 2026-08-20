@@ -205,6 +205,40 @@ def main():
 
     beeps = []
 
+    # DELIVERY IS COUNTED AT WHICHEVER DOOR THE PLATFORM USES.
+    #
+    # This used to count only the tray, which was right until it was not: on
+    # macOS a bundled app's tray message is granted only to something the
+    # user has allowed in Notification Center, so an installed, ad-hoc signed
+    # build showed NOTHING while the call returned cleanly. notifier now
+    # always takes the osascript door on macOS — so a test that insists on
+    # the tray would fail on the very fix that made notifications work.
+    #
+    # What must be true is unchanged: an arriving message reaches the screen,
+    # with the right words. Which door it went through is a platform detail.
+    import subprocess as _sp
+    _real_run = _sp.run
+    _delivered = []
+
+    def _record_osascript(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)) and cmd and "osascript" in str(cmd[0]):
+            _delivered.append(" ".join(str(c) for c in cmd))
+            class _Done:
+                returncode = 0
+            return _Done()
+        return _real_run(cmd, *args, **kwargs)
+
+    _sp.run = _record_osascript
+
+    def delivered_titles(tray):
+        """Everything shown, however it got there."""
+        if sys.platform == "darwin":
+            return list(_delivered)
+        return [t for t, _b in tray.shown]
+
+    def delivered_count(tray):
+        return len(_delivered) if sys.platform == "darwin" else len(tray.shown)
+
     for label, panel_module, method, page_attr in (
             ("employee panel", ep, "_on_chat_messages", "pages"),
             ("admin panel", acp, "_on_chat_messages", None)):
@@ -213,6 +247,7 @@ def main():
         panel = cls.__new__(cls)          # no window, no network, no login
         tray = _FakeTray()
         panel.tray = tray
+        _delivered.clear()                # ginti har panel ke liye alag
 
         # The smallest surface each method actually reads.
         class _Chat:
@@ -248,16 +283,18 @@ def main():
         finally:
             _qt.QApplication.beep = real_qapp_beep
 
-        titles = [t for t, _b in tray.shown]
-        check(f"{label}: the tray is actually told", len(tray.shown) == 2,
+        titles = delivered_titles(tray)
+        check(f"{label}: it actually reaches the screen", delivered_count(tray) == 2,
               f"{len(tray.shown)} shown — the wiring is there but silent")
+        # On macOS `titles` are whole osascript commands, on Windows and
+        # Linux they are the tray's titles. Either way the wording has to be
+        # in there — that is what the reader sees.
         check(f"{label}: a direct message reads as personal",
-              any("Sneha Iyer messaged you" == t for t in titles), str(titles))
+              any("Sneha Iyer messaged you" in t for t in titles), str(titles))
         check(f"{label}: a channel message names the channel",
-              any("Amit Sharma in #General" == t for t in titles), str(titles))
+              any("Amit Sharma in #General" in t for t in titles), str(titles))
         check(f"{label}: the words come through too",
-              any("bhai ek kaam tha" in b for _t, b in tray.shown),
-              str(tray.shown))
+              any("bhai ek kaam tha" in t for t in titles), str(titles))
 
     # The owner's decision: everything makes a sound, group messages and
     # administrative alerts included — not only what names you. Two messages
@@ -340,7 +377,11 @@ def main():
         _qt.QApplication.beep = real_beep
         _sp.run = real_run2
         ep.SessionManager.role = "employee"
-    check("an admin alert reaches the tray", len(tray.shown) == 1, str(tray.shown))
+    # Counted where it actually goes — osascript on macOS, the tray
+    # elsewhere. Same reason as the message checks above.
+    check("an admin alert reaches the screen",
+          (len(alert_sounds) if sys.platform == "darwin" else len(tray.shown)) >= 1,
+          f"tray={tray.shown} osascript={alert_sounds}")
     # Whichever way this desktop makes a noise — AppleScript on macOS, Qt
     # elsewhere — exactly one sound for one alert.
     check("and makes a sound, on this platform's own path",

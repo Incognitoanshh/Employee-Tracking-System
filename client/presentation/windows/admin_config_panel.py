@@ -2477,6 +2477,7 @@ class _ConfigTab(QWidget):
             return
 
         w = _PostWorker(f"{API_BASE_URL}/admin/force-logout", {"employee_id": emp_id})
+        w.result.connect(lambda _d: self._load_employees())
         w.result.connect(lambda d: self._status_label.setText(
 " Force logout set!" if d.get("success") else f"{d.get('error')}"
         ))
@@ -3647,6 +3648,27 @@ class _PayrollTab(QWidget):
         self._month_box.setText(previous.toString("yyyy-MM"))
         self._load()
 
+        # TAAZA RAHE, JAB TAK DIKH RAHA HAI.
+        #
+        # Ye tab wo cheezein dikhata hai jo koi AUR badalta hai — employee
+        # leave apply karta hai, doosra admin faisla leta hai. Bina iske
+        # screen wahi jawab dikhata rehta tha jo aakhri baar poochha gaya,
+        # aur badlav dekhne ke liye page badal kar wapas aana padta tha.
+        # Wahi shikayat thi: "page change karke aane pe ho raha hai".
+        #
+        # Tees second: itna kam ki server par kuch nahi, itna jaldi ki
+        # doosre panel ka faisla bina kuch dabaye aa jaaye.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(30000)
+        # _PayrollTab._load() koi page nahi leta — is tab me pagination hai
+        # hi nahi. `self._page` yahan maujood nahi hai, aur wo likhna har
+        # tees second par ek AttributeError banata: timer chupchaap marta
+        # rehta aur tab kabhi taaza na hota. test_panel_attributes ne isi
+        # liye pakda — wo har `self._x` padhne ko `self._x` likhe jaane se
+        # milata hai.
+        self._refresh_timer.timeout.connect(self._load)
+        self._refresh_timer.start()
+
     def refresh(self):
         self._load()
 
@@ -4065,6 +4087,21 @@ class _LeaveTab(QWidget):
         self._rows: list[dict] = []
         self._build_ui()
         self._load()
+
+        # TAAZA RAHE, JAB TAK DIKH RAHA HAI.
+        #
+        # Ye tab wo cheezein dikhata hai jo koi AUR badalta hai — employee
+        # leave apply karta hai, doosra admin faisla leta hai. Bina iske
+        # screen wahi jawab dikhata rehta tha jo aakhri baar poochha gaya,
+        # aur badlav dekhne ke liye page badal kar wapas aana padta tha.
+        # Wahi shikayat thi: "page change karke aane pe ho raha hai".
+        #
+        # Tees second: itna kam ki server par kuch nahi, itna jaldi ki
+        # doosre panel ka faisla bina kuch dabaye aa jaaye.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(30000)
+        self._refresh_timer.timeout.connect(lambda: self._load(self._page))
+        self._refresh_timer.start()
 
         # AUTO-REFRESH. Requests arrive from employees while this page is open. Without this an administrator watching the queue saw nothing new until they pressed Refresh — and the queue is the entire reason the page exists.
         #
@@ -6342,11 +6379,19 @@ class _EmployeesTab(QWidget):
             return
 
         w = _PostWorker(f"{API_BASE_URL}/admin/force-logout", {"employee_id": emp_id})
-        w.result.connect(lambda d: QMessageBox.information(
-            self,
-            "Force Logout",
-" Force logout set!" if d.get('success') else f"{d.get('error')}"
-        ))
+
+        def logged_out(d):
+            QMessageBox.information(
+                self, "Force Logout",
+                "Force logout set!" if d.get("success") else f"{d.get('error')}")
+            # AND RE-READ THE LIST. Without this the row went on saying
+            # "Online" for somebody who had just been signed out — the change
+            # only appeared if you left the page and came back, which is how
+            # it was reported. The server was right the whole time; the
+            # screen was the last answer anybody had asked for.
+            self._load_employees()
+
+        w.result.connect(logged_out)
         w.error.connect(lambda e: QMessageBox.warning(self, "Error", f"Force logout failed: {e}"))
         _track_worker(self._workers, w)
         w.start()

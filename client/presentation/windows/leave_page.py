@@ -35,7 +35,7 @@ from client.core.config import API_BASE_URL
 from client.application.managers.session_manager import SessionManager
 from client.presentation.theme import C, R_SM, button, scrollbar, table_style
 from client.presentation.widgets.badge import badge_cell
-from client.presentation.widgets.panel_widgets import Card, PageHeader, fit_columns
+from client.presentation.widgets.panel_widgets import keep_fresh, Card, PageHeader, fit_columns
 from time import monotonic
 
 LEAVE_TYPES = [("CASUAL", "Casual"), ("SICK", "Sick"), ("UNPAID", "Unpaid")]
@@ -81,6 +81,10 @@ class LeavePage(QWidget):
         self._workers: list[_Worker] = []
         self._rows: list[dict] = []
         self._build()
+
+        # Jo dikh raha hai wo taaza rahe — dusre panel me liya gaya
+        # faisla (leave approve, force logout) yahan bina page badle aaye.
+        keep_fresh(self)
 
     # ── plumbing ────────────────────────────────────────────────────────
     def _run(self, fn, on_done, on_fail=None, *args, **kwargs):

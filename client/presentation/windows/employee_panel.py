@@ -1189,7 +1189,8 @@ class EmployeePanel(QWidget):
             "team": TeamPage(self, self.chat),
             "attendance": AttendancePage(self),
             "logs": LogsPage(self),
-            "screenshots": ScreenshotsPage(self),
+            # "screenshots" ab nahi bhi — upar nav wala note dekhiye.
+
             "leave": LeavePage(self),
             "payroll": PayrollPage(self),
             "profile": ProfilePage(self),
@@ -1249,7 +1250,13 @@ class EmployeePanel(QWidget):
             )),
             ("MY ACTIVITY", (
                 ("logs", "clipboard-list", "Activity Logs"),
-                ("screenshots", "camera", "Screenshots"),
+                # SCREENSHOTS YAHAN SE HATA DIYE GAYE.
+                #
+                # Company ka niyam: captures sabke liye hote hain, par unhe
+                # DEKHNA sirf admin aur super admin ka kaam hai. Wo page
+                # employee ko apni hi tasveerein dikhata tha, jo is niyam ke
+                # khilaf hai — isliye nav se bhi gaya aur banaya bhi nahi
+                # jaata (neeche self.pages dekhiye).
             )),
             ("TEAM", (
                 ("team", "messages-square", "Team"),
@@ -1277,10 +1284,26 @@ class EmployeePanel(QWidget):
         col.addStretch()
 
         footer = Card()
+        # SCOPED, AND NOT CRUSHABLE — dono baatein yahan galat thi.
+        #
+        # 1. Ye ek unscoped `QFrame{...}` rule tha jo Card ki apni scoped
+        #    style ko badal deta tha — yaani wahi khaami wapas aa jaati thi
+        #    jo Card ki docstring me likhi hai: Qt me `QFrame{...}` andar ke
+        #    har QFrame par bhi lagta hai. Ab rule sirf is frame ka hai.
+        #
+        # 2. Card ko minimum height nahi thi. Sidebar me jagah kam padte hi
+        #    Qt use kuchal deta tha aur teenon line — version, server, aur
+        #    encryption — ek doosre par chadh kar kat jaati thi. Windows par
+        #    (chhoti screen, bade font) ye saaf dikha: "logout ke upar jo
+        #    likha rehta hai wo black ho gya hai". Wo kaala rang nahi tha,
+        #    wo kuchla hua text tha.
+        footer.setObjectName("sidebarFooter")
         footer.setStyleSheet(
-            f"QFrame{{background:{C.CARD};border:1px solid {C.BORDER};"
-            f"border-radius:{R_SM}px;}}"
+            f"QFrame#sidebarFooter{{background:{C.CARD};"
+            f"border:1px solid {C.BORDER};border-radius:{R_SM}px;}}"
         )
+        footer.setSizePolicy(footer.sizePolicy().horizontalPolicy(),
+                             QSizePolicy.Policy.Fixed)
         fl = QVBoxLayout(footer)
         fl.setContentsMargins(14, 12, 14, 12)
         fl.setSpacing(7)
@@ -1299,6 +1322,14 @@ class EmployeePanel(QWidget):
         fl.addWidget(ver)
         fl.addWidget(self._srv_label)
         fl.addWidget(enc)
+        # KITNI JAGAH CHAHIYE — YE LAYOUT SE POOCHHA GAYA HAI, TAY NAHI KIYA.
+        #
+        # Pehle yahan koi minimum tha hi nahi aur Qt card ko kuchal deta tha.
+        # Ek gina hua number (86px) bhi galat hota: text ki oonchai font par
+        # nirbhar hai, aur Windows ka font Mac se bada hai — wahi galti aaj
+        # ek aur jagah pakdi ja chuki hai. Layout khud jaanta hai ki uske
+        # teen labels ko kitni jagah chahiye, us font me jo abhi chal raha hai.
+        footer.setMinimumHeight(fl.sizeHint().height())
         col.addWidget(footer)
 
         logout = QPushButton("   Logout")
@@ -1311,6 +1342,24 @@ class EmployeePanel(QWidget):
         col.addSpacing(8)
         col.addWidget(logout)
         return bar
+
+    def _refresh_current_page(self):
+        """Jo page abhi khula hai, sirf usse dobara padho.
+
+        Har page ko refresh karna do kaam karta jo koi nahi maangta: server
+        par ek saath kai request, aur chhupe hue pages ka data jise koi dekh
+        hi nahi raha. Jo saamne hai, wahi.
+        """
+        page = self._stack.currentWidget()
+        for name in ("refresh", "load", "_load"):
+            method = getattr(page, name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception as error:          # noqa: BLE001
+                    LoggerService.log_verbose(
+                        f"Refresh failed for {type(page).__name__}: {error}")
+                return
 
     def _header(self) -> QWidget:
         wrap = QWidget()
@@ -1368,9 +1417,30 @@ class EmployeePanel(QWidget):
         self._paint_theme_button()
         self._theme_btn.clicked.connect(self._toggle_theme)
 
+        # REFRESH, WAHI JO ADMIN CONSOLE KE HEADER ME HAI.
+        #
+        # Pages ab khud har tees second me taaza hote hain, par intezaar
+        # karna aur khud maangna do alag cheezein hain — jab kisi ne abhi
+        # kuch badla ho, aadmi turant dekhna chahta hai. Admin ke paas ye
+        # button pehle se tha; employee ke paas nahi.
+        self._refresh_btn = QPushButton("   Refresh")
+        self._refresh_btn.setIcon(_icons.icon("refresh-cw", 16, C.TEXT))
+        self._refresh_btn.setIconSize(QSize(16, 16))
+        self._refresh_btn.setFixedHeight(44)
+        self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.setToolTip("Reload this page now")
+        self._refresh_btn.setStyleSheet(
+            f"QPushButton{{background:{C.CARD};border:1px solid {C.BORDER};"
+            f"border-radius:{R_SM}px;color:{C.TEXT};font-size:13px;"
+            f"font-weight:600;padding:0 16px;}}"
+            f"QPushButton:hover{{background:{C.CARD_HOVER};"
+            f"border-color:{C.PRIMARY};}}")
+        self._refresh_btn.clicked.connect(self._refresh_current_page)
+
         row.addWidget(avatar)
         row.addLayout(who)
         row.addStretch()
+        row.addWidget(self._refresh_btn)
         row.addWidget(self._theme_btn)
         row.addWidget(self._status_chip)
         row.addWidget(self._clock)

@@ -293,11 +293,33 @@ class SchedulerService(QObject):
             late = (now_ist() - scheduled_for).total_seconds() / 60.0
             if late > self.LATE_GRACE_MINUTES:
                 LoggerService.log(
-                    f"SCREENSHOT SKIPPED : scheduled for "
+                    f"SCREENSHOT MOVED : scheduled for "
                     f"{scheduled_for.strftime('%H:%M')}, "
                     f"{int(late)} min late — the machine was probably asleep. "
-                    f"Taking it now would only duplicate the next one."
+                    f"Taking it now would only duplicate the next one, so the "
+                    f"day's remaining captures are being spread over the rest "
+                    f"of the shift instead."
                 )
+                # DROPPED USED TO MEAN LOST FOR THE DAY. IT DOES NOT NOW.
+                #
+                # These are single-shot timers armed once for the whole
+                # shift. When a machine sleeps — or the OS holds the timers
+                # for any other reason — every overdue one fires within the
+                # same instant on waking. Each is hours late, so each was
+                # skipped, and because they had already fired there was
+                # NOTHING LEFT ARMED: the rest of the shift got no captures
+                # at all. Reported exactly that way — one skip in the log and
+                # then silence for the remainder of the day.
+                #
+                # Skipping a stale capture is still right: a picture meant for
+                # 11:00 taken at 14:30 is a duplicate of 14:30 bought with
+                # 11:00's budget. What was wrong was throwing away the
+                # BUDGET with it. Replanning spends what is left over the
+                # time that is left, so the day's count is still met.
+                #
+                # Once per burst, not once per timer: thirteen overdue timers
+                # firing together must produce one new plan, not thirteen.
+                self._replan_after_skip()
                 return
         self.screenshot_triggered.emit()
 
@@ -444,6 +466,24 @@ class SchedulerService(QObject):
     @Slot()
     def _emit_force_logout(self):
         self.force_logout.emit(getattr(self, "_logout_reason", "") or "")
+
+
+    #: A burst of overdue timers must produce ONE new plan. Two seconds is
+    #  longer than the instant they all fire in, and shorter than anything a
+    #  person would notice.
+    REPLAN_DEBOUNCE_MS = 2000
+
+    def _replan_after_skip(self):
+        """Spread whatever budget is left over whatever shift is left."""
+        pending = getattr(self, "_replan_timer", None)
+        if pending is not None and pending.isActive():
+            return                      # is burst ke liye pehle se laga hua
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self.reschedule)
+        timer.start(self.REPLAN_DEBOUNCE_MS)
+        self._replan_timer = timer
 
 
     def reschedule(self):

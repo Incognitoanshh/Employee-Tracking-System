@@ -274,11 +274,40 @@ def deliver(tray, title, body):
             # silently never appears. That is the exact failure this whole
             # module exists because of, and it was reintroduced by this line
             # until a test caught it.
+            # A NULL ICON IS NOT AN ICON, AND WINDOWS TREATS IT THAT WAY.
+            #
+            # This asked whether tray.icon was callable and never whether what
+            # it returned was usable. QIcon() with nothing in it is a perfectly
+            # valid object that draws nothing — and Windows, handed one, drops
+            # the notification without a word. Same silent failure as the
+            # macOS one described above, on the other platform.
             badge = getattr(tray, "icon", None)
-            badge = badge() if callable(badge) else \
-                QSystemTrayIcon.MessageIcon.Information
-            tray.showMessage(title, body, badge, 6000)
-            shown = (not mac) or bundled
+            badge = badge() if callable(badge) else None
+            if badge is None or (hasattr(badge, "isNull") and badge.isNull()):
+                badge = QSystemTrayIcon.MessageIcon.Information
+            # macOS PAR TRAY KO KABHI "HO GAYA" NAHI MAANA JAATA.
+            #
+            # Pehle yahan `shown = (not mac) or bundled` tha — yaani ek
+            # bundled .app ke liye maan liya jaata tha ki tray ne dikha diya,
+            # aur neeche wala osascript raasta chalta hi nahi tha.
+            #
+            # Wo maan-lena galat hai. macOS showMessage sirf us app ko deta
+            # hai jise Notification Center me IJAAZAT mili ho. Ek naya
+            # install kiya hua, ad-hoc signed app wahan hai hi nahi — call
+            # saaf lautti hai aur SCREEN PAR KUCH NAHI AATA.
+            #
+            # Isi wajah se notification source se chalane par aata tha aur
+            # installed app me gayab ho gaya: dev me `bundled` False tha, to
+            # osascript chalta tha; .app me True hua aur wahi band ho gaya.
+            #
+            # showMessage ka koi jawab nahi hota — "dikha ya nahi" jaanne ka
+            # tareeka hi nahi. Isliye macOS par hamesha osascript, jise na
+            # ijaazat se matlab hai na signature se.
+            if mac:
+                shown = False
+            else:
+                tray.showMessage(title, body, badge, 6000)
+                shown = True
             if not mac and not quiet:
                 # A SOUND ON EVERY NOTIFICATION, by the owner's decision —
                 # group messages and administrative alerts included, not only

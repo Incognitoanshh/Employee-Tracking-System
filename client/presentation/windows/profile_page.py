@@ -43,7 +43,7 @@ from client.services.logger_service import LoggerService
 from client.presentation import theme as _theme
 from client.presentation.theme import C, button, scrollbar
 from client.presentation.widgets.avatar import Avatar, forget as forget_avatar
-from client.presentation.widgets.panel_widgets import Card, PageHeader, Sparkline
+from client.presentation.widgets.panel_widgets import keep_fresh, Card, PageHeader, Sparkline
 
 # The keys live with the notification decisions, in application/services/
 # notifier — the same constants the panels read when something arrives. A
@@ -99,6 +99,10 @@ class ProfilePage(QWidget):
         self._workers: list[_Worker] = []
         self._profile: dict = {}
         self._build()
+
+        # Jo dikh raha hai wo taaza rahe — dusre panel me liya gaya
+        # faisla (leave approve, force logout) yahan bina page badle aaye.
+        keep_fresh(self)
 
     # ── plumbing ────────────────────────────────────────────────────────
 

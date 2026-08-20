@@ -488,6 +488,56 @@ class Card(QFrame):
 
 # The console uses 52px rows; this is the same number, so a table on the
 # employee side and a table on the admin side are the same height per row.
+# How often a page re-reads what it is showing, while somebody is looking at
+# it. Thirty seconds: long enough that it costs nothing, short enough that a
+# decision made in the other panel appears without anybody pressing anything.
+LIVE_REFRESH_MS = 30_000
+
+
+def keep_fresh(page, seconds: int | None = None) -> None:
+    """Re-read this page's data on a timer, but ONLY while it is on screen.
+
+    WHY PAGES NEEDED THIS. A page fetched its data when it was shown and then
+    never again. So an administrator approved a leave and the employee went
+    on seeing "Pending"; an administrator forced a logout and the list went
+    on saying "Online". The data was right on the server the whole time —
+    the screen was simply the last answer anybody had asked for.
+
+    The workaround people found was to leave the page and come back, which
+    fires showEvent and re-reads. That is the bug reported, in the words it
+    was reported in: "page change karke aane pe ho raha hai".
+
+    ONLY WHILE VISIBLE, and that is the point. A hidden page polling in the
+    background is a request nobody is waiting for, multiplied by every page
+    in the application and every employee running it. The chat poll already
+    works this way for the same reason.
+
+    The page keeps its own timer, so hiding stops it and showing starts it
+    again; nothing has to remember to clean it up.
+    """
+    from PySide6.QtCore import QTimer
+
+    interval = LIVE_REFRESH_MS if seconds is None else seconds * 1000
+    timer = QTimer(page)
+    timer.setInterval(interval)
+    timer.timeout.connect(page.refresh)
+    page._live_timer = timer
+
+    original_show = page.showEvent
+    original_hide = page.hideEvent
+
+    def showEvent(event):
+        original_show(event)
+        timer.start()
+
+    def hideEvent(event):
+        timer.stop()
+        original_hide(event)
+
+    page.showEvent = showEvent
+    page.hideEvent = hideEvent
+
+
 ROW_HEIGHT = 52
 
 
