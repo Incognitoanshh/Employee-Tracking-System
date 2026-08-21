@@ -1015,20 +1015,22 @@ exports.getUpcomingDays = async (req, res) => {
     try {
         const one = employee_id && employee_id !== "global" ? employee_id : null;
 
-        let config = { rows: [] };
-        if (one) {
-            config = await pool.query(
-                `SELECT weekly_offs, shift_start, shift_end
-                   FROM employee_configs WHERE employee_id = $1 LIMIT 1`,
-                [one]
-            );
-        }
-        if (config.rows.length === 0) {
-            config = await pool.query(
-                `SELECT weekly_offs, shift_start, shift_end
-                   FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
-            );
-        }
+        // FIELD BY FIELD, not row by row. Falling back only when the employee
+        // had no row at all left a row that merely says nothing about the
+        // shift — which is what saving any other setting creates — hiding the
+        // global one. See the note in attendance.controller for the whole
+        // story; this is the same shift, read in a second place, and the two
+        // must not be able to disagree.
+        const config = await pool.query(
+            `SELECT COALESCE(own.weekly_offs,  glob.weekly_offs)  AS weekly_offs,
+                    COALESCE(own.shift_start,  glob.shift_start)  AS shift_start,
+                    COALESCE(own.shift_end,    glob.shift_end)    AS shift_end
+               FROM (SELECT * FROM employee_configs
+                      WHERE employee_id IS NULL LIMIT 1) glob
+               LEFT JOIN (SELECT * FROM employee_configs
+                           WHERE employee_id = $1 LIMIT 1) own ON TRUE`,
+            [one]
+        );
         const weeklyOffs = config.rows[0]?.weekly_offs || "";
 
         const holidayRows = await pool.query(
@@ -1208,15 +1210,36 @@ exports.getConfig = async (req, res) => {
         // ko pata hi nahi chalta tha ki wo employee-specific value dekh raha
         // hai ya sabki common value. Ab UI banner me saaf likha jaata hai.
         let inherited = false;
+        let globalRow = null;
+        const readGlobal = async () => {
+            if (globalRow === null) {
+                const globalResult = await pool.query(
+                    `SELECT * FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
+                );
+                globalRow = globalResult.rows[0] || {};
+            }
+            return globalRow;
+        };
+
         if (!row && !isGlobal) {
-            const globalResult = await pool.query(
-                `SELECT * FROM employee_configs WHERE employee_id IS NULL LIMIT 1`
-            );
-            row = globalResult.rows[0];
+            row = await readGlobal();
             inherited = true;
         }
 
         const config = { ...DEFAULT, ...(row || {}) };
+
+        // AND THE SHIFT INHERITS ON ITS OWN, even when the rest of the row is
+        // the employee's. Saving any other setting for somebody creates their
+        // row with shift_start/shift_end written as NULL — nothing about the
+        // shift was decided, the row just has nothing to say about it. Read
+        // as an override, that blanked the shift fields in this form while
+        // the employee's app went on working the global 09:00-18:00 it gets
+        // from config.controller, which has always inherited field by field.
+        if (!isGlobal && (config.shift_start == null || config.shift_end == null)) {
+            const fromGlobal = await readGlobal();
+            if (config.shift_start == null) config.shift_start = fromGlobal.shift_start ?? null;
+            if (config.shift_end   == null) config.shift_end   = fromGlobal.shift_end   ?? null;
+        }
         // employee_id hamesha wahi rakho jo maanga gaya tha — warna global
         // row se NULL leak ho ke UI confuse ho jaata hai.
         config.employee_id = isGlobal ? null : employee_id;

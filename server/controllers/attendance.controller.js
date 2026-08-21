@@ -88,8 +88,35 @@ async function annotateAttendance(rows) {
 
         return rows.map((row) => {
             const config = byEmployee.get(row.employee_id) || global;
-            const shiftStart = config.shift_start ? String(config.shift_start) : null;
-            const shiftEnd   = config.shift_end   ? String(config.shift_end)   : null;
+
+            // AN EMPTY FIELD MEANS "USE THE GLOBAL ONE", NOT "THERE IS NO
+            // SHIFT". The two are not the same, and reading them as the same
+            // is what emptied this column.
+            //
+            // Saving any per-employee setting — a screenshot count, a logging
+            // toggle — creates that employee's own config row, and the INSERT
+            // that creates it writes NULL into shift_start/shift_end rather
+            // than leaving the column default alone. Nothing about the shift
+            // was changed or intended; the row simply has nothing to say
+            // about it.
+            //
+            // This used to take the employee's row whole and stop there, so
+            // that silent NULL hid a perfectly good global 09:00-18:00 and
+            // every one of their rows read "No Shift Set". Nobody could be
+            // late any more, because there was no longer a time to be late
+            // against. Reported from the admin panel: "abhi kis baat ka extra
+            // session, 9-18 hai na".
+            //
+            // The rest of the system already inherits field by field —
+            // config.controller does it for the client's own schedule,
+            // alerts.controller COALESCEs to the global row, and the two
+            // lines below do it for grace and weekly offs. This column was
+            // the last place that did not, which is why the employee's app
+            // and the admin's table disagreed about the same shift.
+            const startValue = config.shift_start ?? global.shift_start;
+            const endValue   = config.shift_end   ?? global.shift_end;
+            const shiftStart = startValue ? String(startValue) : null;
+            const shiftEnd   = endValue   ? String(endValue)   : null;
 
             const isFirst = Boolean(row.day_first_login
                 && String(row.day_first_login) === String(row.login_time));
