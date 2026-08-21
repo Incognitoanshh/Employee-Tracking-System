@@ -94,6 +94,31 @@ class ShiftManager:
             pass
 
     @staticmethod
+    def _tell_server_shift_ended(logout_time, total_time):
+        """Server ko batao ki shift khatam — chahe local record ho ya na ho.
+
+        Server `total_hours` KHUD ginta hai apni hi row se, hamara bheja hua
+        maanta nahi (dekhiye attendance.controller.js). Isliye ye sirf
+        "band kar do" kehna hai, aur wo bina local hisaab ke bhi bheja ja
+        sakta hai.
+        """
+        body = {"employee_id": SessionManager.employee_id,
+                "logout_time": logout_time.strftime("%Y-%m-%d %H:%M:%S")}
+        if total_time is not None:
+            body["total_hours"] = total_time
+        try:
+            _http.post(
+                f"{API_BASE_URL}/attendance/logout",
+                json=body,
+                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
+                timeout=10,
+            )
+        except Exception:
+            # Network gaya hua ho sakta hai. Shift server par khuli rahegi
+            # aur abandoned-shift sweep use band karega — wo pehle se hai.
+            pass
+
+    @staticmethod
     def end_shift():
         try:
             connection = Database.connect()
@@ -108,6 +133,23 @@ class ShiftManager:
         shift = cursor.fetchone()
         if not shift:
             connection.close()
+            # LOCAL ROW NA HONA "SHIFT KHATAM NAHI HUI" NAHI HOTA.
+            #
+            # Ye seedha return kar deta tha, aur server ko kuch bataya hi
+            # nahi jaata tha. Server par shift KHULI REH JAATI thi — hamesha
+            # ke liye "Incomplete", jabki aadmi ne logout dabaya tha.
+            #
+            # Local row kab nahi hoti: naya install, nayi machine, ya wo
+            # database jo kharab hone par naye se banayi gayi. Yaani theek
+            # us waqt jab aadmi pehli baar app chalata hai — 21 August ki
+            # raat dono account ke saath yahi hua, nayi build install karne
+            # ke turant baad.
+            #
+            # Sach server ke paas hai, is chhoti local file ke paas nahi. Wo
+            # sirf hisaab-kitaab ke liye hai, aur uska na hona server ko
+            # batane se rokna nahi chahiye. Server khud NOW() - login_time se
+            # ginta hai, isliye use hamare bheje waqt ki zaroorat bhi nahi.
+            ShiftManager._tell_server_shift_ended(datetime.now(), None)
             return
 
         logout_time   = datetime.now()
@@ -149,16 +191,4 @@ class ShiftManager:
         connection.commit()
         connection.close()
 
-        try:
-            _http.post(
-                f"{API_BASE_URL}/attendance/logout",
-                json={
-                    "employee_id": SessionManager.employee_id,
-                    "logout_time": logout_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "total_hours": total_time
-                },
-                headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
-                timeout=10
-            )
-        except Exception:
-            pass
+        ShiftManager._tell_server_shift_ended(logout_time, total_time)

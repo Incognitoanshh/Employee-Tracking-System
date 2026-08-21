@@ -256,7 +256,19 @@ jobs:
           # binary's hash, so a new build asks again — once, on first launch,
           # and it holds for that build. Signing is the fix; this stops the
           # identity drifting for reasons of naming.
-          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --osx-bundle-identifier "com.amazeinternet.amazeconnect" --name="Amaze Connect" client/main.py
+          # --hidden-import Quartz: the screen is read through CoreGraphics,
+          # in-process, so that the Screen Recording permission belongs to
+          # this app instead of a `screencapture` subprocess spawned afresh
+          # for every capture — which is what made the prompt come back after
+          # it had already been granted.
+          #
+          # The import sits inside a function and is guarded, so if PyInstaller
+          # left Quartz out the app would not crash: it would quietly fall back
+          # to the old subprocess path and the prompt would start returning
+          # again, on customers' machines, with nothing in the log. Naming it
+          # explicitly is what removes that possibility. PyObjC comes from
+          # requirements.txt, installed above.
+          pyinstaller --onedir --windowed --add-data "client/.env:." --add-data "assets:assets" --icon="assets/icon.icns" --hidden-import Quartz --osx-bundle-identifier "com.amazeinternet.amazeconnect" --name="Amaze Connect" client/main.py
 
       - name: Say what the screen capture is for
         run: |

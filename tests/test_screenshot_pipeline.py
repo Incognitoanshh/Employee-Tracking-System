@@ -158,6 +158,12 @@ def main():
                     for dy in range(40):
                         original.putpixel((x + dx, y + dy), (255, 200, 0))
         sm_mod.pyautogui.screenshot = lambda *a, **k: original
+        # On a Mac the capture now reads the screen in-process through
+        # CoreGraphics, which would hand back the real desktop and make the
+        # comparison below meaningless. Switched off here so the fake screen
+        # above is what travels through the pipeline; the CoreGraphics path
+        # has its own test, tests/test_quartz_capture.py.
+        sm_mod._grab_via_quartz = lambda: None
 
         # ── capture ─────────────────────────────────────────────────────
         print("Capturing")

@@ -62,6 +62,107 @@ def _screen_count() -> int:
     return 1
 
 
+def _image_from_bgra(pixels, width: int, height: int, stride: int):
+    """A CoreGraphics framebuffer, as a PIL image.
+
+    Two details here are easy to get wrong and impossible to see afterwards.
+
+    CHANNEL ORDER. CoreGraphics hands back BGRA, not RGBA. Read the wrong way
+    round, every screenshot comes out with red and blue exchanged — skin goes
+    blue, and nothing anywhere reports a problem.
+
+    STRIDE. Rows are padded to a hardware-friendly width, so the distance
+    between one row and the next is not width * 4 on every display. Assuming
+    it shears the picture diagonally on the displays where it differs.
+
+    Separated from the capture so both can be tested against a buffer whose
+    correct output is known, rather than against whatever happens to be on
+    screen at the time.
+    """
+    return Image.frombuffer(
+        "RGBA", (width, height), pixels, "raw", "BGRA", stride, 1
+    ).convert("RGB")
+
+
+def _grab_via_quartz():
+    """Capture every display INSIDE THIS PROCESS. macOS only; None if it can't.
+
+    WHY THIS EXISTS. Both of the old macOS paths handed the job to a separate
+    program — `pyautogui.screenshot()` goes through Pillow, which runs
+    `screencapture -x <file>`, and the multi-display branch below ran
+    `screencapture` itself. Either way the pixels were read by a process that
+    was not us.
+
+    macOS ties Screen Recording to the code signature of whoever reads the
+    screen, and re-decides for each new process. Reported from a real Mac:
+    permission granted, Settings confirmed it, quit and reopened as told —
+    and the prompt came back anyway at capture time, again and again. That is
+    the subprocess being asked about afresh every time it is spawned.
+
+    Reading the screen ourselves, through CoreGraphics, means the permission
+    the person granted is the permission that is checked. It is also the same
+    identity `CGPreflightScreenCaptureAccess()` reports on, so what the app
+    believes about its own access is finally what macOS believes.
+
+    Verified against the old path on a live display: identical dimensions and
+    identical per-channel averages, to 0.0 — see tests/test_quartz_capture.py.
+
+    Returns None rather than raising, on any machine or macOS where this is
+    unavailable, so the caller falls back to the path that always worked.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import Quartz
+    except Exception:
+        # PyObjC missing — the fallback still captures, it just prompts.
+        return None
+
+    try:
+        err, ids, count = Quartz.CGGetActiveDisplayList(16, None, None)
+        if err != 0 or not count:
+            return None
+
+        shots = []
+        for display_id in list(ids)[:count]:
+            image_ref = Quartz.CGDisplayCreateImage(display_id)
+            if image_ref is None:
+                # No permission, or the display went away mid-capture. Half a
+                # desk is not worth reporting as the whole desk.
+                return None
+            width = Quartz.CGImageGetWidth(image_ref)
+            height = Quartz.CGImageGetHeight(image_ref)
+            if not width or not height:
+                return None
+            provider = Quartz.CGImageGetDataProvider(image_ref)
+            pixels = Quartz.CGDataProviderCopyData(provider)
+            if not pixels:
+                return None
+            stride = Quartz.CGImageGetBytesPerRow(image_ref)
+            shots.append(_image_from_bgra(pixels, width, height, stride))
+
+        if not shots:
+            return None
+        if len(shots) == 1:
+            return shots[0]
+
+        # Side by side, in the order the displays report — one wide image of
+        # the whole desk, which the resize downstream handles.
+        canvas = Image.new(
+            "RGB", (sum(i.width for i in shots), max(i.height for i in shots)),
+            (0, 0, 0))
+        x = 0
+        for shot in shots:
+            canvas.paste(shot, (x, 0))
+            x += shot.width
+        return canvas
+    except Exception as error:
+        LoggerService.log_verbose(
+            f"ScreenshotManager: in-process capture unavailable, "
+            f"falling back — {error}")
+        return None
+
+
 def _grab_every_screen():
     """Every attached display, not just the main one.
 
@@ -84,7 +185,15 @@ def _grab_every_screen():
 
     Falls back to the same ordinary path if anything below fails: half a
     screenshot is worth more than none.
+
+    ON macOS THE IN-PROCESS PATH COMES FIRST, for one display or ten — see
+    _grab_via_quartz for why. It returns None when it cannot run, and then
+    everything below happens exactly as it did before.
     """
+    macos_shot = _grab_via_quartz()
+    if macos_shot is not None:
+        return macos_shot
+
     if _screen_count() <= 1:
         return pyautogui.screenshot()
 
