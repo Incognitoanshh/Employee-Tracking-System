@@ -19,6 +19,7 @@ it survives a page being swapped underneath it and always appears in the same
 corner — a message that shows up somewhere different each time is read as a
 new kind of thing each time.
 """
+
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
@@ -28,9 +29,8 @@ from client.presentation import theme as _theme
 from client.presentation.theme import C, Radius, Space, Type
 from client.presentation.widgets import icons as _icons
 
-
-_MARGIN = 24          # from the window's bottom-right corner
-_GAP = 10             # between stacked toasts
+_MARGIN = 24  # from the window's bottom-right corner
+_GAP = 10  # between stacked toasts
 _LIFETIME_MS = 3600
 _FADE_MS = 180
 
@@ -47,29 +47,44 @@ class Toast(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
 
         fg, bg = _theme.status_colors(
-            {"success": "approved", "error": "rejected",
-             "warning": "pending", "info": "info"}.get(kind, "neutral"))
+            {
+                "success": "approved",
+                "error": "rejected",
+                "warning": "pending",
+                "info": "info",
+            }.get(kind, "neutral")
+        )
 
         self.setStyleSheet(
             f"QFrame{{background:{bg};border:1px solid {fg};"
-            f"border-radius:{Radius.CONTROL}px;}}")
+            f"border-radius:{Radius.CONTROL}px;}}"
+        )
 
         row = QHBoxLayout(self)
         row.setContentsMargins(Space.LG, Space.MD, Space.LG, Space.MD)
         row.setSpacing(Space.SM)
 
         icon = QLabel()
-        icon.setPixmap(_icons.pixmap(
-            {"success": "circle-check", "error": "x",
-             "warning": "triangle-alert", "info": "info"}.get(kind, "info"),
-            16, fg))
+        icon.setPixmap(
+            _icons.pixmap(
+                {
+                    "success": "circle-check",
+                    "error": "x",
+                    "warning": "triangle-alert",
+                    "info": "info",
+                }.get(kind, "info"),
+                16,
+                fg,
+            )
+        )
         icon.setStyleSheet("background:transparent;border:none;")
         label = QLabel(text)
         label.setWordWrap(True)
         label.setMaximumWidth(360)
         label.setStyleSheet(
             f"color:{C.TEXT};font-size:{Type.SMALL}px;"
-            f"background:transparent;border:none;")
+            f"background:transparent;border:none;"
+        )
 
         row.addWidget(icon)
         row.addWidget(label, 1)
@@ -89,7 +104,7 @@ class Toast(QFrame):
             animation.finished.connect(then)
         # Held on the instance: a QPropertyAnimation that goes out of scope is
         # collected mid-flight and the toast simply never appears.
-        self._animation = animation
+        self._animation = animation 
         animation.start()
 
     def dismiss(self):

@@ -283,6 +283,53 @@ def main():
         print(f"{failures} failure(s)")
         sys.stdout.flush()
         sys.exit(1)
+    print("\nYour own pay, and nobody else's")
+
+    # THE SECTION IS FED BY A ROUTE THAT TAKES NO EMPLOYEE ID. That is what
+    # makes it safe to put a salary on a page every employee opens: there is
+    # no parameter here to point at a colleague. If this fetch ever grows one,
+    # this test should be the thing that stops it.
+    import client.presentation.windows.profile_page as _pp
+    source = open(_pp.__file__, encoding="utf-8").read()
+    check("the pay section asks only for the caller's own",
+          "/payroll/mine/salary" in source
+          and "employee_id" not in source.split("_fetch_pay")[1].split("def ")[1],
+          "the pay fetch mentions an employee id")
+
+    page._on_pay({"salary": {"gross_monthly": 31000, "overtime_hourly": 220,
+                             "effective_from": "2026-07-01",
+                             "remarks": "Annual review"},
+                  "latest_payroll": {"month": "2026-06", "net_pay": 25800}})
+    check("the monthly gross is shown as money",
+          page._rows["salary_gross"].text() == "\u20b931,000.00",
+          page._rows["salary_gross"].text())
+    check("with the date it took effect",
+          page._rows["salary_from"].text() == "2026-07-01",
+          page._rows["salary_from"].text())
+    check("and the overtime rate",
+          page._rows["salary_overtime"].text() == "\u20b9220.00",
+          page._rows["salary_overtime"].text())
+    check("the last payslip names its month and its net",
+          page._rows["salary_latest"].text() == "2026-06  \u00b7  \u20b925,800.00",
+          page._rows["salary_latest"].text())
+    check("and the reason the salary was set is kept within reach",
+          page._rows["salary_from"].toolTip() == "Annual review",
+          page._rows["salary_from"].toolTip())
+
+    # NOTHING SET YET MUST NOT READ AS ZERO. "\u20b90.00" against somebody's
+    # salary is a statement that they are paid nothing, and it is the same
+    # mistake this file already guards against for the work summary.
+    page._on_pay({"salary": None, "latest_payroll": None})
+    check("an unset salary says so rather than showing zero",
+          page._rows["salary_gross"].text() == "Not set",
+          page._rows["salary_gross"].text())
+    check("no overtime rate reads as not paid, not as nothing",
+          page._rows["salary_overtime"].text() == "Not paid",
+          page._rows["salary_overtime"].text())
+    check("and no payslip yet says so plainly",
+          page._rows["salary_latest"].text() == "None yet",
+          page._rows["salary_latest"].text())
+
     print("all profile page checks passed")
     sys.stdout.flush()
     sys.exit(0)

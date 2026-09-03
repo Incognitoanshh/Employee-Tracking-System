@@ -33,6 +33,7 @@ of a list is the log flood that has already been fixed three times here.
 from __future__ import annotations
 
 import threading
+import weakref
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap, QPainter, QPainterPath
@@ -53,18 +54,46 @@ _IN_FLIGHT: dict[str, "_PhotoFetcher"] = {}
 _KEEP: set = set()
 
 
-def forget(employee_id: str | None = None):
-    """Drop what is remembered, so the next draw asks again.
+# Every Avatar currently on screen, so a photo that changes can reach the
+# ones already drawn. Weak, so a page that is closed is not kept alive by
+# being in this set — the alternative is a registry that grows for the life
+# of the session and redraws widgets that no longer exist.
+_LIVE: "weakref.WeakSet" = weakref.WeakSet()
 
-    Called when somebody changes or removes their own photo: without it the
-    old picture stays on every other page until the app is restarted, which
-    reads as "the upload did not work".
+
+def forget(employee_id: str | None = None):
+    """Drop what is remembered, and REDRAW what is already on screen.
+
+    Clearing the cache alone was not enough, and the gap is easy to miss:
+    the next widget to ask gets the new photo, but every avatar already
+    drawn — the sidebar, the header portrait, the row in the employee list —
+    had asked once, at build time, and nothing asks again. So somebody
+    changed their picture, saw it update on My Profile, and went on seeing
+    their initials in the corner of every other page until the app was
+    restarted. Reported as exactly that.
     """
     with _LOCK:
         if employee_id is None:
             _CACHE.clear()
         else:
             _CACHE.pop(str(employee_id), None)
+        # Copied inside the lock and used outside it: refreshing touches Qt
+        # widgets, and holding a lock across that invites a deadlock with the
+        # fetcher thread finishing at the same moment.
+        live = list(_LIVE) if employee_id is not None else []
+
+    # ONLY FOR ONE PERSON. forget() with no id means "drop everything" — it is
+    # what logout and a theme rebuild call — and redrawing every avatar alive
+    # at that moment would fire a request each, for widgets that are about to
+    # be thrown away. A photo CHANGING is always about one employee, and that
+    # is the case worth chasing across the screen.
+    for avatar in live:
+        try:
+            if avatar.employee_id() == str(employee_id):
+                avatar.refresh()
+        except RuntimeError:
+            # Destroyed between being listed and being redrawn.
+            pass
 
 
 class _PhotoFetcher(QThread):
@@ -172,8 +201,21 @@ class Avatar(QLabel):
         self._pixmap: QPixmap | None = None
         self._initials = "?"
         self._employee_id: str | None = None
+        self._name: str = ""
         self._fetcher: _PhotoFetcher | None = None
         self._restyle()
+        _LIVE.add(self)
+
+    # ── so a photo that changes can find this widget again ───────────────
+    def employee_id(self) -> str | None:
+        return self._employee_id
+
+    def refresh(self):
+        """Ask for this person's photo again, keeping what is drawn until it
+        arrives — so a redraw does not flash the initials on the way."""
+        if self._employee_id:
+            wanted = self._employee_id
+            request(wanted, lambda data: self._arrived(wanted, data))
 
     # ── drawing ──────────────────────────────────────────────────────────
     def _restyle(self):
@@ -211,6 +253,7 @@ class Avatar(QLabel):
     def show_person(self, employee_id: str | None, name: str = ""):
         """Draw this person: initials at once, their photo when it arrives."""
         self._employee_id = str(employee_id) if employee_id else None
+        self._name = str(name or "")
         self.set_initials(name)
         self.set_image(None)
         if not self._employee_id:

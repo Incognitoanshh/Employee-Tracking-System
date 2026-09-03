@@ -189,6 +189,7 @@ class ProfilePage(QWidget):
         ], note="Only your phone number, email and photo are yours to change. "
                 "Everything else is set by your administrator."))
         body.addWidget(self._work_card())
+        body.addWidget(self._pay_card())
         body.addWidget(self._devices_card())
         body.addWidget(self._security_card())
         body.addWidget(self._preferences_card())
@@ -367,6 +368,25 @@ class ProfilePage(QWidget):
         layout.addLayout(charts)
         return card
 
+    def _pay_card(self) -> Card:
+        """What this person is on, and what they were last paid.
+
+        THEIR OWN, AND ONLY THEIR OWN. It is fed by /payroll/mine/salary, which
+        takes no employee id at all — there is no parameter here that could be
+        pointed at a colleague.
+
+        The last payslip shown is a FINALISED one. A draft's figures can still
+        move, and telling somebody a number that then changes is worse than
+        showing them nothing until it is settled.
+        """
+        return self._section("Pay", [
+            ("Monthly gross", "salary_gross"),
+            ("In effect since", "salary_from"),
+            ("Overtime, per hour", "salary_overtime"),
+            ("Last payslip", "salary_latest"),
+        ], note="Your own pay only. Ask an administrator if something here "
+                "looks wrong — this page shows it, it does not set it.")
+
     def _devices_card(self) -> Card:
         card = self._section("This Device", [
             ("Device", "device_name"), ("Operating system", "device_os"),
@@ -493,6 +513,11 @@ class ProfilePage(QWidget):
         self._run(self._fetch_profile, self._on_profile)
         self._run(self._fetch_summary, self._on_summary)
         self._run(self._fetch_sessions, self._on_sessions)
+        # QUIET ON FAILURE, unlike the others. Payroll may simply not be set
+        # up yet, and a red banner saying "could not load your pay" every time
+        # somebody opens their profile would be alarming and wrong. The fields
+        # stay as dashes, which reads as "nothing here yet".
+        self._run(self._fetch_pay, self._on_pay, lambda _error: None)
 
     @staticmethod
     def _fetch_profile():
@@ -508,6 +533,37 @@ class ProfilePage(QWidget):
         if response.status_code != 200:
             raise RuntimeError("Could not load your work summary.")
         return response.json()
+
+    @staticmethod
+    def _fetch_pay():
+        response = _http.get(f"{API_BASE_URL}/payroll/mine/salary",
+                             headers=_headers(), timeout=15)
+        if response.status_code != 200:
+            raise RuntimeError("Could not load your pay.")
+        return response.json()
+
+    def _on_pay(self, data: dict):
+        def money(value):
+            try:
+                return f"₹{float(value):,.2f}"
+            except (TypeError, ValueError):
+                return "—"
+
+        salary = (data or {}).get("salary") or {}
+        latest = (data or {}).get("latest_payroll") or {}
+
+        self._rows["salary_gross"].setText(
+            money(salary.get("gross_monthly")) if salary.get("gross_monthly") is not None
+            else "Not set")
+        self._rows["salary_from"].setText(salary.get("effective_from") or "—")
+        self._rows["salary_overtime"].setText(
+            money(salary.get("overtime_hourly"))
+            if float(salary.get("overtime_hourly") or 0) else "Not paid")
+        self._rows["salary_latest"].setText(
+            f"{latest.get('month')}  ·  {money(latest.get('net_pay'))}"
+            if latest.get("month") else "None yet")
+        if salary.get("remarks"):
+            self._rows["salary_from"].setToolTip(str(salary["remarks"]))
 
     @staticmethod
     def _fetch_sessions():

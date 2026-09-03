@@ -90,13 +90,28 @@ _LIGHT = {
     "BG": "#f4f5f7", "SIDEBAR": "#ffffff", "CARD": "#ffffff",
     "CARD_HOVER": "#f7f8fa", "ELEVATED": "#eef0f4",
     "BORDER": "rgba(9,9,11,0.08)", "BORDER_SOFT": "rgba(9,9,11,0.05)",
-    "TEXT": "#09090b", "TEXT_MUTED": "#52525b", "TEXT_DIM": "#71717a",
+    # TEXT_DIM IS #64646d, NOT #71717a. Measured, not adjusted by eye: the
+    # paler value cleared 4.5:1 on a white card (4.83) and failed on the
+    # ELEVATED one (4.24) — and elevated is where muted text most often sits,
+    # on table headers and the second line of a chip row.
+    "TEXT": "#09090b", "TEXT_MUTED": "#52525b", "TEXT_DIM": "#64646d",
     "PRIMARY": "#2563eb", "PRIMARY_DIM": "#1d4ed8",
-    "GREEN": "#15803d", "GREEN_BG": "rgba(34,197,94,0.14)",
+    # ── the three that carry the status chips ──────────────────────────
+    #
+    # A chip is 11px semibold on a 14–18% tint of its own colour, which is
+    # normal text by every measure that matters, so it needs 4.5:1. These
+    # three were at 4.02 (red), 4.38 (amber) and 4.45 (green) — close enough
+    # to look considered and under the line in every case. Thirteen of the
+    # twenty-eight chips in the product came from them.
+    #
+    # Only the FOREGROUND moved. Darkening the tint instead would have made
+    # the chips heavier on the page, and the tint is what makes the column
+    # scannable.
+    "GREEN": "#166534", "GREEN_BG": "rgba(34,197,94,0.14)",
     "BLUE": "#1d4ed8", "BLUE_BG": "rgba(59,130,246,0.14)",
     "PURPLE": "#6d28d9", "PURPLE_BG": "rgba(167,139,250,0.18)",
-    "AMBER": "#b45309", "AMBER_BG": "rgba(245,158,11,0.18)",
-    "RED": "#dc2626", "RED_BG": "rgba(239,68,68,0.14)",
+    "AMBER": "#92400e", "AMBER_BG": "rgba(245,158,11,0.18)",
+    "RED": "#b91c1c", "RED_BG": "rgba(239,68,68,0.14)",
     "CYAN": "#0e7490", "CYAN_BG": "rgba(34,211,238,0.18)",
     "DANGER_BG": "rgba(220,38,38,0.10)", "DANGER_BORDER": "rgba(220,38,38,0.30)",
     "ON_ACCENT": "#ffffff",
@@ -116,6 +131,10 @@ _ADMIN_DARK = {
     "text_primary": "#f8fafc", "text_secondary": "#94a3b8", "text_muted": "#64748b",
     "accent": "#3b82f6", "accent_hover": "#60a5fa", "accent_pressed": "#2563eb",
     "accent_soft": "rgba(59,130,246,0.15)",
+    # What text is when it sits ON the accent rather than beside it. The same
+    # idea the employee palette calls ON_ACCENT; the console had been writing
+    # the literal at each call site.
+    "on_accent": "#ffffff",
     "success": "#22c55e", "warning": "#f59e0b",
     "danger": "#ef4444", "danger_strong": "#dc2626",
     "danger_soft": "rgba(239,68,68,0.12)",
@@ -128,9 +147,13 @@ _ADMIN_LIGHT = {
     "bg_app": "#f4f5f7", "bg_sidebar": "#ffffff", "bg_surface": "#ffffff",
     "bg_surface_alt": "#fafafa", "bg_elevated": "#eef0f4",
     "border": "rgba(9,9,11,0.08)", "border_light": "rgba(9,9,11,0.14)",
-    "text_primary": "#09090b", "text_secondary": "#52525b", "text_muted": "#71717a",
+    # text_muted matches the employee panel's TEXT_DIM, and moved with it for
+    # the same measured reason: 4.24:1 on bg_elevated, which is where this
+    # colour spends most of its time — table headers and captions.
+    "text_primary": "#09090b", "text_secondary": "#52525b", "text_muted": "#64646d",
     "accent": "#2563eb", "accent_hover": "#1d4ed8", "accent_pressed": "#1e40af",
     "accent_soft": "rgba(37,99,235,0.12)",
+    "on_accent": "#ffffff",
     "success": "#15803d", "warning": "#b45309",
     "danger": "#dc2626", "danger_strong": "#b91c1c",
     "danger_soft": "rgba(220,38,38,0.10)",
@@ -376,6 +399,15 @@ def _status_table() -> dict:
         "draft":        (C.TEXT_MUTED, C.ELEVATED),
         "review":       (C.AMBER,  C.AMBER_BG),
         "finalized":    (C.GREEN,  C.GREEN_BG),
+        # An account, and whether it can be reached or used
+        #
+        # SUSPENDED IS RED AND OUTRANKS THE OTHER TWO. A suspended account
+        # cannot sign in, so "offline" is true of it but is not the fact
+        # anybody is looking for — the employee list shows this instead of the
+        # live state, never beside it.
+        "online":       (C.GREEN,  C.GREEN_BG),
+        "offline":      (C.TEXT_MUTED, C.ELEVATED),
+        "suspended":    (C.RED,    C.RED_BG),
         # Generic
         "absent":       (C.RED,    C.RED_BG),
         "present":      (C.GREEN,  C.GREEN_BG),

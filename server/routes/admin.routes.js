@@ -37,15 +37,27 @@ router.post("/alerts/settings", alertsCtrl.saveSettings);
 // controller checks it again — a route is a door, not a guarantee.
 router.get("/payroll", payrollCtrl.listRuns);
 router.get("/payroll/salaries", payrollCtrl.listSalaries);
+// Before "/payroll/:month" — "benefits" is not a month.
+router.get("/payroll/benefits", payrollCtrl.benefits);
+// BEFORE "/payroll/:month". Express matches in order, and "employee" would
+// otherwise be read as a month and rejected as "Month must be YYYY-MM".
+router.get("/payroll/employee/:employee_id", payrollCtrl.employeeHistory);
 router.post("/payroll/salaries", payrollCtrl.setSalary);
 router.get("/payroll/salaries/:employee_id", payrollCtrl.salaryHistory);
 router.post("/payroll/generate", payrollCtrl.generate);
 router.delete("/payroll/adjustments/:id", payrollCtrl.removeAdjustment);
+router.delete("/payroll/deductions/:id", payrollCtrl.removeDeduction);
+// BEFORE the "/payroll/:month" routes below. Express matches in order, and
+// "adjustments" and "deductions" would otherwise be read as a month — which
+// fails validation and returns "Month must be YYYY-MM" for a delete.
 router.get("/payroll/:month", payrollCtrl.getRun);
 router.get("/payroll/:month/summary", payrollCtrl.summary);
+router.get("/payroll/:month/report", payrollCtrl.report);       // ?group=&format=csv
 router.post("/payroll/:month/finalize", payrollCtrl.finalize);
 router.post("/payroll/:month/adjustments", payrollCtrl.addAdjustment);
+router.post("/payroll/:month/deductions", payrollCtrl.addDeduction);
 router.post("/payroll/:month/overtime", payrollCtrl.setOvertime);
+router.delete("/payroll/:month", payrollCtrl.deleteRun);        // a draft only
 
 // Leave, from the deciding side. Any admin may approve or reject — the
 // owner's decision — so these sit behind adminOnly rather than superAdminOnly.

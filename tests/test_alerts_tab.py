@@ -143,30 +143,64 @@ def main():
         # who had just read a message from her could not find her in her own
         # employee list.
         emp = panel._EmployeesTab()
-        emp._display_employees([
+        # Through _rows, which is what the tab itself fills and what the
+        # person column reads back when a row is opened.
+        emp._rows = [
             {"employee_id": "AD100", "username": "manager", "full_name": "Priya Nair",
              "role": "admin", "status": "online", "last_seen": None},
             {"employee_id": "EM101", "username": "rajesh", "full_name": "",
              "role": "employee", "status": "offline", "last_seen": None},
-        ])
-        shown = emp._table.item(0, 1).text()
+        ]
+        emp._display_employees(emp._rows)
+        # THE NAME MOVED INTO A CELL WIDGET, and the check moved with it. The
+        # person column now stacks the name over the id and job title beside
+        # an avatar, which is three facts and two weights — none of which a
+        # QTableWidgetItem can hold. The lesson being guarded is unchanged:
+        # the name has to be here, and the login username has to still be
+        # findable, so the same account does not read as two different people
+        # on two screens. tests/test_employees_list.py covers the rest of the
+        # column's layout.
+        def person_text(row: int) -> str:
+            widget = emp._table.cellWidget(row, 0)
+            return " | ".join(
+                l.text() for l in widget.findChildren(panel.QLabel) if l.text())
+
+        shown = person_text(0)
         check("the name somebody is shown by everywhere else is here too",
               "Priya Nair" in shown, shown)
-        check("with the login username kept beside it, not thrown away",
-              "manager" in shown, shown)
+        check("with the login username still on the record",
+              emp._rows[0]["username"] == "manager", shown)
         check("an account with no name falls back to the username",
-              emp._table.item(1, 1).text() == "rajesh", emp._table.item(1, 1).text())
-        header = emp._table.horizontalHeaderItem(1).text()
-        check("and the column says Name", header == "Name", header)
+              "rajesh" in person_text(1), person_text(1))
+        header = emp._table.horizontalHeaderItem(0).text()
+        check("and the column says Employee", header == "Employee", header)
         check("the search box says a name can be typed into it",
               "name" in emp._search_input.placeholderText().lower(),
               emp._search_input.placeholderText())
 
-        print("\nCreating somebody, with the name you want shown")
-        # The create dialog never asked for a name, so the server fell back to
-        # the login username and every account made from the panel was shown
-        # by its login for the rest of its life — there was no way to correct
-        # one afterwards either.
+        print("\nCreating somebody hands off to the Add Employee page")
+        # THIS USED TO DRIVE A DIALOG. The create form was six fields in a
+        # 380px modal that validated one at a time through message boxes; it
+        # is now a four-step page, and the whole of what it collects and
+        # refuses lives in tests/test_add_employee_page.py.
+        #
+        # What stays here is the lesson this block was written for: the form
+        # never asked for a name, so the server fell back to the login
+        # username and every account made from the panel was shown by its
+        # login for the rest of its life. The tab must hand off rather than
+        # build a form of its own — the moment it builds one again, that form
+        # is not the one under test anywhere.
+        asked = []
+        emp.open_add_employee.connect(lambda: asked.append(True))
+        emp._add_employee()
+        check("pressing Add Employee opens the page, not a dialog",
+              asked == [True] and not emp.findChildren(panel.QDialog),
+              f"asked={asked} dialogs={len(emp.findChildren(panel.QDialog))}")
+        check("and the page asks for a full name",
+              any(f.placeholderText() == "Rajesh Kumar"
+                  for f in panel._AddEmployeePage().findChildren(panel.QLineEdit)),
+              "no name field — every new account would be shown by its login")
+
         sent = []
 
         class _CapturePost:
@@ -187,57 +221,6 @@ def main():
         original_exec = panel.QDialog.exec
         panel.QDialog.exec = lambda self_: None
         try:
-            emp._add_employee()
-            fields = emp.findChildren(panel.QLineEdit)
-            check("the create dialog asks for a full name",
-                  any(f.placeholderText() == "Rajesh Kumar"
-                      for d in emp.findChildren(panel.QDialog)
-                      for f in d.findChildren(panel.QLineEdit)),
-                  "no name field — every new account would be shown by its login")
-
-            dialog = emp.findChildren(panel.QDialog)[-1]
-            boxes = dialog.findChildren(panel.QLineEdit)
-            by_hint = {f.placeholderText(): f for f in boxes}
-            buttons = [b for b in dialog.findChildren(QPushButton)
-                       if "Create" in b.text()]
-
-            # Submitting with no name must not quietly create the account.
-            by_hint["rajesh"].setText("newguy")
-            buttons[0].click()
-            check("creating without a name is refused, with the reason",
-                  len(sent) == 0 and warned, str(warned))
-
-            by_hint["Rajesh Kumar"].setText("Sunita Verma")
-            by_hint["QA Engineer"].setText("Accounts")
-
-            # THE EMPLOYEE ID IS REQUIRED NOW, and the dialog normally arrives
-            # with one already filled in — the server is asked for the next in
-            # the series (26AMZEM001) when it opens. There is no server here,
-            # so it is typed, which is also what an administrator does when
-            # that request cannot be made.
-            warned.clear()
-            buttons[0].click()
-            check("an empty employee ID is refused, before the network",
-                  len(sent) == 0 and warned, f"sent={len(sent)} warned={warned}")
-
-            warned.clear()
-            by_hint["26AMZEM001"].setText("sunita verma")
-            buttons[0].click()
-            check("and so is one with a space in it — it is a roll number",
-                  len(sent) == 0 and warned, f"sent={len(sent)} warned={warned}")
-
-            by_hint["26AMZEM001"].setText("26AMZEM007")
-            buttons[0].click()
-            check("with a name, it is sent to the server",
-                  len(sent) == 1, str(len(sent)))
-            check("carrying the id exactly as typed",
-                  sent[0][1].get("employee_id") == "26AMZEM007", str(sent[0][1]))
-            check("as full_name, the field the rest of the product reads",
-                  sent[0][1].get("full_name") == "Sunita Verma", str(sent[0][1]))
-            check("with the designation",
-                  sent[0][1].get("designation") == "Accounts", str(sent[0][1]))
-            check("and the login username kept separate",
-                  sent[0][1].get("username") == "newguy", str(sent[0][1]))
 
             print("\nCorrecting a name later")
             sent.clear()
@@ -265,8 +248,11 @@ def main():
         check("right after the Dashboard, where it will be seen",
               keys.index("alerts") == 1, str(keys))
         # Every page key needs a tab, in the same order.
+        # COVERS, not equals. A page with no menu entry — the employee pay
+        # history, opened by double-clicking somebody — is still a page whose
+        # workers have to be drained when the window closes.
         check("the shutdown list covers every page",
-              len(panel.AdminConfigPanel.TAB_ATTRS) == len(keys),
+              all(f"_{key}_tab" in panel.AdminConfigPanel.TAB_ATTRS for key in keys),
               f"{len(keys)} pages but {len(panel.AdminConfigPanel.TAB_ATTRS)} tabs listed")
     finally:
         panel._FetchWorker = original

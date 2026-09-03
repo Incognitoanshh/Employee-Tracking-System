@@ -123,12 +123,44 @@ exports.getEmployees = async (req, res) => {
         // had just read a message from "Priya Nair" searched for her here and
         // was told there was no such person — the account is AD100/manager.
         // designation as well: "who are the QA people" is a real question.
-        const searchWhere = search
-            ? `WHERE (employee_id ILIKE $1 OR username ILIKE $1 OR role ILIKE $1
-                      OR COALESCE(full_name, '') ILIKE $1
-                      OR COALESCE(designation, '') ILIKE $1)`
-            : "";
-        const searchVals = search ? [`%${search}%`] : [];
+        // ── the filters, applied WHERE THE ROWS ARE, not on the page ────
+        //
+        // These have to be part of the query rather than something the panel
+        // does to the fifty rows it happens to be holding. Filtering a page
+        // answers "which of these fifty are in Design", which is not the
+        // question anybody asked, and the count under the table would still
+        // be the unfiltered total.
+        //
+        // All three are optional and all three are columns, so a filter is
+        // never a guess: `status` is the suspended flag, not the live
+        // online/offline one, which changes minute to minute and is shown as
+        // a chip instead.
+        const conditions = [];
+        const searchVals = [];
+        if (search) {
+            searchVals.push(`%${search}%`);
+            conditions.push(`(employee_id ILIKE $${searchVals.length}
+                              OR username ILIKE $${searchVals.length}
+                              OR role ILIKE $${searchVals.length}
+                              OR COALESCE(full_name, '') ILIKE $${searchVals.length}
+                              OR COALESCE(designation, '') ILIKE $${searchVals.length})`);
+        }
+        const role = String(req.query.role || "").trim();
+        if (role && VALID_ROLES.includes(role)) {
+            searchVals.push(role);
+            conditions.push(`role = $${searchVals.length}`);
+        }
+        const department = String(req.query.department || "").trim();
+        if (department) {
+            searchVals.push(department);
+            conditions.push(`COALESCE(department, '') = $${searchVals.length}`);
+        }
+        const status = String(req.query.status || "").trim().toLowerCase();
+        if (status === "suspended" || status === "active") {
+            conditions.push(`suspended IS ${status === "suspended" ? "TRUE" : "NOT TRUE"}`);
+        }
+        const searchWhere = conditions.length
+            ? `WHERE ${conditions.join(" AND ")}` : "";
         const p = searchVals.length;
 
         const result = await pool.query(`
@@ -210,8 +242,18 @@ exports.getEmployees = async (req, res) => {
         );
         const counts = Object.fromEntries(roleCounts.rows.map(r => [r.role, r.n]));
 
+        // EVERY DEPARTMENT, NOT THE ONES ON THIS PAGE. The filter is a list
+        // of what the company has; built from the page it would offer
+        // "Design" only while somebody from Design happened to be on screen,
+        // and change as you paged through.
+        const departments = await pool.query(
+            `SELECT DISTINCT department FROM employees
+              WHERE department IS NOT NULL AND department <> ''
+              ORDER BY department ASC`);
+
         return res.json({
             success: true,
+            departments: departments.rows.map((r) => r.department),
             data: result.rows.map(row => ({
                 ...row,
                 last_seen: row.last_seen && new Date(row.last_seen).getFullYear() > 1970
@@ -307,11 +349,109 @@ exports.nextEmployeeId = async (req, res) => {
     }
 };
 
+/**
+ * The fields an onboarding form collects beyond a login.
+ *
+ * Each one is (column, how to clean it, what is wrong with it). Kept as data
+ * rather than as thirty lines of ifs so that adding a field is one row, and so
+ * the INSERT below cannot drift out of step with the validation above it —
+ * they are generated from the same list.
+ *
+ * Everything here is OPTIONAL. A person can be hired before their PAN has been
+ * handed over, and a form that refuses to save until every box is full is a
+ * form somebody fills with rubbish.
+ */
+const ONBOARDING_FIELDS = [
+    // ── the four that already had columns, and were being dropped ──────
+    //
+    // employees has carried email, phone, department and joining_date for a
+    // long time; the employee list selects them and the employee page has a
+    // row for each. What did not exist was any way to SET them when somebody
+    // was hired — createEmployee wrote six columns and ignored the rest of
+    // the body.
+    //
+    // So the onboarding form collected them, sent them, and the server threw
+    // them away without a word: a person added with a full record came out
+    // with a designation and nothing else, and the page that shows them read
+    // "—" down the column. Reported exactly that way.
+    ["email", (v) => String(v).trim(),
+     (v) => v.length <= 255 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v),
+     "That does not look like an email address."],
+    ["phone", (v) => String(v).trim(), (v) => v.length <= 32,
+     "A phone number is 32 characters at most."],
+    ["department", (v) => String(v).trim(), (v) => v.length <= 120,
+     "Department is 120 characters at most."],
+    ["joining_date", (v) => String(v).trim(),
+     (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v)),
+     "Joining date must be a date, as YYYY-MM-DD."],
+
+    ["gender", (v) => String(v).trim().toLowerCase(),
+     (v) => ["male", "female", "other", "prefer_not_to_say"].includes(v),
+     "Gender must be male, female, other, or prefer_not_to_say."],
+    ["work_location", (v) => String(v).trim(), (v) => v.length <= 120,
+     "Work location is 120 characters at most."],
+    ["date_of_birth", (v) => String(v).trim(),
+     (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v)),
+     "Date of birth must be a date, as YYYY-MM-DD."],
+    // UPPER CASED BEFORE IT IS CHECKED, so "abcde1234f" is accepted and stored
+    // as one spelling. Two casings of the same PAN are the same PAN, and only
+    // one of them can be on a filing.
+    ["pan", (v) => String(v).trim().toUpperCase(),
+     (v) => /^[A-Z]{5}[0-9]{4}[A-Z]$/.test(v),
+     "A PAN is five letters, four digits and a letter — ABCDE1234F."],
+    ["address", (v) => String(v).trim(), (v) => v.length <= 500,
+     "Address is 500 characters at most."],
+    ["payment_mode", (v) => String(v).trim().toLowerCase(),
+     (v) => ["bank_transfer", "cheque", "cash"].includes(v),
+     "Payment mode must be bank_transfer, cheque or cash."],
+    ["bank_name", (v) => String(v).trim(), (v) => v.length <= 120,
+     "Bank name is 120 characters at most."],
+    ["bank_account_number", (v) => String(v).replace(/\s+/g, ""),
+     (v) => /^[0-9]{6,20}$/.test(v),
+     "A bank account number is 6 to 20 digits."],
+    ["bank_ifsc", (v) => String(v).trim().toUpperCase(),
+     (v) => /^[A-Z]{4}0[A-Z0-9]{6}$/.test(v),
+     "An IFSC is four letters, a zero, then six more — HDFC0001234."],
+];
+
+/**
+ * Read the optional onboarding fields off a request body.
+ *
+ * @returns {{values: object, error: string|null, field: string|null}}
+ *   values are cleaned and ready to store; a blank field is left out entirely
+ *   rather than stored as an empty string, because "" and "not given" are the
+ *   same fact and only one of them sorts and filters correctly.
+ */
+function readOnboarding(body) {
+    const values = {};
+    for (const [column, clean, valid, complaint] of ONBOARDING_FIELDS) {
+        const raw = body?.[column];
+        if (raw === undefined || raw === null || String(raw).trim() === "") continue;
+        const cleaned = clean(raw);
+        if (!valid(cleaned)) return { values, error: complaint, field: column };
+        values[column] = cleaned;
+    }
+    return { values, error: null, field: null };
+}
+
 exports.createEmployee = async (req, res) => {
     const {
         employee_id, username, password, role = "employee",
         full_name = null, designation = null,
     } = req.body || {};
+
+    // PORTAL ACCESS — whether this person can sign in at all.
+    //
+    // Somebody on the payroll is not necessarily somebody who runs the client:
+    // a contractor is paid and never signs in. Those employees are stored with
+    // no username and no password, and the login query cannot reach them —
+    // LOWER(NULL) = LOWER($1) is NULL, never true — so this is enforced by the
+    // shape of the data rather than by a check that could be forgotten.
+    //
+    // DEFAULTS TO ON when the field is absent, so every existing caller keeps
+    // the behaviour it has today.
+    const portalAccess = req.body?.portal_access === undefined
+        ? true : Boolean(req.body.portal_access);
 
     // BUG FIX: pehle empty/missing fields directly DB tak pahunch jaate the.
     // AN EMPLOYEE ID IS A ROLL NUMBER, and the rules that go with one.
@@ -335,10 +475,28 @@ exports.createEmployee = async (req, res) => {
         });
     }
 
-    if (!employee_id || !username || !password) {
+    if (!employee_id || (portalAccess && (!username || !password))) {
         return res.status(400).json({
             success: false,
             message: "employee_id, username and password are required"
+        });
+    }
+
+    // AN ADMIN WITHOUT A LOGIN IS NOBODY. The whole of an admin's job is this
+    // console; an account that cannot reach it holds a role it can never use,
+    // and role caps would count it against the three super admins allowed.
+    if (!portalAccess && role !== "employee") {
+        return res.status(400).json({
+            success: false,
+            message: "Only an employee can be added without portal access — "
+                   + "an admin account exists to use the console.",
+        });
+    }
+
+    const onboarding = readOnboarding(req.body);
+    if (onboarding.error) {
+        return res.status(400).json({
+            success: false, message: onboarding.error, field: onboarding.field,
         });
     }
 
@@ -377,9 +535,14 @@ exports.createEmployee = async (req, res) => {
         }
     }
 
-    const weak = validatePassword(password, { username, employeeId: employee_id });
-    if (weak) {
-        return res.status(400).json({ success: false, message: weak });
+    // Only when there is a password to judge. With portal access off there is
+    // no login to protect, and refusing to save because an absent password is
+    // weak would make the option unusable.
+    if (portalAccess) {
+        const weak = validatePassword(password, { username, employeeId: employee_id });
+        if (weak) {
+            return res.status(400).json({ success: false, message: weak });
+        }
     }
 
     // Kaun kis role ka account bana sakta hai
@@ -404,17 +567,38 @@ exports.createEmployee = async (req, res) => {
 
     try {
         const bcrypt = require("bcryptjs");
-        const hashedPassword = await bcrypt.hash(password, 10);
+        // NULL, not a hash of something unguessable. A random password would
+        // still be a password, and the row would still be reachable by the
+        // login query if a username were ever filled in by hand. Absent is a
+        // stronger statement than unknown.
+        const hashedPassword = portalAccess ? await bcrypt.hash(password, 10) : null;
+
+        // The onboarding columns are appended to the fixed six, both in the
+        // column list and in the values, from the same object — so a field
+        // added to ONBOARDING_FIELDS cannot land in the wrong column here.
+        const columns = ["employee_id", "username", "password", "role",
+                         "full_name", "designation"];
+        const values = [
+            employee_id,
+            portalAccess ? username : null,
+            hashedPassword,
+            role,
+            // WITHOUT A USERNAME TO FALL BACK ON. A payroll-only employee has
+            // none, and "Unnamed" beats a row whose name column is empty in
+            // every report that prints it.
+            full_name || username || "Unnamed",
+            designation || (role === "super_admin" ? "Administrator"
+                            : role === "admin" ? "Manager" : "Employee"),
+        ];
+        for (const [column, value] of Object.entries(onboarding.values)) {
+            columns.push(column);
+            values.push(value);
+        }
+        const placeholders = values.map((_v, i) => `$${i + 1}`).join(", ");
 
         await pool.query(
-            `INSERT INTO employees (employee_id, username, password, role, full_name, designation)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [
-                employee_id, username, hashedPassword, role,
-                full_name || username,
-                designation || (role === "super_admin" ? "Administrator"
-                                : role === "admin" ? "Manager" : "Employee"),
-            ]
+            `INSERT INTO employees (${columns.join(", ")}) VALUES (${placeholders})`,
+            values
         );
 
         return res.json({ success: true, message: "Employee created" });

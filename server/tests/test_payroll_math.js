@@ -8,7 +8,8 @@
  *
  * Run:  node server/tests/test_payroll_math.js
  */
-const { calculateLine, money } = require("../utils/payroll_math");
+const { calculateLine, lateDeductionFor, splitCTC, statutoryFor,
+        money } = require("../utils/payroll_math");
 
 let failures = 0;
 function check(label, ok, detail = "") {
@@ -137,6 +138,167 @@ check("an empty call is zero, not NaN",
 line = calculateLine({ gross: 10000, workingDays: 20, absentDays: 20 });
 check("a whole month absent pays nothing, and not less than nothing",
     eq(line.net_pay, 0), String(line.net_pay));
+
+
+// ── what lateness costs, when a company decides it costs something ──────
+//
+// THE DEFAULT IS THAT IT COSTS NOTHING, and that is the case that matters
+// most: every existing payslip was generated without a lateness policy, and
+// adding one to the code must not have moved a single rupee on any of them.
+console.log("\nLateness: a fact always, a charge only under a policy");
+
+const late = (over) => lateDeductionFor({
+    lateDays: 4, lateMinutes: 200, perDay: 1000, hoursPerDay: 8, ...over });
+
+check("no policy, no charge", eq(late({}), 0), String(late({})));
+check("an unrecognised policy charges nothing rather than guessing",
+    eq(late({ mode: "SOMETHING_ELSE" }), 0), String(late({ mode: "SOMETHING_ELSE" })));
+
+check("per-day: four late days at a thousand a day is four thousand",
+    eq(late({ mode: "PER_DAY" }), 4000), String(late({ mode: "PER_DAY" })));
+check("per-day: the excused days come off first",
+    eq(late({ mode: "PER_DAY", freeDays: 2 }), 2000),
+    String(late({ mode: "PER_DAY", freeDays: 2 })));
+check("per-day: excusing more days than there were is not a credit",
+    eq(late({ mode: "PER_DAY", freeDays: 9 }), 0),
+    String(late({ mode: "PER_DAY", freeDays: 9 })));
+
+// 200 minutes = 3h20m; a 1000-rupee day over 8 hours is 125 an hour.
+check("pro-rata: the minutes at the hourly rate",
+    eq(late({ mode: "PRO_RATA" }), 416.67), String(late({ mode: "PRO_RATA" })));
+check("pro-rata: a zero-hour day does not divide by zero",
+    eq(late({ mode: "PRO_RATA", hoursPerDay: 0 }), 0),
+    String(late({ mode: "PRO_RATA", hoursPerDay: 0 })));
+check("negative minutes cannot pay somebody for being late",
+    eq(late({ mode: "PRO_RATA", lateMinutes: -600 }), 0),
+    String(late({ mode: "PRO_RATA", lateMinutes: -600 })));
+
+// And through a whole line, because that is where it reaches the net.
+line = calculateLine({
+    gross: 26000, workingDays: 26, presentDays: 26,
+    lateDays: 3, lateMinutes: 90,
+});
+check("a line with lateness and no policy is paid in full",
+    eq(line.net_pay, 26000), String(line.net_pay));
+check("but the minutes are on the payslip either way",
+    line.late_minutes === 90 && line.late_days === 3,
+    `${line.late_days} days, ${line.late_minutes} minutes`);
+
+line = calculateLine({
+    gross: 26000, workingDays: 26, presentDays: 26,
+    lateDays: 3, lateMinutes: 90,
+    latePolicy: { mode: "PER_DAY", freeDays: 1, hoursPerDay: 8 },
+});
+// 26000/26 = 1000 a day; three late days less one excused = two.
+check("with a per-day policy, two chargeable days cost two days' pay",
+    eq(line.late_deduction, 2000) && eq(line.net_pay, 24000),
+    `${line.late_deduction} / ${line.net_pay}`);
+check("and lateness is counted in the total deductions",
+    eq(line.total_deductions, 2000), String(line.total_deductions));
+
+// ── deductions somebody entered ─────────────────────────────────────────
+line = calculateLine({
+    gross: 26000, workingDays: 26, presentDays: 26, otherDeductions: 1800,
+});
+check("an entered deduction comes off the net",
+    eq(line.net_pay, 24200), String(line.net_pay));
+check("a negative entered deduction cannot add to somebody's pay",
+    eq(calculateLine({ gross: 26000, workingDays: 26, presentDays: 26,
+                       otherDeductions: -5000 }).net_pay, 26000),
+    String(calculateLine({ gross: 26000, workingDays: 26, presentDays: 26,
+                           otherDeductions: -5000 }).net_pay));
+
+
+// ── a cost to company, split into the parts a payslip prints ────────────
+//
+// THE ONE PROPERTY THAT MATTERS: the parts add back to the whole. A split
+// that comes to 23,332.99 against a CTC of 23,333 is a payslip arguing with
+// itself, and somebody has to be able to say where the rupee went.
+console.log("\nSplitting a CTC");
+
+const TEMPLATE = [
+    { name: "Basic", rule: "PERCENT_CTC", value: 50 },
+    { name: "DA", rule: "PERCENT_BASIC", value: 20 },
+    { name: "House Rent Allowance", rule: "PERCENT_BASIC", value: 50 },
+    { name: "Conveyance Allowance", rule: "PERCENT_BASIC", value: 15 },
+    { name: "Fixed Allowance", rule: "BALANCE", value: 0 },
+];
+
+const totalOf = (rows) => money(rows.reduce((sum, r) => sum + r.monthly, 0));
+const byName = (rows, name) => rows.find((r) => r.name === name).monthly;
+
+let split = splitCTC(23333, TEMPLATE);
+check("Basic is half the CTC", eq(byName(split, "Basic"), 11666.5),
+    String(byName(split, "Basic")));
+check("DA is a fifth of Basic", eq(byName(split, "DA"), 2333.3),
+    String(byName(split, "DA")));
+check("house rent is half of Basic",
+    eq(byName(split, "House Rent Allowance"), 5833.25),
+    String(byName(split, "House Rent Allowance")));
+check("the parts add back to the CTC exactly",
+    eq(totalOf(split), 23333), String(totalOf(split)));
+
+// The awkward ones: a CTC that does not divide cleanly must still balance.
+for (const ctc of [23333, 10000, 33333.33, 1, 87654.21, 1000000]) {
+    check(`${ctc} splits without losing a paisa`,
+        eq(totalOf(splitCTC(ctc, TEMPLATE)), money(ctc)),
+        `${totalOf(splitCTC(ctc, TEMPLATE))} vs ${money(ctc)}`);
+}
+
+check("a CTC of zero is all zeroes, not a crash",
+    eq(totalOf(splitCTC(0, TEMPLATE)), 0), String(totalOf(splitCTC(0, TEMPLATE))));
+check("an empty template splits into nothing",
+    splitCTC(50000, []).length === 0, String(splitCTC(50000, []).length));
+
+// A template whose fixed parts already exceed the CTC is a template somebody
+// has to fix. Paying a NEGATIVE allowance to make the sum work would hide it.
+split = splitCTC(10000, [
+    { name: "Basic", rule: "PERCENT_CTC", value: 50 },
+    { name: "Something", rule: "FIXED", value: 90000 },
+    { name: "Fixed Allowance", rule: "BALANCE", value: 0 },
+]);
+check("an over-committed template never pays a negative allowance",
+    byName(split, "Fixed Allowance") === 0,
+    String(byName(split, "Fixed Allowance")));
+
+// ── statutory, and only when somebody switched it on ────────────────────
+console.log("\nStatutory deductions apply only when configured");
+
+const RATES = { epfRate: 12, epfCeiling: 15000, esiRate: 0.75,
+                esiCeiling: 21000, professionalTax: 200 };
+
+let due = statutoryFor({ basic: 11666.5, da: 2333.3, gross: 23333, rates: RATES,
+                         enabled: {} });
+check("nothing is deducted by default", eq(due.total, 0), String(due.total));
+
+due = statutoryFor({ basic: 11666.5, da: 2333.3, gross: 23333, rates: RATES,
+                     enabled: { epf: true } });
+// Basic + DA is 13,999.80, under the 15,000 ceiling, so 12% of all of it.
+check("provident fund is 12% of Basic plus DA", eq(due.epf, 1679.98),
+    String(due.epf));
+
+due = statutoryFor({ basic: 40000, da: 0, gross: 60000, rates: RATES,
+                     enabled: { epf: true } });
+// Above the ceiling the contribution stops rising: 12% of 15,000.
+check("and it stops rising at the wage ceiling", eq(due.epf, 1800),
+    String(due.epf));
+
+due = statutoryFor({ basic: 8000, da: 0, gross: 18000, rates: RATES,
+                     enabled: { esi: true } });
+check("ESI is a share of gross under its ceiling", eq(due.esi, 135),
+    String(due.esi));
+
+due = statutoryFor({ basic: 20000, da: 0, gross: 40000, rates: RATES,
+                     enabled: { esi: true } });
+// ESI STOPS ENTIRELY above the ceiling — somebody over the limit is outside
+// the scheme, not paying the maximum.
+check("and stops entirely above it, rather than capping", eq(due.esi, 0),
+    String(due.esi));
+
+due = statutoryFor({ gross: 40000, rates: RATES, enabled: { pt: true } });
+check("professional tax is the flat figure somebody set",
+    eq(due.professional_tax, 200), String(due.professional_tax));
+
 
 console.log("\nMoney never keeps more than paise");
 line = calculateLine({ gross: 33333.33, workingDays: 23, unpaidLeaveDays: 1 });

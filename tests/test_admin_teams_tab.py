@@ -123,8 +123,19 @@ def main():
         if not (stripped.startswith("self._") and "= " in stripped
                 and stripped.rstrip().endswith(")")):
             continue
-        attr = stripped.split("=")[0].strip().replace("self.", "")
-        if attr.endswith("_tab"):
+        attr, _, built_from = (part.strip() for part in stripped.partition("="))
+        attr = attr.replace("self.", "")
+        # Pages that are not sidebar tabs do not end in _tab — the employee
+        # pay-history page, the salaries page and the payroll summary are all
+        # like this — but they are still pages, and they still have to be in
+        # the shutdown list or their fetch outlives the window.
+        #
+        # RECOGNISED BY WHAT THEY ARE BUILT FROM, not by a list of names kept
+        # here. This was a hand-written allowlist, which meant every new page
+        # failed this check once for a reason that had nothing to do with the
+        # page — the same fragility the migration runner's docstring describes
+        # as "nobody lists anything".
+        if attr.endswith("_tab") or built_from.rstrip(")").endswith("Page("):
             built.add(attr)
     listed = set(acp.AdminConfigPanel.TAB_ATTRS)
     check("every tab the panel builds is in the shutdown list",
@@ -154,10 +165,21 @@ def main():
             if stripped.startswith("self._"):
                 mounted.append(stripped.rstrip(",").replace("self.", ""))
     expected = [f'_{p["key"]}_tab' for p in acp.PAGES]
+    # THE GUARANTEE IS "MENU INDEX i SHOWS STACK INDEX i", which is what the
+    # sidebar relies on. Pages with no menu entry are allowed, but only AFTER
+    # every mapped one — a page inserted among them shifts every entry after
+    # it and silently shows the wrong one. The employee pay-history page is
+    # such a page: it is reached by double-clicking somebody, not from the
+    # sidebar.
     check("every menu entry has a page mounted for it",
-          len(mounted) == len(expected), f"{len(expected)} menu entries, {len(mounted)} mounted")
+          len(mounted) >= len(expected),
+          f"{len(expected)} menu entries, {len(mounted)} mounted")
     check("the sidebar and the stack are in the same order",
-          mounted == expected, f"menu {expected} vs stack {mounted}")
+          mounted[:len(expected)] == expected,
+          f"menu {expected} vs stack {mounted[:len(expected)]}")
+    check("and any page without a menu entry comes after all of them",
+          all(name not in expected for name in mounted[len(expected):]),
+          f"unmapped pages: {mounted[len(expected):]}")
 
     # ── an ordinary admin ───────────────────────────────────────────────
     print("\nWhat an ordinary admin sees")
@@ -504,8 +526,11 @@ def main():
     check("the shutdown list knows about it",
           "_mychat_tab" in AdminConfigPanel.TAB_ATTRS,
           str(AdminConfigPanel.TAB_ATTRS))
+    # EVERY SIDEBAR PAGE IS IN THE LIST, and the list may hold more: a page
+    # reached by double-clicking somebody rather than from the menu still has
+    # workers to drain on logout.
     check("the sidebar and the stack still line up",
-          len(keys) == len(AdminConfigPanel.TAB_ATTRS),
+          all(f"_{key}_tab" in AdminConfigPanel.TAB_ATTRS for key in keys),
           f"{len(keys)} pages vs {len(AdminConfigPanel.TAB_ATTRS)} tabs")
 
     # It must be the SAME widget the employees use — a second chat
