@@ -24,9 +24,25 @@ Run:  python3 tests/test_payroll_tab.py
 """
 import os
 import sys
+import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# This suite builds a real AdminConfigPanel near the end to check a payroll
+# page through a theme rebuild.  Keep that construction away from a developer's
+# installed client data and from any reachable server, just as test_theme does.
+# The panel's normal startup path assumes main.py has already created the local
+# schema; this stand-alone test must provide that same precondition itself.
+os.environ.setdefault("ETS_DATA_DIR", tempfile.mkdtemp(prefix="ets_test_"))
+os.environ.setdefault("API_BASE_URL", "http://127.0.0.1:9/api")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+_TMP = tempfile.mkdtemp(prefix="ets_payroll_tab_test_")
+import client.core.config as config                                  # noqa: E402
+config.STORAGE_DIR = _TMP
+from client.infrastructure.database import database as database_module  # noqa: E402
+database_module.Database.DB_PATH = os.path.join(_TMP, "ets.db")
 
 failures = 0
 
@@ -43,7 +59,12 @@ from PySide6.QtWidgets import QApplication                       # noqa: E402
 
 app = QApplication.instance() or QApplication([])
 
+from client.infrastructure.database.database import Database      # noqa: E402
 from client.presentation.windows import admin_config_panel as panel  # noqa: E402
+
+# AdminConfigPanel is normally reached through main.py, which has already
+# made every local table ChatManager and the settings services use.
+Database.initialize()
 
 print("\nThe payroll table\n")
 
@@ -453,58 +474,68 @@ class _Dead:
         pass
 
 
-real_fetch, real_track = panel._FetchWorker, panel._track_worker
-panel._FetchWorker = _Dead
-panel._track_worker = lambda *a, **k: None
-try:
-    console = panel.AdminConfigPanel()
-    # It starts a scheduler and an idle tracker of its own the moment it is
-    # built; neither has anything to do with a layout test, and both keep
-    # running under it. test_theme does the same, for the same reason.
-    console._stop_background_services()
-    check("the stack holds more pages than the sidebar has entries",
-          console.stack.count() > len(panel.PAGES),
-          f"{console.stack.count()} pages, {len(panel.PAGES)} menu entries")
+from client.application.managers import chat_manager as chat_module  # noqa: E402
+from client.presentation.windows import team_page                    # noqa: E402
 
-    console._payroll_tab.open_employee.emit("E002")
-    check("double-clicking somebody opens their page",
-          type(console.stack.currentWidget()).__name__ == "_EmployeePayrollPage",
-          type(console.stack.currentWidget()).__name__)
-
-    # The crash was here.
-    console._toggle_theme()
-    check("switching the theme with it open does not break the console",
-          type(console.stack.currentWidget()).__name__ == "_EmployeePayrollPage",
-          type(console.stack.currentWidget()).__name__)
-    # AND IT STILL KNOWS WHOSE PAGE IT IS. The rebuild makes a fresh page,
-    # and a fresh page knows nobody: every figure went to a dash and "Set
-    # salary" did nothing at all, because it returns early without an
-    # employee id. Reported as "dark theme kiya empty, aur set salary button
-    # bhi kaam nahi kar raha jab tak page change karke wapas na aa jaun".
-    console._employee_payroll._employee_id = "E002"
-    console._toggle_theme()
-    check("and it still knows whose page it is after a theme switch",
-          console._employee_payroll._employee_id == "E002",
-          repr(console._employee_payroll._employee_id))
-
-    check("and the page still opens afterwards",
-          (console._payroll_tab.open_employee.emit("E002") or True)
-          and type(console.stack.currentWidget()).__name__ == "_EmployeePayrollPage",
-          type(console.stack.currentWidget()).__name__)
-finally:
-    # STOP ITS BACKGROUND WORK BEFORE LETTING GO OF IT. A real console starts
-    # timers and threads; left running, Qt aborts at interpreter exit with
-    # "QThread: Destroyed while thread is still running" and the test process
-    # dies with signal 6 — every check having passed. An exit code is part of
-    # the result, so this is not tidiness.
+# This is a layout test, not an application-startup test.  The real console
+# starts ChatManager, the scheduler and idle tracking, while TeamPage schedules
+# its own QThread-backed refresh.  Do not let those unrelated services start
+# merely because the test needs to rebuild the widget tree for a theme check.
+with (
+    patch.object(panel, "_FetchWorker", _Dead),
+    patch.object(panel, "_track_worker", lambda *a, **k: None),
+    patch.object(chat_module.ChatManager, "start", lambda self: None),
+    patch.object(panel.SchedulerService, "start", lambda self: None),
+    patch.object(panel.IdleTracker, "start", lambda self: None),
+    patch.object(team_page.TeamPage, "refresh", lambda self: None),
+):
     try:
-        console._stop_tab_work()
-        console._drain_workers()
-        console.deleteLater()
-        app.processEvents()
-    except Exception:
-        pass
-    panel._FetchWorker, panel._track_worker = real_fetch, real_track
+        console = panel.AdminConfigPanel()
+        # The test-only startup guards above keep these services inert.  Calling
+        # the normal shutdown path still verifies the console can clean itself up.
+        console._stop_background_services()
+        check("the stack holds more pages than the sidebar has entries",
+              console.stack.count() > len(panel.PAGES),
+              f"{console.stack.count()} pages, {len(panel.PAGES)} menu entries")
+
+        console._payroll_tab.open_employee.emit("E002")
+        check("double-clicking somebody opens their page",
+              type(console.stack.currentWidget()).__name__ == "_EmployeePayrollPage",
+              type(console.stack.currentWidget()).__name__)
+
+        # The crash was here.
+        console._toggle_theme()
+        check("switching the theme with it open does not break the console",
+              type(console.stack.currentWidget()).__name__ == "_EmployeePayrollPage",
+              type(console.stack.currentWidget()).__name__)
+        # AND IT STILL KNOWS WHOSE PAGE WAS OPEN. The rebuild makes a fresh page,
+        # and a fresh page knows nobody: every figure went to a dash and "Set
+        # salary" did nothing at all, because it returns early without an
+        # employee id. Reported as "dark theme kiya empty, aur set salary button
+        # bhi kaam nahi kar raha jab tak page change karke wapas na aa jaun".
+        console._employee_payroll._employee_id = "E002"
+        console._toggle_theme()
+        check("and it still knows whose page it is after a theme switch",
+              console._employee_payroll._employee_id == "E002",
+              repr(console._employee_payroll._employee_id))
+
+        check("and the page still opens afterwards",
+              (console._payroll_tab.open_employee.emit("E002") or True)
+              and type(console.stack.currentWidget()).__name__ == "_EmployeePayrollPage",
+              type(console.stack.currentWidget()).__name__)
+    finally:
+        # STOP ITS BACKGROUND WORK BEFORE LETTING GO OF IT. A real console starts
+        # timers and threads; left running, Qt aborts at interpreter exit with
+        # "QThread: Destroyed while thread is still running" and the test process
+        # dies with signal 6 — every check having passed. An exit code is part of
+        # the result, so this is not tidiness.
+        try:
+            console._stop_tab_work()
+            console._drain_workers()
+            console.deleteLater()
+            app.processEvents()
+        except Exception:
+            pass
 
 print(f"\n{'ALL PASS' if not failures else str(failures) + ' FAILED'}\n")
 
