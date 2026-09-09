@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -4196,17 +4197,23 @@ class _SalaryPage(QWidget):
     def _build_ui(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setStyleSheet(
             "QScrollArea{background:transparent;border:none;}" + _theme.scrollbar())
         host = QWidget()
         _clear_bg(host)
-        scroll.setWidget(host)
-        outer.addWidget(scroll)
+        self._scroll.setWidget(host)
+        outer.addWidget(self._scroll)
 
         root = QVBoxLayout(host)
+        # The editor has a real minimum height (including the salary-component
+        # table).  Keep that minimum when the viewport is shorter so Qt makes
+        # the scroll bar available instead of squeezing the bottom controls.
+        root.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         root.setContentsMargins(28, 22, 28, 22)
         root.setSpacing(14)
 
@@ -12251,4 +12258,3 @@ class AdminConfigPanel(QMainWindow):
         if getattr(self, "tray", None) is not None:
             self.tray.hide()
         QApplication.quit()
-

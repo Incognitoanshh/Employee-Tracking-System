@@ -226,10 +226,30 @@ exports.setSalary = async (req, res) => {
             row.components = split;
         }
 
+        // A draft is deliberately mutable working material.  Its lines are
+        // snapshots, so changing the salary alone cannot make an existing
+        // draft reflect the new gross, statutory deductions, or component
+        // split. Rebuild every *affected* draft now; finalised payroll is
+        // intentionally excluded because it is a statement of what was paid.
+        // generateDraft preserves manually entered adjustments and deductions.
+        const drafts = (await pool.query(
+            `SELECT TO_CHAR(month, 'YYYY-MM') AS month
+               FROM payroll_runs
+              WHERE status = 'DRAFT'
+                AND (DATE_TRUNC('month', month) + INTERVAL '1 month - 1 day')::date
+                    >= $1::date
+              ORDER BY month`, [row.effective_from])).rows;
+        for (const draft of drafts) {
+            await generateDraft(`${draft.month}-01`, me(req));
+            await writeAudit(me(req),
+                `PAYROLL DRAFT REFRESHED : ${draft.month} after salary update for ${employee_id}`);
+        }
+
         await writeAudit(employee_id,
             `SALARY SET : ${gross} per month from ${row.effective_from} by ${me(req)}`
             + (note ? ` — ${note}` : ""));
-        return res.json({ success: true, salary: row });
+        return res.json({ success: true, salary: row,
+                          refreshed_drafts: drafts.map((draft) => draft.month) });
     } catch (error) {
         return serverError(res, req, error);
     }
@@ -382,17 +402,14 @@ async function gatherMonth(monthFirst) {
  * attendance row or approves a late leave request and generates again. A
  * FINALIZED month is refused — that is what finalising means.
  */
-exports.generate = async (req, res) => {
-    if (!isAdmin(req)) return fail(res, 403, "Admins only.");
-    const first = monthStart(req.body?.month);
-    if (!first) return fail(res, 400, "Month must be YYYY-MM, e.g. 2026-08.");
-
-    try {
+async function generateDraft(first, actor) {
         const existing = await pool.query(
             `SELECT id, status FROM payroll_runs WHERE month = $1::date`, [first]);
         if (existing.rowCount && existing.rows[0].status === "FINALIZED") {
-            return fail(res, 409,
+            const error = new Error(
                 "That month is finalised. Add an adjustment instead of regenerating it.");
+            error.status = 409;
+            throw error;
         }
 
         const month = await gatherMonth(first);
@@ -417,6 +434,7 @@ exports.generate = async (req, res) => {
         // carries it forward. Read before the transaction because it is a
         // question about the run as it stands, not part of writing the new one.
         const enteredDeductions = new Map();
+        const enteredOvertime = new Map();
         if (existing.rowCount) {
             for (const row of (await pool.query(
                 // NOT automatic ones. Those are derived from the salary and
@@ -427,6 +445,14 @@ exports.generate = async (req, res) => {
                   WHERE run_id = $1 AND automatic = FALSE
                   GROUP BY employee_id`, [existing.rows[0].id])).rows) {
                 enteredDeductions.set(row.employee_id, Number(row.total));
+            }
+            // Overtime hours are an approved manual entry on the line itself.
+            // A salary-triggered rebuild must retain those hours while using
+            // the newly saved rate, just as it retains manual deductions.
+            for (const row of (await pool.query(
+                `SELECT employee_id, overtime_hours FROM payroll_lines WHERE run_id = $1`,
+                [existing.rows[0].id])).rows) {
+                enteredOvertime.set(row.employee_id, Number(row.overtime_hours) || 0);
             }
         }
 
@@ -485,7 +511,7 @@ exports.generate = async (req, res) => {
                 await client.query(
                     `UPDATE payroll_runs SET working_days = $2, generated_by = $3,
                             generated_at = NOW() AT TIME ZONE 'UTC'
-                      WHERE id = $1`, [runId, globalWorking, me(req)]);
+                      WHERE id = $1`, [runId, globalWorking, actor]);
                 // The lines are rebuilt; the adjustments are NOT. Somebody
                 // entered those by hand with a reason, and regenerating the
                 // month is not a reason to throw them away.
@@ -503,7 +529,7 @@ exports.generate = async (req, res) => {
                 runId = (await client.query(
                     `INSERT INTO payroll_runs (month, working_days, generated_by)
                      VALUES ($1::date, $2, $3) RETURNING id`,
-                    [first, globalWorking, me(req)])).rows[0].id;
+                    [first, globalWorking, actor])).rows[0].id;
             }
 
             for (const person of people) {
@@ -600,7 +626,7 @@ exports.generate = async (req, res) => {
                              (run_id, employee_id, kind, amount, reason,
                               created_by, automatic)
                          VALUES ($1,$2,$3,$4,$5,$6,TRUE)`,
-                        [runId, person.employee_id, kind, amount, why, me(req)]);
+                        [runId, person.employee_id, kind, amount, why, actor]);
                 }
 
                 const line = calculateLine({
@@ -624,10 +650,10 @@ exports.generate = async (req, res) => {
                     otherDeductions: money(
                         (enteredDeductions.get(person.employee_id) || 0)
                         + statutory.total),
-                    // Overtime is entered by hand after generation — the
-                    // owner's decision, and the honest one: hours at a desk
-                    // are not the same thing as overtime somebody approved.
-                    overtimeHours: 0,
+                    // Overtime is an approved manual entry. Retain its hours
+                    // across a rebuild, but apply the salary rate now in
+                    // force for this draft.
+                    overtimeHours: enteredOvertime.get(person.employee_id) || 0,
                     overtimeRate: Number(person.overtime_hourly) || 0,
                 });
 
@@ -654,7 +680,7 @@ exports.generate = async (req, res) => {
                      line.absent_days, line.per_day, line.absent_deduction,
                      line.unpaid_deduction, line.late_days, line.late_minutes,
                      line.late_deduction, line.other_deductions,
-                     0, line.overtime_rate, 0,
+                     line.overtime_hours, line.overtime_rate, line.overtime_amount,
                      line.net_before_adjustments, person.salary_id || null]);
 
                 // THE SPLIT, COPIED ONTO THE LINE. Nothing that happens to the
@@ -680,9 +706,20 @@ exports.generate = async (req, res) => {
             client.release();
         }
 
+        return runId;
+}
+
+exports.generate = async (req, res) => {
+    if (!isAdmin(req)) return fail(res, 403, "Admins only.");
+    const first = monthStart(req.body?.month);
+    if (!first) return fail(res, 400, "Month must be YYYY-MM, e.g. 2026-08.");
+
+    try {
+        const runId = await generateDraft(first, me(req));
         await writeAudit(me(req), `PAYROLL GENERATED : ${req.body.month} (draft)`);
         return res.json({ success: true, run_id: runId, month: req.body.month });
     } catch (error) {
+        if (error.status === 409) return fail(res, 409, error.message);
         return serverError(res, req, error);
     }
 };
