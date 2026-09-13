@@ -44,6 +44,21 @@ const AUDIT_PREFIXES = [
     "CHANNEL CREATED",
     "ANNOUNCEMENT POSTED",
     "CHAT VIEWED",
+    // Payroll. Every one of these is an administrative act with financial
+    // consequences: setting the wrong salary, deleting a draft, or removing
+    // a deduction is exactly the kind of thing somebody asks about months
+    // later. They must outlive the short noise-retention period.
+    "SALARY SET",
+    "PAYROLL GENERATED",
+    "PAYROLL DRAFT REFRESHED",
+    "PAYROLL FINALIZED",
+    "PAYROLL ADJUSTMENT",
+    "PAYROLL ADJUSTMENT REMOVED",
+    "PAYROLL DEDUCTION",
+    "PAYROLL DEDUCTION REMOVED",
+    "PAYROLL OVERTIME",
+    "PAYROLL DELETED",
+    "PAYSLIP EMAIL FAILED",
 ];
 
 /** SQL that is true for rows worth keeping longer. */
