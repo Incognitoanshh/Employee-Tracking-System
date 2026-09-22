@@ -8,9 +8,11 @@
  * admin.controller behind its own role checks.
  *
  * WHAT AN EMPLOYEE MAY CHANGE ABOUT THEMSELVES
- *   their phone number, their email address, and their photo.
+ *   their photo. Nothing else.
  *
- * That is the entire list. Role, employee id, department, manager, joining
+ * It used to be the phone and the email as well. The owner's rule since:
+ * "employee khud se koi bhi value change nahi kar sakta apne profile ka" —
+ * the photo is the one exception, agreed after. Role, employee id, department, manager, joining
  * date, employment status, attendance and working hours are all read-only
  * here — a monitoring product where the monitored can edit their own
  * department or their own hours is not a monitoring product. Those fields are
@@ -49,7 +51,8 @@ exports.getMyProfile = async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT e.employee_id, e.username, e.full_name, e.designation, e.role,
-                    e.phone, e.email, e.email_verified_at, e.department,
+                    e.phone, e.email, e.personal_email, e.email_verified_at,
+                    e.department,
                     e.joining_date, e.employment_status,
                     e.photo, e.created_at, e.suspended, e.password_changed_at,
                     m.employee_id  AS manager_id,
@@ -76,6 +79,9 @@ exports.getMyProfile = async (req, res) => {
                 role: row.role,
                 phone: row.phone,
                 email: row.email,
+                // The person's own address, beside the official one. Shown to
+                // them, set only by an administrator.
+                personal_email: row.personal_email,
                 // Whether the address was PROVED, not merely typed. The page
                 // shows the difference, because an unverified address is not
                 // something anything should be sent to.
@@ -103,83 +109,25 @@ exports.getMyProfile = async (req, res) => {
     }
 };
 
-/** The two fields an employee owns. Anything else in the body is ignored. */
+/** PATCH /api/profile/me — kept, and refuses. See the file header. */
 exports.updateMyProfile = async (req, res) => {
     const employeeId = me(req);
     if (!employeeId) return fail(res, 401, "Unauthenticated");
 
-    const body = req.body || {};
-    const wantsPhone = "phone" in body;
-    const wantsEmail = "email" in body;
-    if (!wantsPhone && !wantsEmail) {
-        return fail(res, 400,
-            "Nothing to change — only phone and email can be set here");
-    }
-
-    // Empty means "remove it", which is a thing people want to do.
-    const rawPhone = String(body.phone ?? "").trim();
-    const phone = rawPhone === "" ? null : rawPhone;
-    const rawEmail = String(body.email ?? "").trim();
-    const email = rawEmail === "" ? null : rawEmail;
-
-    if (wantsPhone && phone !== null) {
-        if (phone.length > 32) {
-            return fail(res, 400, "Phone number is too long — 32 characters at most");
-        }
-        // Digits, spaces, +, -, (), which covers every way people write one.
-        if (!/^[0-9+()\-\s]{6,32}$/.test(phone)) {
-            return fail(res, 400, "That does not look like a phone number");
-        }
-    }
-
-    if (wantsEmail && email !== null) {
-        if (email.length > 255) {
-            return fail(res, 400, "Email address is too long — 255 characters at most");
-        }
-        // SHAPE ONLY, AND NOT MUCH OF IT. This checks that there is something,
-        // then an @, then something with a dot in it — which catches the
-        // typos people actually make ("ansh@gmail", a name with no @ at all)
-        // and refuses nothing valid. A stricter pattern is where real
-        // addresses get rejected; the only thing that proves an address works
-        // is sending to it, and nothing here claims this one is verified.
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-            return fail(res, 400, "That does not look like an email address");
-        }
-    }
-
-    try {
-        // Only what was sent is touched, so saving a phone cannot wipe an
-        // email the page never showed.
-        // CHANGING THE ADDRESS UN-PROVES IT. What was verified was the old
-        // one, and carrying the tick across to a new address would make the
-        // tick mean nothing at all — which is worse than not having it, since
-        // something would eventually be sent on the strength of it.
-        //
-        // Setting it to the SAME value it already had is not a change, and
-        // must not throw away a verification somebody has already done: that
-        // is what saving the phone number on a page carrying both fields
-        // would otherwise do every time.
-        await pool.query(
-            `UPDATE employees
-                SET phone = CASE WHEN $1::boolean THEN $2 ELSE phone END,
-                    email = CASE WHEN $3::boolean THEN $4 ELSE email END,
-                    email_verified_at = CASE
-                        WHEN $3::boolean AND $4 IS DISTINCT FROM email
-                        THEN NULL ELSE email_verified_at END
-              WHERE employee_id = $5`,
-            [wantsPhone, phone, wantsEmail, email, employeeId]);
-        // The pending code goes with it, for the same reason.
-        if (wantsEmail) {
-            await pool.query(
-                `DELETE FROM email_verifications
-                  WHERE employee_id = $1 AND email IS DISTINCT FROM $2`,
-                [employeeId, email]);
-        }
-        return res.json({ success: true, phone, email });
-    } catch (error) {
-        console.error("[500]", req.method, req.originalUrl, error.message);
-        return fail(res, 500, "Internal server error");
-    }
+    // AN EMPLOYEE NO LONGER EDITS THEIR OWN RECORD. The owner's rule:
+    // "employee khud se koi bhi value change nahi kar sakta apne profile ka" —
+    // with one exception, agreed after: the photo, which has its own routes
+    // and is untouched by this. The name, the official and personal email and
+    // the phone are the company's record of somebody, and change through an
+    // administrator (POST /api/admin/employees/:id/profile).
+    //
+    // THE ROUTE STAYS, and refuses. Removing it would turn an older client's
+    // Save into a 404 with no explanation; a 403 that says who to ask is an
+    // answer. Enforced here and not only by hiding the boxes, because a box
+    // hidden in one build is an endpoint still open to every other.
+    return fail(res, 403,
+        "Your details are kept by your administrator — ask them to change "
+        + "your phone number or email. Your photo you can change yourself.");
 };
 
 // ────────────────────────────────────────────── proving the email address

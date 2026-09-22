@@ -2,8 +2,11 @@
 My Profile, on the employee's own screen.
 
 THE PROMISE THIS PAGE MAKES, and the one worth a test: an employee may change
-two things about themselves — their phone number and their photo. Everything
-else it shows is the company's record of them and is drawn read-only.
+ONE thing about themselves — their photo. Everything else it shows, their
+phone number and both email addresses included, is the company's record of
+them and is drawn read-only. It used to allow the phone and the email; the
+owner's rule since: "employee khud se koi bhi value change nahi kar sakta
+apne profile ka", with the photo agreed as the exception.
 
 The server holds the same line independently (server/tests/test_profile.js).
 Neither side relies on the other; a page that only *looks* read-only in front
@@ -38,8 +41,8 @@ def check(label, ok, detail=""):
 
 PROFILE = {
     "employee_id": "E001", "username": "rajesh", "full_name": "Rajesh Kumar",
-    "designation": "Developer", "role": "employee", "phone": "+91 98765 43210",
-    "email": "rajesh@amaze.co",
+    "designation": "Developer", "role": "employee", "phone": "+91 90000 00000",
+    "email": "rajesh@amaze.co", "personal_email": "rajesh.k@gmail.com",
     "department": "Engineering", "team": "Development",
     "reporting_manager": "Priya Nair", "joining_date": "2025-06-01",
     "employment_status": "probation", "photo": None, "status": "online",
@@ -73,9 +76,10 @@ SESSIONS = {
 
 
 def main():
-    from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton, QCheckBox
+    from PySide6.QtWidgets import (QApplication, QLineEdit, QPushButton,
+                                   QCheckBox, QScrollArea)
     from PySide6.QtCore import Qt
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
 
     from client.infrastructure.database.database import Database
     Database.initialize()
@@ -103,28 +107,53 @@ def main():
     check("and the employment status in words a person reads",
           page._rows["employment_status"].text() == "Probation",
           page._rows["employment_status"].text())
-    check("the phone goes into a box that can be typed in",
-          page._phone.text() == "+91 98765 43210", page._phone.text())
-    check("and so does the email",
+    # Shown, not edited — see THE RULE below.
+    check("the phone is shown", page._phone.text() == "+91 90000 00000",
+          page._phone.text())
+    check("and so is the official email",
           page._email.text() == "rajesh@amaze.co", page._email.text())
     check("with initials standing in for a photo nobody has set",
           page._avatar.text() == "RK", page._avatar.text())
 
-    print("\nTHE RULE: contact details and a photo, and no more")
-    # Not "the fields are disabled" — COUNTED. Anything editable that is not
-    # one of these is a way to change something that is not the employee's to
-    # change, and the count is what notices a box added later without anybody
-    # deciding it belonged here.
+    print("\nTHE RULE: a photo, and no more")
+    # Not "the fields are disabled" — COUNTED. Anything editable at all is a
+    # way to change something that is not the employee's to change, and the
+    # count is what notices a box added later without anybody deciding it
+    # belonged here.
     #
-    # It was one field — the phone — until an email was asked for. That is the
-    # only reason this number has ever moved, and it should not move again
-    # without the same kind of decision.
+    # It was two — the phone and the email — until the owner's rule: "employee
+    # khud se koi bhi value change nahi kar sakta apne profile ka." The photo
+    # is the one exception, and it is not a text box. This number should not
+    # move again without the same kind of decision.
     boxes = page.findChildren(QLineEdit)
-    check("exactly TWO editable fields on the whole page", len(boxes) == 2,
+    check("NOTHING on the page can be typed into", len(boxes) == 0,
           f"{len(boxes)}: {[b.placeholderText() for b in boxes]}")
-    placeholders = " ".join(b.placeholderText() for b in boxes)
-    check("and they are the phone number and the email address",
-          "98765" in placeholders and "@" in placeholders, placeholders)
+    check("and the page has no way to save contact details any more",
+          not hasattr(page, "_save_contact"))
+
+    # THE ONE EXCEPTION. A photo is still theirs to change.
+    photo_buttons = [b.text() for b in page.findChildren(QPushButton)
+                     if b.text() in ("Change photo", "Remove")]
+    check("but the photo is still theirs to change",
+          sorted(photo_buttons) == ["Change photo", "Remove"], str(photo_buttons))
+
+    # BOTH ADDRESSES, SHOWN. "Employee profile me 2 email hoga — ek official
+    # email, aur ek personal email."
+    check("the official address is shown", page._email.text() == "rajesh@amaze.co",
+          page._email.text())
+    check("and the personal one beside it",
+          page._personal_email.text() == "rajesh.k@gmail.com",
+          page._personal_email.text())
+    check("the phone is shown too, as text", page._phone.text() == "+91 90000 00000",
+          page._phone.text())
+    # An address nobody has given reads as a dash, not as an empty line that
+    # looks like a page which failed to load.
+    page._on_profile({**PROFILE, "personal_email": None, "phone": None})
+    check("and what nobody has given reads as a dash",
+          page._personal_email.text() == "—" and page._phone.text() == "—",
+          f"{page._personal_email.text()} / {page._phone.text()}")
+    page._on_profile(dict(PROFILE))
+
     labels = [page._rows[k] for k in ("employee_id", "department", "designation",
                                       "reporting_manager", "employment_status")]
     check("id, department, designation, manager and status are labels, not inputs",
@@ -242,25 +271,22 @@ def main():
           page._email_state.text() == "" and page._verify_btn.isHidden(),
           page._email_state.text())
 
-    print("\nAn address with no @ in it never reaches the network")
-    # The commonest typo there is, and the page is 200 ms from the server —
-    # see the round-trip this product actually runs at. Being told after the
-    # wait is a worse way to be told, so it is checked here as well as there.
+    print("\nThe page never tries to change an address")
+    # This used to check that a mistyped address was caught before the
+    # network. There is no longer any way to send one: nothing on the page
+    # edits the phone or either email, and the server refuses the route. What
+    # is worth holding is that no code path here reaches it — a patch to
+    # /profile/me from this page would mean a box came back.
     sent = []
     real_patch = pp._http.patch
-    pp._http.patch = lambda *a, **k: sent.append(k.get("json")) or (_ for _ in ()).throw(
-        AssertionError("nothing should have been sent"))
-    said = []
-    real_toast = page._toast
-    page._toast = lambda message, ok=True: said.append((message, ok))
+    pp._http.patch = lambda *a, **k: sent.append(a) or (_ for _ in ()).throw(
+        AssertionError("the profile page must not edit the profile"))
     try:
-        page._email.setText("ansh@gmail")
-        page._save_contact()
-        check("nothing is sent", sent == [], str(sent))
-        check("and the person is told why", said and said[-1][1] is False, str(said))
+        page._on_profile(dict(PROFILE))
+        page.refresh = lambda: None
+        check("loading and showing the profile sends no edit", sent == [], str(sent))
     finally:
         pp._http.patch = real_patch
-        page._toast = real_toast
 
     print("\nA photo that is too large is refused before it is uploaded")
     big = os.path.join(os.environ["ETS_DATA_DIR"], "huge.png")
@@ -329,6 +355,71 @@ def main():
     check("and no payslip yet says so plainly",
           page._rows["salary_latest"].text() == "None yet",
           page._rows["salary_latest"].text())
+
+    # ── THE PAGE IN TWO COLUMNS WHEN THERE IS ROOM ──────────────────────
+    #
+    # Reported: "kosis kro ki screen scrollable na ho jyda aur agar hota v hai
+    # to scroll bar dikhe". Measured at the window's own default size: 1771px
+    # of cards in a 665px window, with the right half of every card empty.
+    #
+    # What is checked is not "it looks nicer". It is that the SAME cards are
+    # moved rather than rebuilt — a card built again on a resize leaves the
+    # page updating labels nobody can see, which is how a page ends up showing
+    # a dash where a value arrived — and that the page is genuinely shorter.
+    print("\nTwo columns when the page is wide enough")
+    # SHOWN, then resized. A hidden widget does not lay its children out, so
+    # a measurement taken without this reads the same number at every width —
+    # and one pass of the event loop is not always enough either: the resize
+    # is delivered in the first, the columns rearrange in the next.
+    def settle():
+        for _ in range(3):
+            app.processEvents()
+
+    page.show()
+    page.resize(1010, 900)
+    settle()
+    wide_cards = page._columns.cards()
+    scroll = page.findChild(QScrollArea)
+    wide_height = scroll.widget().sizeHint().height()
+    lefts = sorted({card.mapTo(page, card.rect().topLeft()).x()
+                    for card in wide_cards})
+    check("the cards stand in two columns", page._columns.columns() == 2,
+          str(page._columns.columns()))
+    check("side by side, not on top of each other", len(lefts) == 2, str(lefts))
+
+    page.resize(750, 900)
+    settle()
+    narrow_height = scroll.widget().sizeHint().height()
+    narrow_lefts = sorted({card.mapTo(page, card.rect().topLeft()).x()
+                           for card in page._columns.cards()})
+    check("a narrow window stacks them again", page._columns.columns() == 1,
+          f"{page._columns.columns()} columns; page {page.width()}px, "
+          f"cards area {page._columns.width()}px, page minimum "
+          f"{page.minimumSizeHint().width()}px")
+    check("in one column", len(narrow_lefts) == 1, str(narrow_lefts))
+    check("and two columns really are shorter than one",
+          wide_height < narrow_height - 300,
+          f"{wide_height}px wide vs {narrow_height}px narrow")
+
+    page.resize(1010, 900)
+    settle()
+    check("every card is still there after both moves",
+          page._columns.cards() == wide_cards,
+          f"{len(page._columns.cards())} of {len(wide_cards)}")
+    check("and each one is on screen, not orphaned by the move",
+          all(card.parentWidget() is not None and card.isVisibleTo(page)
+              for card in page._columns.cards()))
+    # THE ONE THAT MATTERS. The page writes into these labels by reference.
+    check("the values the page had written are still in them",
+          page._rows["employee_id"].text() == "E001"
+          and page._rows["department"].text() == "Engineering",
+          f"{page._rows['employee_id'].text()} / {page._rows['department'].text()}")
+    page._on_profile(dict(PROFILE, department="Design"))
+    check("and the page can still update them after a resize",
+          page._rows["department"].text() == "Design",
+          page._rows["department"].text())
+
+    page.hide()
 
     print("all profile page checks passed")
     sys.stdout.flush()

@@ -486,6 +486,119 @@ class Card(QFrame):
         )
 
 
+class CardColumns(QWidget):
+    """Cards side by side when there is room for two, stacked when there is not.
+
+    WHY. Reported: "kosis kro ki screen scrollable na ho jyda aur agar hota v
+    hai to scroll bar dikhe". Measured on the profile page at the window's own
+    default size: 1771px of cards inside 665px of window — near three screens
+    of scrolling, in a page 1010px wide with the right half of every card
+    empty. Nothing was missing; it was simply printed in one long strip.
+
+    THE CARDS ARE NOT REBUILT WHEN THE WIDTH CHANGES. They are moved. A card
+    holds live labels that the page updates by reference — rebuilding one on a
+    resize would leave the page writing into a widget nobody can see, which is
+    the same class of bug as a theme switch that drops a page's contents.
+
+    TALLEST-FIRST IS WRONG HERE, and so is round robin: the cards are in a
+    deliberate order (who you are, what you are paid, this device, security)
+    and shuffling them to fill space would make the page a different page each
+    time it is opened. They are dealt in order into whichever column is
+    shorter, which keeps the reading order and still comes out roughly level.
+    """
+
+    #: Below this the cards stack. MEASURED, not chosen: the widest card on
+    #: the profile page wants 377px before anything in it is squeezed (the
+    #: security card, which carries two buttons on one row), so two of them
+    #: and the gap between need 768. A little over that, so a column is never
+    #: sitting exactly on its own minimum.
+    TWO_COLUMN_WIDTH = 790
+
+    def __init__(self, spacing: int = 14, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background:transparent;")
+        self._cards: list[QWidget] = []
+        self._spacing = spacing
+        self._columns = 0
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(spacing)
+    def minimumSizeHint(self):
+        """One column's worth, whichever arrangement is on screen.
+
+        THE DEADLOCK THIS AVOIDS, and it is not obvious. While two columns are
+        up, the layout's own minimum width is both of them — 768px on the
+        profile page. Qt will not shrink a widget below its minimum, so the
+        page could never get narrow enough to be told to stack: dragged
+        smaller it grew a horizontal scrollbar instead of reflowing, and the
+        cards stayed side by side at 750px in a 740px window. Asking for no
+        more than a single card lets the width through. The columns are
+        squeezed for one layout pass, resizeEvent arrives, and they stack —
+        and since one column needs only one card's width, there is nothing
+        left to flip back and forth between.
+        """
+        hint = super().minimumSizeHint()
+        widest = max((card.minimumSizeHint().width() for card in self._cards),
+                     default=0)
+        if not widest:
+            return hint
+        return QSize(min(hint.width(), widest), hint.height())
+
+    def add(self, *cards: QWidget) -> None:
+        self._cards.extend(cards)
+        self._lay_out(force=True)
+
+    def cards(self) -> list:
+        return list(self._cards)
+
+    def columns(self) -> int:
+        """How many columns are on screen right now — one, or two."""
+        return self._columns
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._lay_out()
+
+    def _lay_out(self, force: bool = False) -> None:
+        wanted = 2 if self.width() >= self.TWO_COLUMN_WIDTH else 1
+        if wanted == self._columns and not force:
+            return
+        self._columns = wanted
+
+        # Detach every card FIRST, then throw away the old holders. Today the
+        # holders go through deleteLater, so the cards would survive either
+        # order — they are re-parented before the event loop gets to the
+        # deletion. Detaching first means that is not something this has to
+        # be right about.
+        for card in self._cards:
+            card.setParent(None)
+        while self._row.count():
+            item = self._row.takeAt(0)
+            holder = item.widget()
+            if holder is not None:
+                holder.setParent(None)
+                holder.deleteLater()
+
+        columns = []
+        for _ in range(wanted):
+            holder = QWidget()
+            holder.setStyleSheet("background:transparent;")
+            column = QVBoxLayout(holder)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(self._spacing)
+            self._row.addWidget(holder, 1)
+            columns.append(column)
+
+        heights = [0] * wanted
+        for card in self._cards:
+            shortest = heights.index(min(heights))
+            columns[shortest].addWidget(card)
+            card.show()
+            heights[shortest] += max(card.sizeHint().height(), 0) + self._spacing
+        for column in columns:
+            column.addStretch()
+
+
 # The console uses 52px rows; this is the same number, so a table on the
 # employee side and a table on the admin side are the same height per row.
 # How often a page re-reads what it is showing, while somebody is looking at

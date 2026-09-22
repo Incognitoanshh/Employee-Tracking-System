@@ -3,12 +3,18 @@ My Profile — a person's own account, in the employee panel.
 
 WHAT THIS PAGE IS ALLOWED TO CHANGE
 
-Two things: the phone number and the photo. Everything else it shows —
-employee id, role, designation, department, manager, joining date, employment
-status, hours, attendance — is the company's record, and it is drawn read-only
-here. The server enforces the same line (see profile.controller); this page
-does not rely on that, and the server does not rely on this. Either alone
-would be a mistake.
+One thing: the photo. Everything else it shows — their name, their official
+and personal email, their phone, employee id, role, designation, department,
+manager, joining date, employment status, hours, attendance — is the company's
+record, and it is drawn read-only here. The server enforces the same line (see
+profile.controller, which refuses the edit outright); this page does not rely
+on that, and the server does not rely on this. Either alone would be a mistake.
+
+It was the phone and the email as well, until the owner's rule: "employee khud
+se koi bhi value change nahi kar sakta apne profile ka". Those are set by an
+administrator now. Proving an address still belongs to the person it reaches —
+verification is not a change, and an address nobody has proved is one nothing
+should be sent to.
 
 WHERE THE NUMBERS COME FROM
 
@@ -43,7 +49,8 @@ from client.services.logger_service import LoggerService
 from client.presentation import theme as _theme
 from client.presentation.theme import C, button, scrollbar
 from client.presentation.widgets.avatar import Avatar, forget as forget_avatar
-from client.presentation.widgets.panel_widgets import keep_fresh, Card, PageHeader, Sparkline
+from client.presentation.widgets.panel_widgets import (
+    keep_fresh, Card, CardColumns, PageHeader, Sparkline)
 
 # The keys live with the notification decisions, in application/services/
 # notifier — the same constants the panels read when something arrives. A
@@ -180,20 +187,35 @@ class ProfilePage(QWidget):
         scroll.setWidget(host)
         root.addWidget(scroll, 1)
 
+        # WHO YOU ARE, THEN YOUR WEEK, THEN THE REST IN TWO COLUMNS.
+        #
+        # Everything below used to be one strip: 1771px of cards in a 665px
+        # window, measured at the size the window opens at — near three
+        # screens of scrolling with the right half of every card empty. The
+        # two that earn the full width keep it: the identity card is the
+        # header, and Work Summary carries three sparklines side by side that
+        # have nowhere to go in half a page. The other six are paired when
+        # the page is wide enough and stack again when it is not.
         body.addWidget(self._identity_card())
-        body.addWidget(self._section("Personal Information", [
-            ("Employee ID", "employee_id"), ("Username", "username"),
-            ("Department", "department"), ("Team", "team"),
-            ("Designation", "designation"), ("Reporting manager", "reporting_manager"),
-            ("Joining date", "joining_date"), ("Employment status", "employment_status"),
-        ], note="Only your phone number, email and photo are yours to change. "
-                "Everything else is set by your administrator."))
         body.addWidget(self._work_card())
-        body.addWidget(self._pay_card())
-        body.addWidget(self._devices_card())
-        body.addWidget(self._security_card())
-        body.addWidget(self._preferences_card())
-        body.addWidget(self._history_card())
+
+        self._columns = CardColumns(spacing=14)
+        self._columns.add(
+            self._section("Personal Information", [
+                ("Employee ID", "employee_id"), ("Username", "username"),
+                ("Department", "department"), ("Team", "team"),
+                ("Designation", "designation"), ("Reporting manager", "reporting_manager"),
+                ("Joining date", "joining_date"), ("Employment status", "employment_status"),
+            ], note="Only your photo is yours to change. Everything else — "
+                    "including your phone and both email addresses — is set by "
+                    "your administrator."),
+            self._pay_card(),
+            self._devices_card(),
+            self._security_card(),
+            self._preferences_card(),
+            self._history_card(),
+        )
+        body.addWidget(self._columns)
         body.addStretch()
 
     def _identity_card(self) -> Card:
@@ -228,27 +250,40 @@ class ProfilePage(QWidget):
         col.addSpacing(6)
         col.addLayout(photo_row)
 
-        # Phone and email together, saved by one button.
+        # ── SHOWN, NOT EDITED ───────────────────────────────────────────
         #
-        # Two Save buttons for two adjacent boxes is two requests and two ways
-        # to leave half a change behind — somebody who edits both and presses
-        # the first one has saved half of what they meant to.
-        def _contact_row(caption, placeholder, width=240):
+        # These were boxes with a Save button. The owner's rule since:
+        # "employee khud se koi bhi value change nahi kar sakta apne profile
+        # ka" — the photo above is the one exception. So the phone and both
+        # addresses are read here and set by an administrator; the server
+        # refuses the edit as well, because a box hidden in one build is an
+        # endpoint still open to every other.
+        #
+        # TWO ADDRESSES, because they are two different facts: the official
+        # one is the company's and stops working the day somebody leaves, and
+        # the personal one is how to reach them after that.
+        def _contact_row(caption):
             row = QHBoxLayout()
             row.setSpacing(8)
             label = QLabel(caption)
-            label.setFixedWidth(52)
+            label.setFixedWidth(104)
             label.setStyleSheet(f"color:{C.TEXT_MUTED};font-size:13px;border:none;")
-            field = QLineEdit()
-            field.setPlaceholderText(placeholder)
-            field.setMaximumWidth(width)
+            value = QLabel("—")
+            value.setTextFormat(Qt.TextFormat.PlainText)
+            # Selectable, so an address can still be copied out of the page —
+            # read-only is not the same as out of reach.
+            value.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            value.setStyleSheet(
+                f"color:{C.TEXT};font-size:13px;font-weight:600;border:none;")
             row.addWidget(label)
-            row.addWidget(field)
+            row.addWidget(value)
             row.addStretch()
-            return row, field
+            return row, value
 
-        phone_row, self._phone = _contact_row("Phone", "+91 98765 43210", 220)
-        email_row, self._email = _contact_row("Email", "you@company.com")
+        phone_row, self._phone = _contact_row("Phone")
+        email_row, self._email = _contact_row("Official email")
+        personal_row, self._personal_email = _contact_row("Personal email")
 
         # WHETHER THE ADDRESS IS PROVED, beside the box that holds it.
         #
@@ -266,19 +301,16 @@ class ProfilePage(QWidget):
         self._verify_btn.hide()
         email_row.insertWidget(2, self._email_state)
         email_row.insertWidget(3, self._verify_btn)
-        for field in (self._phone, self._email):
-            field.returnPressed.connect(self._save_contact)
 
-        save = QPushButton("Save")
-        save.setStyleSheet(button("primary"))
-        save.setCursor(Qt.CursorShape.PointingHandCursor)
-        save.clicked.connect(self._save_contact)
-        phone_row.insertWidget(2, save)
-
+        # VERIFYING IS NOT CHANGING. The address is the administrator's to
+        # set; proving it reaches this person is theirs to do, and it is the
+        # difference between an address that is typed and one that works.
         col.addSpacing(8)
         col.addLayout(phone_row)
         col.addSpacing(4)
         col.addLayout(email_row)
+        col.addSpacing(4)
+        col.addLayout(personal_row)
 
         outer.addLayout(col, 1)
         return card
@@ -599,10 +631,11 @@ class ProfilePage(QWidget):
 
         # Not overwritten while somebody is typing in it. A refresh landing
         # mid-edit would replace what they were half way through writing.
-        if not self._phone.hasFocus():
-            self._phone.setText(str(profile.get("phone") or ""))
-        if not self._email.hasFocus():
-            self._email.setText(str(profile.get("email") or ""))
+        # No hasFocus guard any more: these are labels, not boxes somebody
+        # may be halfway through typing into.
+        self._phone.setText(str(profile.get("phone") or "—"))
+        self._email.setText(str(profile.get("email") or "—"))
+        self._personal_email.setText(str(profile.get("personal_email") or "—"))
         self._show_email_state(profile.get("email"),
                                bool(profile.get("email_verified")))
 
@@ -747,30 +780,6 @@ class ProfilePage(QWidget):
 
         self._run(send, lambda _ok: (self._toast("Email verified."),
                                      self.refresh()))
-
-    def _save_contact(self):
-        phone = self._phone.text().strip()
-        email = self._email.text().strip()
-
-        # CHECKED HERE TOO, and not only on the server. A typed address with
-        # no @ in it is the commonest mistake there is, and finding out after
-        # a round trip — on a connection that is 200 ms away, see the latency
-        # this product runs at — is a worse way to be told.
-        if email and not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
-            self._toast("That does not look like an email address.", ok=False)
-            return
-
-        def send():
-            response = _http.patch(
-                f"{API_BASE_URL}/profile/me",
-                json={"phone": phone, "email": email},
-                headers={**_headers(), "Content-Type": "application/json"},
-                timeout=15)
-            if response.status_code != 200:
-                raise RuntimeError(self._message_from(response, "Could not save that."))
-            return True
-
-        self._run(send, lambda _v: self._toast("Saved."))
 
     def _pick_photo(self):
         path, _ = QFileDialog.getOpenFileName(

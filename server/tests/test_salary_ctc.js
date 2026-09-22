@@ -284,6 +284,93 @@ async function main() {
         thisYear.body.epf?.configured === false,
         JSON.stringify(thisYear.body.epf));
 
+    // ── A COMPONENT SET BY HAND ─────────────────────────────────────────
+    //
+    // "Dono option rakho — auto bhi, aur zaroorat pade to haath se, kyunki
+    // bahut saare components variable hote hain." The CTC still fills every
+    // row; any row but the balance may be typed over, and the balance takes
+    // up the difference so the parts still equal the CTC.
+    //
+    // A figure typed by hand travels as the template's own vocabulary —
+    // FIXED, with the amount as its value — so the split rules are unchanged.
+    console.log("\nA component set by hand");
+    const TEMPLATE = [
+        { name: "Basic", rule: "PERCENT_CTC", value: 50 },
+        { name: "DA", rule: "PERCENT_BASIC", value: 20 },
+        { name: "House Rent Allowance", rule: "PERCENT_BASIC", value: 50 },
+        { name: "Conveyance Allowance", rule: "PERCENT_BASIC", value: 15 },
+        { name: "Fixed Allowance", rule: "BALANCE", value: 0 },
+    ];
+    const withHra = TEMPLATE.map((c) => (c.name === "House Rent Allowance"
+        ? { ...c, rule: "FIXED", value: 15000 } : c));
+    res = await api("POST", "/admin/payroll/salaries", {
+        token, body: { employee_id: "E002", ctc_annual: 600000, overtime_hourly: 0,
+                       effective_from: "2026-03-01", components: withHra } });
+    check("a salary with one component typed over is accepted",
+        res.status === 200 && res.body.success, JSON.stringify(res.body).slice(0, 160));
+
+    const part = (list, name) => (list || []).find((c) => c.name === name);
+    const saved = res.body.salary?.components;
+    check("the typed figure is kept exactly", part(saved, "House Rent Allowance")?.monthly === 15000,
+        JSON.stringify(part(saved, "House Rent Allowance")));
+    check("and the balance takes up the difference, so the parts equal the CTC",
+        Math.abs(saved.reduce((t, c) => t + c.monthly, 0) - 50000) < 0.01,
+        `parts come to ${saved.reduce((t, c) => t + c.monthly, 0)}`);
+
+    // THE OVERRIDE COMES BACK. The page rebuilt every split from the company
+    // template when a person was opened, so an override was saved, shown as
+    // gone the next time, and erased by the next save.
+    const listed = (await api("GET", "/admin/payroll/salaries", { token }))
+        .body.data.find((r) => r.employee_id === "E002");
+    check("the salaries list carries each person's own split",
+        Array.isArray(listed?.components) && listed.components.length === 5,
+        JSON.stringify(listed?.components));
+    check("with the hand-set component still marked as set by hand",
+        part(listed.components, "House Rent Allowance")?.rule === "FIXED",
+        JSON.stringify(part(listed.components, "House Rent Allowance")));
+
+    // BASIC SET BY HAND. The allowances are shares of Basic; found as "the
+    // percentage of the CTC" there was no Basic once it was FIXED, and DA,
+    // HRA and conveyance all came out at zero. Measured before the fix.
+    const withBasic = TEMPLATE.map((c) => (c.name === "Basic"
+        ? { ...c, rule: "FIXED", value: 20000 } : c));
+    res = await api("POST", "/admin/payroll/salaries", {
+        token, body: { employee_id: "E002", ctc_annual: 600000, overtime_hourly: 0,
+                       effective_from: "2026-03-01", components: withBasic } });
+    const basicSplit = res.body.salary?.components || [];
+    check("setting Basic by hand keeps the allowances as shares of it",
+        part(basicSplit, "DA")?.monthly === 4000
+        && part(basicSplit, "House Rent Allowance")?.monthly === 10000
+        && part(basicSplit, "Conveyance Allowance")?.monthly === 3000,
+        basicSplit.map((c) => `${c.name}=${c.monthly}`).join(", "));
+
+    // AND A SPLIT THAT OVERSHOOTS IS REFUSED. The balance cannot go below
+    // zero, so an overshoot would otherwise be saved as a gross larger than
+    // the CTC — a raise nobody meant to give.
+    const before = psql(DB, `SELECT gross_monthly FROM employee_salaries
+                              WHERE employee_id='E002' AND effective_from='2026-03-01'`);
+    const tooBig = TEMPLATE.map((c) => (c.name === "Basic"
+        ? { ...c, rule: "FIXED", value: 40000 } : c));
+    res = await api("POST", "/admin/payroll/salaries", {
+        token, body: { employee_id: "E002", ctc_annual: 600000, overtime_hourly: 0,
+                       effective_from: "2026-03-01", components: tooBig } });
+    check("figures that come to more than the CTC are refused",
+        res.status === 400, `${res.status} ${res.body.message || ""}`);
+    check("and the salary saved before is left as it was",
+        psql(DB, `SELECT gross_monthly FROM employee_salaries
+                   WHERE employee_id='E002' AND effective_from='2026-03-01'`) === before,
+        `was ${before}`);
+
+    // A save with no components still uses the company's template, exactly
+    // as before this existed.
+    res = await api("POST", "/admin/payroll/salaries", {
+        token, body: { employee_id: "E002", ctc_annual: 600000, overtime_hourly: 0,
+                       effective_from: "2026-04-01" } });
+    check("a save with no split of its own still uses the company's",
+        part(res.body.salary?.components, "Basic")?.rule === "PERCENT_CTC"
+        && part(res.body.salary?.components, "Basic")?.monthly === 25000,
+        JSON.stringify(part(res.body.salary?.components, "Basic")));
+
     await pool.end();
     server.close();
     console.log(`\n${failures ? `${failures} FAILED` : "ALL PASS"}\n`);

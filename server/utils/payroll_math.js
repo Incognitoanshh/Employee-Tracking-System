@@ -241,12 +241,24 @@ function splitCTC(ctcMonthly, template = []) {
     const ctc = money(ctcMonthly);
     const rows = (template || []).filter((row) => row && row.name);
 
-    const basicRow = rows.find((row) => row.rule === "PERCENT_CTC");
+    // BASIC IS THE COMPONENT CALLED BASIC, whatever rule it happens to have.
+    //
+    // It used to be found as "the row that is a percentage of the CTC",
+    // which is only true until somebody sets Basic by hand. Then it is a
+    // FIXED row, no PERCENT_CTC row exists, Basic was taken to be zero — and
+    // DA, HRA and conveyance, each a share of it, came out at nothing too.
+    // Measured: a 50,000 CTC with Basic set to 30,000 split into Basic
+    // 30,000, DA 0, HRA 0, Conveyance 0 and a Fixed Allowance of 20,000.
+    // "% of Basic" means the component named Basic; the first percentage of
+    // the CTC is only the fallback for a template that names nothing so.
+    const basicRow = rows.find((row) => String(row.name).trim().toLowerCase() === "basic")
+        || rows.find((row) => row.rule === "PERCENT_CTC");
     // UNROUNDED, and deliberately. Every allowance is a share of Basic, so
     // rounding Basic first and taking 50% of the rounded figure spreads that
     // rounding into all of them.
-    const exactBasic = basicRow
-        ? ctc * (Number(basicRow.value) || 0) / 100
+    const exactBasic = !basicRow ? 0
+        : basicRow.rule === "FIXED" ? Number(basicRow.value) || 0
+        : basicRow.rule === "PERCENT_CTC" ? ctc * (Number(basicRow.value) || 0) / 100
         : 0;
 
     const out = rows.map((row) => {

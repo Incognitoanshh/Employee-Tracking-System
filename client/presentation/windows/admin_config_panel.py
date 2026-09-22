@@ -474,18 +474,9 @@ def _global_stylesheet() -> str:
     }}
     QTableCornerButton::section {{ background: {C['bg_surface_alt']}; border: none; }}
 
-    /* Scrollbars — thin, and only as visible as they need to be. */
-    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-    QScrollBar::handle:vertical {{ background: {C['border_light']};
-                                   border-radius:12px; min-height: 32px; }}
-    QScrollBar::handle:vertical:hover {{ background: {C['text_muted']}; }}
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
-    QScrollBar::handle:horizontal {{ background: {C['border_light']};
-                                     border-radius:12px; min-width: 32px; }}
-    QScrollBar::handle:horizontal:hover {{ background: {C['text_muted']}; }}
-    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    /* Scrollbars — the shared rule, so a page that scrolls can be seen to.
+       See theme.scrollbar(). */
+    {_theme.scrollbar("transparent")}
 
     /* Buttons — two styles and a soft danger, per the brief. */
     QPushButton {{
@@ -981,7 +972,7 @@ def _optional_date(floor: QDate, *, unset_text: str = "—  not given") -> QDate
     return field
 
 
-def _size_table(table: "QTableWidget", cap: int = 340) -> None:
+def _size_table(table: "QTableWidget", cap: int = 340, rows: int | None = None) -> None:
     """Make a table as tall as its rows need, and no taller.
 
     Inside a scroll area a stretch factor means nothing, so these tables were
@@ -992,11 +983,29 @@ def _size_table(table: "QTableWidget", cap: int = 340) -> None:
 
     The cap keeps a long table from pushing everything below it off the page;
     past that it scrolls on its own.
+
+    `rows` is for a table with a filter over it: rows hidden by a search are
+    still rows as far as rowCount is concerned, so a search matching one name
+    would otherwise leave the table its full height with empty space under
+    the single result. Pass how many are actually showing.
     """
-    rows = table.rowCount()
+    if rows is None:
+        rows = table.rowCount()
     row_height = table.verticalHeader().defaultSectionSize()
     needed = (table.horizontalHeader().height() + rows * row_height
               + 2 * table.frameWidth())
+    # A HORIZONTAL SCROLLBAR EATS THE HEIGHT IT SITS IN. Measured on the
+    # payroll table, which is fifteen columns wide and always has one: the
+    # height worked out above left a viewport ten pixels short of its rows,
+    # so the last person was still cut in half and the table still grew a
+    # vertical scrollbar of its own — the very thing this exists to prevent.
+    # Asked of the columns rather than of the bar's isVisible(), which is
+    # not settled until the layout that this height decides has happened.
+    columns = sum(table.columnWidth(column)
+                  for column in range(table.columnCount())
+                  if not table.isColumnHidden(column))
+    if columns > table.viewport().width():
+        needed += table.horizontalScrollBar().sizeHint().height()
     table.setFixedHeight(min(needed, cap))
 
 
@@ -1043,9 +1052,22 @@ def _ctc_preview(ctc_annual: float,
     # Basic is the one the allowances are shares OF, so it is found first and
     # kept unrounded — rounding it before taking a percentage of it spreads
     # that rounding into every allowance. The server does the same.
-    basic_row = next((r for r in rows_in
-                      if str(r.get("rule")) == "PERCENT_CTC"), None)
-    exact_basic = monthly * float(basic_row.get("value") or 0) / 100 if basic_row else 0.0
+    # Basic is the component NAMED Basic, whatever its rule — the same rule
+    # the server follows. Found by "the percentage of the CTC" it would have
+    # been zero the moment somebody set Basic by hand, and every allowance
+    # that is a share of it would have gone to zero with it.
+    basic_row = (next((r for r in rows_in
+                       if str(r.get("name") or "").strip().lower() == "basic"), None)
+                 or next((r for r in rows_in
+                          if str(r.get("rule")) == "PERCENT_CTC"), None))
+    if basic_row is None:
+        exact_basic = 0.0
+    elif str(basic_row.get("rule")) == "FIXED":
+        exact_basic = float(basic_row.get("value") or 0)
+    elif str(basic_row.get("rule")) == "PERCENT_CTC":
+        exact_basic = monthly * float(basic_row.get("value") or 0) / 100
+    else:
+        exact_basic = 0.0
 
     rows, spent = [], 0.0
     for row in rows_in:
@@ -1969,7 +1991,7 @@ class _ConfigTab(QWidget):
         self._ret_logs   = QSpinBox(); self._ret_logs.setRange(7, 3650)
         self._ret_shots  = QSpinBox(); self._ret_shots.setRange(7, 3650)
         self._ret_att    = QSpinBox(); self._ret_att.setRange(90, 3650)
-        self._ret_audit  = QSpinBox(); self._ret_audit.setRange(180, 3650)
+        self._ret_audit  = QSpinBox(); self._ret_audit.setRange(365, 3650)
         for spin in (self._ret_logs, self._ret_shots, self._ret_att, self._ret_audit):
             spin.setFixedHeight(36)
             spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -4191,6 +4213,12 @@ class _SalaryPage(QWidget):
         self._rows: list[dict] = []
         self._selected: dict | None = None
         self._history: list[dict] = []
+        # The split being edited for the chosen person — the company's, until
+        # a figure is typed over. See _person_chosen.
+        self._template: list[dict] = []
+        # True while the table is being filled from code, so that filling it
+        # is not mistaken for somebody typing into it.
+        self._filling = False
         self._build_ui()
 
     # ── layout ──────────────────────────────────────────────────────────
@@ -4255,11 +4283,21 @@ class _SalaryPage(QWidget):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
         self._table.setMinimumHeight(420)
-        self._table.setMinimumWidth(520)
+        # 440, NOT 520, AND TWO FIFTHS OF THE PAGE RATHER THAN HALF.
+        #
+        # The page was split evenly, and the two sides do not need the same
+        # room: this list is a name and two figures, while the editor holds
+        # the salary structure — four columns of which two are rupee amounts
+        # that must be read in full. Measured at 1180px the component table got
+        # 503px against the 652px its columns need, grew a horizontal
+        # scrollbar, and that scrollbar took the height the last row needed:
+        # Conveyance and Fixed Allowance were hidden even with the page
+        # scrolled to the bottom. That is the "full view nahi hai" report.
+        self._table.setMinimumWidth(440)
         _align_numeric_headings(self._table, (1, 2))
         self._table.itemSelectionChanged.connect(self._person_chosen)
         left.addWidget(self._table, 1)
-        body.addLayout(left, 1)
+        body.addLayout(left, 2)
 
         # ── what they are on ────────────────────────────────────────────
         editor = _card()
@@ -4363,12 +4401,50 @@ class _SalaryPage(QWidget):
         form_box.addWidget(hint)
 
         # ── the split the CTC produces ──────────────────────────────────
+        #
+        # WORKED OUT, AND THEN EDITABLE. The owner's words: "dono option
+        # rakho — auto calculation bhi, aur zaroorat pade to haath se, kyunki
+        # bahut saare components variable hote hain." So the CTC still fills
+        # every row, and any row but the last can be typed over. The last,
+        # Fixed Allowance, is the balance — it takes whatever the others do
+        # not, which is what keeps the parts equal to the CTC after an edit.
+        split_head = QHBoxLayout()
+        split_head.addWidget(_muted_label("SALARY COMPONENTS"))
+        split_head.addStretch()
+        self._reset_split = _btn("Reset to CTC split", variant="ghost", height=30)
+        self._reset_split.setToolTip(
+            "Throw away the figures typed by hand and go back to the "
+            "company's arrangement.")
+        self._reset_split.clicked.connect(self._reset_template)
+        split_head.addWidget(self._reset_split)
+        form_box.addLayout(split_head)
+
+        self._split_note = QLabel(
+            "Double-click a monthly figure to change it. Fixed Allowance "
+            "adjusts so the parts still add up to the CTC.")
+        self._split_note.setWordWrap(True)
+        self._split_note.setStyleSheet(
+            f"color:{C['text_muted']};font-size:{Type.MICRO}px;"
+            f"background:transparent;border:none;")
+        form_box.addWidget(self._split_note)
+
         self._components = _tune_table(QTableWidget(0, 4))
         self._components.setHorizontalHeaderLabels(
             ["Salary component", "Calculation", "Monthly", "Annual"])
-        self._components.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # Per ITEM, not per table: only the monthly figures of the rows that
+        # can be overridden are editable. See _restate.
+        self._components.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.EditKeyPressed)
+        self._components.itemChanged.connect(self._component_edited)
         self._components.verticalHeader().setVisible(False)
-        self._components.setMinimumHeight(200)
+        # NO FIXED HEIGHT. It was setMinimumHeight(200), which on this page
+        # meant a table five rows long drawn in a box three rows deep: the page
+        # could be scrolled to the bottom and Conveyance and Fixed Allowance
+        # were still hidden inside the table's own scroll, behind a scrollbar a
+        # few pixels wide. Reported as "set salary karte time full view nahi
+        # hai". _restate sizes it to its rows instead, so the PAGE scrolls and
+        # the table never does.
         _align_numeric_headings(self._components, (2, 3))
         form_box.addWidget(self._components)
 
@@ -4383,7 +4459,8 @@ class _SalaryPage(QWidget):
         buttons.addWidget(self._save)
         form_box.addLayout(buttons)
 
-        body.addWidget(editor, 1)
+        # Three fifths — see the note on the list's width.
+        body.addWidget(editor, 3)
         root.addLayout(body, 1)
 
         # ── every version, underneath ───────────────────────────────────
@@ -4439,6 +4516,11 @@ class _SalaryPage(QWidget):
         # previews a CTC reads it from here rather than from a copy of its own.
         _remember_salary_template(data.get("template"))
         self._restate()
+        # A SELECTION BELONGS TO THE ROWS IT WAS MADE ON. Kept across a reload
+        # it points at a row index whose person may have changed, and clicking
+        # it again emits nothing — Qt only reports a selection that CHANGES —
+        # so the editor went on showing what it held before the reload.
+        self._table.clearSelection()
         self._rows = data.get("data") or []
         self._table.setRowCount(len(self._rows))
         for i, row in enumerate(self._rows):
@@ -4461,6 +4543,10 @@ class _SalaryPage(QWidget):
             for i, row in enumerate(self._rows):
                 if row.get("employee_id") == self._selected.get("employee_id"):
                     self._table.selectRow(i)
+                    # And refilled from the row as it came back from the
+                    # server: what was saved, not what was being typed a
+                    # moment ago. selectRow alone does not guarantee it.
+                    self._person_chosen()
                     break
 
     def _filter(self, text: str = ""):
@@ -4497,8 +4583,57 @@ class _SalaryPage(QWidget):
         self._esi.setChecked(bool(person.get("esi_enabled")))
         self._pt.setChecked(bool(person.get("pt_enabled")))
         self._set_enabled(True)
+        # THEIR SPLIT, IF IT WAS SET BY HAND; OTHERWISE THE COMPANY'S.
+        #
+        # A saved split with a figure typed into it is the truth about this
+        # salary, and has to come back exactly as it was saved — rebuilding it
+        # from the template here would show the override as gone and let the
+        # next save erase it. A split that is purely the company's arrangement
+        # is shown from the CURRENT template instead, because that is what the
+        # server will apply when it is saved.
+        saved = [{"name": c.get("name"), "rule": c.get("rule"),
+                  "value": c.get("value")}
+                 for c in (person.get("components") or [])]
+        self._template = (saved if any(c["rule"] == "FIXED" for c in saved)
+                          else [dict(c) for c in _SALARY_TEMPLATE])
         self._restate()
         self._history_card.hide()
+
+    # ── overriding one component ────────────────────────────────────────
+    def _reset_template(self):
+        """Back to the company's arrangement, discarding typed figures."""
+        self._template = [dict(c) for c in _SALARY_TEMPLATE]
+        self._restate()
+
+    def _component_edited(self, item):
+        """A monthly figure was typed over: that component is now FIXED.
+
+        Stored as the same kind of rule the template already speaks — FIXED,
+        with the amount as its value — so the server needs nothing new: it
+        splits a CTC by whatever template it is given, and the balance row
+        absorbs the difference exactly as it does for the company default.
+        """
+        if self._filling or item.column() != 2:
+            return
+        row = item.row()
+        if row >= len(self._template):
+            return
+        text = item.text().replace("₹", "").replace(",", "").strip()
+        try:
+            amount = round(float(text), 2)
+        except ValueError:
+            # Not a number. Put back what was there rather than guessing.
+            self._restate()
+            return
+        if amount < 0:
+            self._restate()
+            return
+        entry = dict(self._template[row])
+        # The rule it had, kept so the row can say what it WOULD have been.
+        entry.setdefault("was", self._template[row].get("rule"))
+        entry["rule"], entry["value"] = "FIXED", amount
+        self._template[row] = entry
+        self._restate()
 
     # ── the split, as the CTC is typed ──────────────────────────────────
     def _restate(self):
@@ -4510,7 +4645,18 @@ class _SalaryPage(QWidget):
         is stored, so these two can never drift into being different rules —
         this one is a preview, not a second implementation of the policy.
         """
-        rows = _ctc_preview(self._ctc.value())
+        # The person's split if one is being edited; the company's otherwise
+        # (a page opened before anybody is chosen, or a template still on its
+        # way from the server).
+        template = self._template or [dict(c) for c in _SALARY_TEMPLATE]
+        rows = _ctc_preview(self._ctc.value(), template)
+        self._filling = True
+        try:
+            self._fill_components(rows, template)
+        finally:
+            self._filling = False
+
+    def _fill_components(self, rows, template):
         if not rows:
             # The company's split has not arrived yet. Saying so beats an
             # empty table, and beats a made-up split by a much wider margin.
@@ -4520,18 +4666,102 @@ class _SalaryPage(QWidget):
             for column in range(1, self._components.columnCount()):
                 self._components.setItem(0, column, _cell("", align_right=True))
             self._gross.setValue(0)
+            _size_table(self._components, cap=10_000)
             return
 
+        editable = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsEditable)
+        # EVERY OTHER CELL IS READ-ONLY, EXPLICITLY. A QTableWidgetItem is
+        # editable by default; that never mattered while this table had no
+        # edit triggers, and the moment double-click was switched on for the
+        # figures it applied to every cell — the name, the calculation, the
+        # annual figure and the balance could all be typed into. Measured by
+        # the test that asks whether the balance row is editable.
+        fixed = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         self._components.setRowCount(len(rows))
         for i, (name, kind, amount) in enumerate(rows):
-            self._components.setItem(i, 0, _cell(name))
-            self._components.setItem(i, 1, _cell(kind, muted=True))
-            self._components.setItem(i, 2, _cell(_money(amount), align_right=True))
-            self._components.setItem(i, 3, _cell(_money(amount * 12),
-                                                 align_right=True))
-        _fit_columns(self._components, stretch=0)
+            rule = str(template[i].get("rule")) if i < len(template) else ""
+            manual = rule == "FIXED"
+            # The full name as a tooltip, for the narrow window where the
+            # name column is the one that gives way (see below).
+            name_item = _cell(name, tooltip=name)
+            name_item.setFlags(fixed)
+            self._components.setItem(i, 0, name_item)
+            # SAY WHICH FIGURES WERE TYPED. A split with one component set by
+            # hand reads exactly like the automatic one otherwise, and
+            # somebody reviewing a payslip a year later needs to know which
+            # of its numbers were a person's decision.
+            was = template[i].get("was") if i < len(template) else None
+            how = _cell(
+                "Manual" if manual else kind, muted=not manual,
+                tooltip=(f"Set by hand. Worked out it would have been: "
+                         f"{was.replace('_', ' ').lower()}") if manual and was
+                        else ("Set by hand." if manual else None))
+            how.setFlags(fixed)
+            self._components.setItem(i, 1, how)
+            figure = _cell(_money(amount), align_right=True)
+            if rule == "BALANCE":
+                # THE BALANCE IS NOT TYPED. It is whatever the other parts
+                # leave, which is the only thing that keeps them adding up
+                # to the CTC once one of them has been changed.
+                figure.setFlags(fixed)
+                figure.setToolTip("Whatever the other components leave — "
+                                  "change one of those instead.")
+            else:
+                figure.setFlags(editable)
+                figure.setToolTip("Double-click to set this figure by hand.")
+            self._components.setItem(i, 2, figure)
+            annual = _cell(_money(amount * 12), align_right=True)
+            annual.setFlags(fixed)
+            self._components.setItem(i, 3, annual)
+        # EVERY ROW, AND EVERY FIGURE IN FULL — the same two fixes the
+        # onboarding form's salary step already has, which this page never
+        # got. Sized to its rows with no cap, because a salary structure is a
+        # handful of lines and a table that scrolls inside a page that also
+        # scrolls hides the bottom of it twice. And fitted with the wider pad,
+        # because the default measured with table.font() left "₹249,999.96"
+        # a pixel short and Qt drew "₹249,999.…".
+        _size_table(self._components, cap=10_000)
+        _fit_columns(self._components, stretch=0, pad=46)
+        # THE NAME COLUMN TAKES WHAT IS LEFT, AND NEVER MORE. The figures keep
+        # the widths they were just measured at; the component name fills the
+        # remainder and, on a narrow window, is the thing that shortens. So
+        # the table can never be wider than its card — which is what stops a
+        # horizontal scrollbar appearing and taking the last row's height.
+        self._components.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
 
-        self._gross.setValue(sum(r[2] for r in rows))
+        total = round(sum(r[2] for r in rows), 2)
+        self._gross.setValue(total)
+
+        # ── WHEN THE TYPED FIGURES COME TO MORE THAN THE CTC ────────────
+        #
+        # The balance cannot go below nothing — the server clamps it at zero
+        # rather than paying a negative allowance — so a hand-set split that
+        # overshoots does not fail, it silently makes the monthly gross bigger
+        # than the CTC it was supposed to divide. Said here, and the save is
+        # held back, because that is a pay rise nobody meant to give.
+        overrides = any(str(c.get("rule")) == "FIXED" for c in template)
+        monthly_ctc = round(float(self._ctc.value() or 0) / 12.0, 2)
+        over = round(total - monthly_ctc, 2)
+        if overrides and over > 0.01:
+            self._split_note.setText(
+                f"The figures typed come to {_money(total)} a month — "
+                f"{_money(over)} more than the CTC allows ({_money(monthly_ctc)}). "
+                f"Lower one of them, or raise the CTC.")
+            self._split_note.setStyleSheet(
+                f"color:{C['danger']};font-size:{Type.MICRO}px;"
+                f"background:transparent;border:none;")
+            self._save.setEnabled(False)
+        else:
+            self._split_note.setText(
+                "Double-click a monthly figure to change it. Fixed Allowance "
+                "adjusts so the parts still add up to the CTC.")
+            self._split_note.setStyleSheet(
+                f"color:{C['text_muted']};font-size:{Type.MICRO}px;"
+                f"background:transparent;border:none;")
+            self._save.setEnabled(self._selected is not None)
+        self._reset_split.setEnabled(overrides)
 
     # ── saving ──────────────────────────────────────────────────────────
     def _save_salary(self):
@@ -4553,6 +4783,15 @@ class _SalaryPage(QWidget):
             "esi_enabled": self._esi.isChecked(),
             "pt_enabled": self._pt.isChecked(),
         }
+        # THE SPLIT GOES WITH IT ONLY WHEN SOMEBODY CHANGED IT. Without a
+        # figure typed by hand the server applies the company's current
+        # template, exactly as before — sending the template anyway would
+        # freeze today's policy into this person, so a later change to the
+        # arrangement would quietly pass them by.
+        if any(str(c.get("rule")) == "FIXED" for c in self._template):
+            payload["components"] = [
+                {"name": c.get("name"), "rule": c.get("rule"),
+                 "value": c.get("value")} for c in self._template]
         worker = _PostWorker(f"{API_BASE_URL}/admin/payroll/salaries", payload)
         worker.result.connect(lambda d: (
             self.refresh() if d.get("success") else
@@ -5781,6 +6020,52 @@ class _PayrollTab(QWidget):
             f"border-radius:{Radius.CONTROL}px;padding:10px 14px;")
         root.addWidget(self._missing)
 
+        # ── a month with nothing in it says where something IS ──────────
+        #
+        # The page opens on last month, which on a fresh install — or on any
+        # month nobody has generated yet — is an empty table, five dashes and
+        # the word "Not generated". Reported exactly that way: "empty… problem
+        # data kaha hai isme". Nothing was wrong; the data was two months back
+        # and the screen would not say so.
+        #
+        # So an empty month names the most recent month that DOES have a run,
+        # and opens it in one press. The months come from the history request
+        # the chart already makes, so this costs no extra call.
+        self._empty_row = QWidget()
+        self._empty_row.setVisible(False)
+        self._empty_row.setStyleSheet(
+            f"background:{C['bg_surface_alt']};border:1px solid {C['border']};"
+            f"border-radius:{Radius.CONTROL}px;")
+        empty_bar = QHBoxLayout(self._empty_row)
+        empty_bar.setContentsMargins(14, 10, 14, 10)
+        empty_bar.setSpacing(12)
+        self._empty_note = QLabel("")
+        self._empty_note.setWordWrap(True)
+        self._empty_note.setStyleSheet(
+            f"color:{C['text_secondary']};font-size:{Type.SMALL}px;"
+            f"border:none;background:transparent;")
+        empty_bar.addWidget(self._empty_note, 1)
+        self._open_latest = _btn("Open", variant="secondary", height=32, width=150)
+        self._open_latest.clicked.connect(self._open_latest_month)
+        empty_bar.addWidget(self._open_latest, 0)
+        root.addWidget(self._empty_row)
+
+        # ── why somebody on the run was paid nothing ────────────────────
+        #
+        # A row at ₹0.00 for somebody whose salary is plainly set on the Set
+        # salary page reads as a broken figure — reported exactly that way.
+        # Both screens were right: a month is paid on the salary in force
+        # DURING it, and that one starts next month. The two kinds of zero
+        # need different things done about them, so the page names them.
+        self._zero_note = QLabel("")
+        self._zero_note.setWordWrap(True)
+        self._zero_note.setVisible(False)
+        self._zero_note.setStyleSheet(
+            f"color:{C['text_secondary']};font-size:{Type.SMALL}px;"
+            f"background:{C['bg_surface_alt']};border:1px solid {C['border']};"
+            f"border-radius:{Radius.CONTROL}px;padding:10px 14px;")
+        root.addWidget(self._zero_note)
+
         # ── what the month comes to, before reading a single row ────────
         self._kpis: dict[str, QLabel] = {}
         kpi_row = QHBoxLayout()
@@ -6108,6 +6393,13 @@ class _PayrollTab(QWidget):
         self._history = sorted(data.get("data") or [],
                                key=lambda m: str(m.get("month", "")))
         self._redraw_chart()
+        # THE TWO REQUESTS RACE, and this one usually loses. The month's own
+        # fetch decides whether the page is empty; the history that names the
+        # nearest month with data arrives after it about half the time. So
+        # the note is written again here, or an empty month would offer
+        # nothing to open on the first load and everything on the second.
+        if getattr(self, "_status", "NONE") in ("NONE", None, ""):
+            self._show_empty_month(True)
 
     def _redraw_chart(self):
         self._chart.set_months(getattr(self, "_history", []),
@@ -6139,6 +6431,20 @@ class _PayrollTab(QWidget):
             self._match_count.setText("")
             self._totals.setText(
                 f"Showing {len(self._lines)} of {len(self._lines)} employees")
+
+        # AS TALL AS THE PEOPLE ON IT, and no taller. The table was given a
+        # 340px minimum and a stretch factor, and a stretch factor inside a
+        # scroll area means nothing — so it stayed 340px whether it held five
+        # people or fifty: "total sab mila kr 8 hai but yaha 5 show ho rha
+        # hai… yaha saare employee aur admins dikhne chahiye". The rest were
+        # inside the table's own small scroll, behind a scrollbar that used to
+        # be invisible, inside a page that also scrolls — the bottom hidden
+        # twice, which is the lesson the salary page already learned. Now the
+        # table grows and the PAGE scrolls.
+        #
+        # SHOWING, not rowCount: a search matching one name is one row tall,
+        # not one result with two thousand pixels of nothing under it.
+        _size_table(self._table, cap=10_000, rows=shown)
 
     def _open_employee(self, row: int, _column: int = 0):
         if 0 <= row < len(self._lines):
@@ -6173,6 +6479,104 @@ class _PayrollTab(QWidget):
         worker.error.connect(lambda e: self._headline.setText(f"Error: {e}"))
         _track_worker(self._workers, worker)
         worker.start()
+
+    def _latest_generated_month(self) -> tuple:
+        """(month, its run) for the newest month that has one — not this one.
+
+        Read from the history the chart already fetched, so an empty month
+        costs nothing extra to explain. Returns ("", {}) before that arrives,
+        or when there is genuinely nothing anywhere.
+        """
+        months = [run for run in getattr(self, "_history", [])
+                  if str(run.get("month") or "")
+                  and str(run.get("month")) != getattr(self, "_month", "")]
+        if not months:
+            return "", {}
+        newest = max(months, key=lambda run: str(run.get("month")))
+        return str(newest.get("month")), newest
+
+    def _open_latest_month(self):
+        month, _run = self._latest_generated_month()
+        if not month:
+            return
+        self._month_box.setText(month)
+        self._load()
+
+    def _show_empty_month(self, empty: bool):
+        """Say what an empty month means, and where the nearest data is."""
+        if not empty:
+            self._empty_row.setVisible(False)
+            return
+
+        month = getattr(self, "_month", "") or self._month_box.text().strip()
+        latest, run = self._latest_generated_month()
+        if not latest:
+            # Nothing anywhere yet — a new installation. Say what to press
+            # rather than leaving five dashes to be read as a failure.
+            self._empty_note.setText(
+                f"No payroll has been generated for {month} yet, and no other "
+                f"month has one either. Generate draft builds it from this "
+                f"month's attendance; Set salary comes first for anybody who "
+                f"has no pay on record.")
+            self._open_latest.setVisible(False)
+        else:
+            status = str(run.get("status") or "").upper()
+            people = run.get("employees") or 0
+            self._empty_note.setText(
+                f"No payroll for {month} yet — nothing here is missing. "
+                f"The most recent one is {latest} "
+                f"({'finalised' if status == 'FINALIZED' else 'a draft'}, "
+                f"{people} {'person' if people == 1 else 'people'}). "
+                f"Generate draft builds {month} from its attendance.")
+            self._open_latest.setText(f"Open {latest}")
+            self._open_latest.setVisible(True)
+        self._empty_row.setVisible(True)
+
+    @staticmethod
+    def _zero_reason(line: dict) -> str:
+        """Which kind of nothing this is, in one sentence."""
+        starts = line.get("salary_starts_on")
+        if starts:
+            return (f"No pay for this month: this salary starts on "
+                    f"{_fmt_date_only(starts)}. A month is paid on the salary "
+                    f"in force during it, so a later one does not reach back — "
+                    f"it is paid from its own month onwards.")
+        return ("No pay for this month: there is no salary on record for this "
+                "person. Set salary puts one on, from a date you choose.")
+
+    def _show_zero_pay(self, lines: list):
+        """Name anybody the month pays nothing, and say which kind it is.
+
+        Reported from a live screen: a new employee's salary had been set, the
+        month showed ₹0.00, and the Set salary page showed ₹25,000 — "rajesh
+        ka salary set h already kya h bhai". Both figures were right. The
+        salary starts on the first of the following month and a month is paid
+        on the salary in force during it, and nothing on the page said so.
+        """
+        unpaid = [line for line in lines
+                  if not float(line.get("gross_monthly") or 0)]
+        if not unpaid:
+            self._zero_note.setVisible(False)
+            return
+
+        waiting, unset = [], []
+        for line in unpaid:
+            who = str(line.get("employee_name") or line.get("employee_id"))
+            starts = line.get("salary_starts_on")
+            if starts:
+                waiting.append(f"{who} — pay starts {_fmt_date_only(starts)}")
+            else:
+                unset.append(f"{who} — no salary set")
+
+        note = "Nothing to pay this month: " + "; ".join(unset + waiting) + "."
+        if waiting:
+            note += (" A month is paid on the salary in force during it, so a "
+                     "salary dated later does not reach back — it is paid from "
+                     "its own month onwards.")
+        if unset:
+            note += " Set salary puts a figure on record, from a date you choose."
+        self._zero_note.setText(note)
+        self._zero_note.setVisible(True)
 
     def _show_missing(self, missing: list, status: str | None):
         """Name anybody the run does not cover, and say what that means.
@@ -6217,10 +6621,13 @@ class _PayrollTab(QWidget):
                            (run or {}).get("status"))
 
         if not run:
+            self._show_empty_month(True)
+            self._show_zero_pay([])
             self._status_chip.setStyleSheet(_theme.badge("neutral"))
             self._status_chip.setText("Not generated")
             self._headline.setText("")
             self._table.setRowCount(0)
+            _size_table(self._table, cap=10_000)
             self._totals.setText("")
             self._finalize_btn.setEnabled(False)
             # A DISABLED BUTTON HAS TO SAY WHY IT IS DISABLED.
@@ -6240,6 +6647,8 @@ class _PayrollTab(QWidget):
                 value.setText("—")
             return
 
+        self._show_empty_month(False)
+        self._show_zero_pay(lines)
         finalised = self._status == "FINALIZED"
         self._status_chip.setStyleSheet(
             _theme.badge("finalized" if finalised else "draft"))
@@ -6307,8 +6716,12 @@ class _PayrollTab(QWidget):
             face.set_initials(str(line.get("employee_name") or "?"))
             person.setIcon(_round_avatar(face, 28))
             self._table.setItem(i, 0, person)
-            self._table.setItem(i, 1, _cell(money(line.get("gross_monthly")),
-                                            align_right=True))
+            gross = _cell(money(line.get("gross_monthly")), align_right=True)
+            # A ZERO SAYS WHY, on the figure itself as well as in the note
+            # above the table — see _show_zero_pay.
+            if not float(line.get("gross_monthly") or 0):
+                gross.setToolTip(_theme.tip(self._zero_reason(line)))
+            self._table.setItem(i, 1, gross)
             self._table.setItem(i, 2, _cell(number(line.get("working_days")),
                                             align_right=True))
             self._table.setItem(i, 3, _cell(number(line.get("present_days")),
@@ -6409,11 +6822,6 @@ class _PayrollTab(QWidget):
             f"₹{float(totals.get('overtime', 0)):,.2f}")
         self._kpis["net"].setText(f"₹{float(totals.get('net', 0)):,.2f}")
 
-        # THE FILTER SURVIVES A REFRESH. Thirty seconds after somebody types
-        # a name the auto-refresh redraws the table; without this the rows
-        # they filtered away come back while they are reading.
-        self._apply_search()
-
         # ── the summary card ────────────────────────────────────────────
         count = len(lines) or 1
         with_overtime = sum(1 for l in lines
@@ -6445,6 +6853,18 @@ class _PayrollTab(QWidget):
         # item — so measuring gives the width of nothing at all.
         self._table.setColumnWidth(0, 240)
         self._table.setColumnWidth(14, 52)
+        # THE FILTER SURVIVES A REFRESH, and it is also what sets the height.
+        #
+        # Thirty seconds after somebody types a name the auto-refresh redraws
+        # the table; without this the rows they filtered away come back while
+        # they are reading.
+        #
+        # AFTER the columns, so the width _size_table measures is the width
+        # that will be drawn. Measured both ways on the real page and the
+        # height came out the same — fifteen columns overflow whatever they
+        # are fitted to, so the horizontal scrollbar is there either way —
+        # but ordering it this way means the height never depends on that.
+        self._apply_search()
 
     # ── taking it away with you ─────────────────────────────────────────
     def _export(self):
@@ -6845,9 +7265,22 @@ class _LeaveTab(QWidget):
         bar.addWidget(self._count)
         root.addWidget(toolbar)
 
-        self._table = _tune_table(QTableWidget(0, 8))
+        # REASON AND REMARKS ARE COLUMNS, not a tooltip on the status chip.
+        #
+        # Both were already here — the server has always sent the employee's
+        # reason and the decision's remarks — and both lived in the hover text
+        # of the Status chip, where nobody finds them. So an administrator saw
+        # "why" only after pressing Approve, in the confirmation box, and never
+        # at all when pressing Reject. Reported as: "admin ko reason tabhi
+        # dikhta hai jab wo approve par click karta hai, jo ki galat hai — by
+        # default reason show hona chahiye, uske basis pe approve ya reject
+        # hoga." The reason sits beside the dates because it is read with them
+        # to make the decision; the remarks sit beside the status because they
+        # explain it.
+        self._table = _tune_table(QTableWidget(0, 10))
         self._table.setHorizontalHeaderLabels(
-            ["ID", "Employee", "Type", "From", "To", "Days", "Status", "Actions"])
+            ["ID", "Employee", "Type", "From", "To", "Days", "Reason",
+             "Status", "Remarks", "Actions"])
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -6916,16 +7349,23 @@ class _LeaveTab(QWidget):
             self._table.setItem(i, 5, _cell(
                 f"{float(days):g}" if days is not None else "", align_right=True))
 
+            # The employee's reason, in full on hover when the column is too
+            # narrow to hold it. A dash when there is none — an empty cell
+            # reads as "not loaded".
+            reason = str(row.get("reason") or "").strip()
+            self._table.setItem(i, 6, _cell(reason or "—", muted=not reason,
+                                            tooltip=reason or None))
+
             # The fourth copy of the status colours, now the same one chip
             # the leave page and attendance use. CANCELLED was missing from
             # this dict and read as plain grey text, identical to a status
             # that had simply failed to load.
             status = str(row.get("status", ""))
-            self._table.setCellWidget(i, 6, badge_cell(
-                status, status.title(),
-                (f"Reason: {row['reason']}"
-                 + (f"\n\nRemarks: {row['remarks']}" if row.get("remarks") else ""))
-                if row.get("reason") else None))
+            self._table.setCellWidget(i, 7, badge_cell(status, status.title()))
+
+            remarks = str(row.get("remarks") or "").strip()
+            self._table.setItem(i, 8, _cell(remarks or "—", muted=not remarks,
+                                            tooltip=remarks or None))
 
             actions = QWidget()
             lay = QHBoxLayout(actions)
@@ -6946,36 +7386,54 @@ class _LeaveTab(QWidget):
                 undo.clicked.connect(lambda _=False, r=row: self._decide(r, "revoke"))
                 lay.addWidget(undo)
             lay.addStretch()
-            self._table.setCellWidget(i, 7, actions)
+            self._table.setCellWidget(i, 9, actions)
         # Sized to the content, after it exists — see _fit_columns.
         _fit_columns(self._table, stretch=1)
+        # A REASON CAN BE A PARAGRAPH. Sized to content it would push Status
+        # and the buttons off the right-hand edge, so the two free-text columns
+        # are capped and the rest of the text is one hover away.
+        for column in (6, 8):
+            if self._table.columnWidth(column) > 280:
+                self._table.setColumnWidth(column, 280)
 
     def _decide(self, row: dict, what: str):
         who = row.get("employee_name") or row.get("employee_id")
         span = (row.get("start_date") if row.get("start_date") == row.get("end_date")
                 else f"{row.get('start_date')} to {row.get('end_date')}")
 
-        # A REJECTION MUST CARRY A REASON — the server refuses one without,
-        # and the employee reads it. Asking here rather than failing there
-        # means the reason is typed once, by somebody who has the request in
-        # front of them.
-        remarks = ""
-        if what in ("reject", "revoke"):
-            remarks, ok = QInputDialog.getText(
-                self, f"{what.title()} leave",
-                f"{who} — {span}\n\n"
-                + ("Why is it being rejected? They will read this."
-                   if what == "reject"
-                   else "Why is the approval being withdrawn? They will read this."))
-            if not ok or not remarks.strip():
-                return
-        else:
-            answer = QMessageBox.question(
-                self, "Approve leave",
-                f"Approve {who}'s leave?\n\n{span}  ·  {row.get('total_days')} day(s)\n\n"
-                f"Reason given: {row.get('reason', '')}")
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        # THEIR REASON IS IN FRONT OF WHOEVER DECIDES, EVERY TIME.
+        #
+        # The approval box used to be the only place it appeared, and the
+        # rejection box did not show it at all — it asked "why are you
+        # rejecting this?" of somebody who had not been shown why it was
+        # asked for. The reason is now a column in the table as well; it is
+        # repeated here because this is the moment it is being weighed.
+        reason = str(row.get("reason") or "").strip() or "(no reason given)"
+        context = (f"{who} — {span}  ·  {row.get('total_days')} day(s)\n\n"
+                   f"Their reason: {reason}\n\n")
+
+        # REMARKS GO WITH AN APPROVAL TOO, and the employee reads them.
+        #
+        # An approval always sent an empty remark, so there was no way to
+        # attach "approved — but hand over the release first" to one. Reported
+        # as: "HR reject ya approve kare, dono me employee ko remarks dikhne
+        # chahiye." Optional on an approval; required on a rejection or a
+        # revocation, which the server enforces as well — somebody told "no"
+        # is owed a reason.
+        prompts = {
+            "approve": ("Approve leave",
+                        "A note for them (optional) — they will read this:"),
+            "reject": ("Reject leave",
+                       "Why is it being rejected? They will read this."),
+            "revoke": ("Revoke leave",
+                       "Why is the approval being withdrawn? They will read this."),
+        }
+        title, prompt = prompts[what]
+        remarks, ok = QInputDialog.getText(self, title, context + prompt)
+        if not ok:
+            return
+        if what in ("reject", "revoke") and not remarks.strip():
+            return
 
         worker = _PostWorker(f"{API_BASE_URL}/admin/leave/{row['id']}/{what}",
                              {"remarks": remarks.strip()})
@@ -8474,7 +8932,8 @@ class EmployeePage(QWidget):
         details.setVerticalSpacing(6)
         self._profile_rows = {}
         FIELDS = [
-            ("Email",             "email"),
+            ("Official email",    "email"),
+            ("Personal email",    "personal_email"),
             ("Phone",             "phone"),
             ("Designation",       "designation"),
             ("Department",        "department"),
@@ -8920,7 +9379,7 @@ class _EmployeesTab(QWidget):
 
         self._table = _tune_table(QTableWidget(0, 6))
         self._table.setHorizontalHeaderLabels([
-            "Employee", "Work email", "Department", "Role", "Status", "Actions"
+            "Employee", "Official email", "Department", "Role", "Status", "Actions"
         ])
 
         hdr = self._table.horizontalHeader()
@@ -9150,7 +9609,8 @@ class _EmployeesTab(QWidget):
         # page shows sends somebody back to the panel to read the two things
         # it left out — and the work email and department are exactly what an
         # export of an employee list is wanted for.
-        headers = ["Employee ID", "Name", "Username", "Work email", "Department",
+        headers = ["Employee ID", "Name", "Username", "Official email",
+                   "Personal email", "Department",
                    "Designation", "Role", "Status", "Last Seen (IST)"]
         rows = []
         for emp in filtered:
@@ -9163,6 +9623,7 @@ class _EmployeesTab(QWidget):
                 emp.get('full_name', '') or '',
                 emp.get('username', '') or '',
                 emp.get('email', '') or '',
+                emp.get('personal_email', '') or '',
                 emp.get('department', '') or '',
                 emp.get('designation', '') or '',
                 emp.get('role', ''),
@@ -9722,14 +10183,25 @@ class _EmployeesTab(QWidget):
         # admin moving people between departments or changing who they report
         # to is an organisational change, not an administrative one.
         # Contact details — any admin, because onboarding somebody is what an
-        # admin does. The employee can change these on their own page too;
-        # this is for the day they are set up, before they have signed in.
+        # admin does. THIS IS THE ONLY PLACE THEY CHANGE: the employee's own
+        # page shows them and no longer edits them.
+        #
+        # Two addresses. The official one is the company's and stops working
+        # the day somebody leaves; the personal one is how to reach them after
+        # that — for a relieving letter, a last payslip, a form-16 in June.
+        # Changing the official one also clears its verification, which the
+        # server does: the tick belonged to the address it was earned on.
         email = QLineEdit(str(emp.get("email") or ""))
         email.setPlaceholderText("name@company.com")
+        personal_email = QLineEdit(str(emp.get("personal_email") or ""))
+        personal_email.setPlaceholderText("them@gmail.com")
         phone = QLineEdit(str(emp.get("phone") or ""))
         phone.setPlaceholderText("+91 98765 43210")
-        layout.addWidget(_muted_label("Email  (optional)"))
+        layout.addWidget(_muted_label("Official email  (optional)"))
         layout.addWidget(email)
+        layout.addSpacing(6)
+        layout.addWidget(_muted_label("Personal email  (optional)"))
+        layout.addWidget(personal_email)
         layout.addSpacing(6)
         layout.addWidget(_muted_label("Phone  (optional)"))
         layout.addWidget(phone)
@@ -9803,9 +10275,18 @@ class _EmployeesTab(QWidget):
                     "That does not look like an email address. Leave it empty "
                     "if you do not have one yet.")
                 return
+            typed_personal = personal_email.text().strip()
+            if typed_personal and not re.match(
+                    r"^[^\s@]+@[^\s@]+\.[^\s@]+$", typed_personal):
+                QMessageBox.warning(
+                    self, "Check the personal email",
+                    "That does not look like an email address. Leave it empty "
+                    "if you do not have one yet.")
+                return
             payload = {"full_name": typed,
                        "designation": role_text.text().strip(),
                        "email": typed_email,
+                       "personal_email": typed_personal,
                        "phone": phone.text().strip()}
             if i_am_super:
                 payload["department"] = department.text().strip()
@@ -10055,7 +10536,7 @@ class _AddEmployeePage(QWidget):
 
         self._email = QLineEdit()
         self._email.setPlaceholderText("rajesh@amazeinternet.com")
-        self._field(grid, "Work email", self._email, 1, 1)
+        self._field(grid, "Official email", self._email, 1, 1)
 
         self._phone = QLineEdit()
         self._phone.setPlaceholderText("9876543210")
@@ -10227,12 +10708,20 @@ class _AddEmployeePage(QWidget):
         self._pan.setMaxLength(10)
         self._field(grid, "PAN", self._pan, 0, 1)
 
+        # THEIR OWN ADDRESS, on the personal step where it belongs — the
+        # official one is on the first step with the rest of the company's
+        # record. The official address stops working the day somebody leaves;
+        # this is how to reach them about a payslip or a form-16 after that.
+        self._personal_email = QLineEdit()
+        self._personal_email.setPlaceholderText("rajesh@gmail.com")
+        self._field(grid, "Personal email", self._personal_email, 1, 0)
+
         self._address = QPlainTextEdit()
         self._address.setPlaceholderText("14 MG Road, Bengaluru 560001")
         self._address.setFixedHeight(96)
-        self._field(grid, "Address", self._address, 1, 0)
+        self._field(grid, "Address", self._address, 2, 0)
         # The address is worth the width of the card, not half of it.
-        grid.addWidget(self._address, 1, 1, 1, 3)
+        grid.addWidget(self._address, 2, 1, 1, 3)
 
         box = card.layout()
         box.addSpacing(10)
@@ -10475,6 +10964,11 @@ class _AddEmployeePage(QWidget):
                           "Only an employee can be added without portal "
                           "access — an admin account exists to use the console."))
 
+        personal = self._personal_email.text().strip()
+        if personal and ("@" not in personal or "." not in personal.split("@")[-1]):
+            found.append((2, self._personal_email,
+                          "Personal email — that is not an address."))
+
         pan = self._pan.text().strip().upper()
         if pan and not re.match(r"^[A-Z]{5}[0-9]{4}[A-Z]$", pan):
             found.append((2, self._pan,
@@ -10537,6 +11031,7 @@ class _AddEmployeePage(QWidget):
             "gender": self._gender.currentData() or None,
             "work_location": self._location.text().strip() or None,
             "pan": self._pan.text().strip().upper() or None,
+            "personal_email": self._personal_email.text().strip() or None,
             "address": self._address.toPlainText().strip() or None,
             "payment_mode": self._mode.currentData() or None,
             "portal_access": self._portal.isChecked(),
@@ -10642,6 +11137,7 @@ class _AddEmployeePage(QWidget):
         for line in (self._name, self._emp_id, self._email, self._phone,
                      self._location, self._designation, self._department,
                      self._username, self._password, self._pan,
+                     self._personal_email,
                      self._bank, self._account, self._ifsc):
             line.clear()
         self._address.clear()
@@ -10728,17 +11224,14 @@ class _Sidebar(QFrame):
         nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
         nav_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # A SCROLLBAR THAT CAN BE SEEN. The panel's global rule draws it in
-        # the border colour, which on the sidebar's own background is very
-        # nearly invisible — so a menu that scrolled looked like a menu that
-        # ended. Wider and lighter, here only.
+        # A SCROLLBAR THAT CAN BE SEEN. The panel's global rule used to draw
+        # it in the border colour, nearly invisible on the sidebar's own
+        # background — a menu that scrolled looked like a menu that ended —
+        # so this one was made lighter by hand. The shared rule is now
+        # visible everywhere, and a copy kept here would only drift from it.
         nav_scroll.setStyleSheet(
-            f"QScrollArea{{background:transparent;border:none;}}"
-            f"QScrollBar:vertical{{background:transparent;width:8px;margin:4px 2px;}}"
-            f"QScrollBar::handle:vertical{{background:{C['text_muted']};"
-            f"border-radius:12px;min-height:40px;}}"
-            f"QScrollBar::handle:vertical:hover{{background:{C['text_secondary']};}}"
-            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}")
+            "QScrollArea{background:transparent;border:none;}"
+            + _theme.scrollbar("transparent"))
         nav_wrap = QWidget()
         _clear_bg(nav_wrap)
         nav_lay = QVBoxLayout(nav_wrap)
@@ -11850,6 +12343,13 @@ class AdminConfigPanel(QMainWindow):
         # cap, which is enforced on the same stored count.
         if result is not None:
             self._update_own_shots(ScreenshotManager.captures_today())
+        elif ScreenshotManager.should_try_again():
+            # Locked screen, or a remote session with nothing on it. Nothing
+            # was spent, so the capture is planned again rather than lost —
+            # see ScreenshotManager.should_try_again.
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None:
+                scheduler.capture_postponed()
 
     def _open_salary_page(self):
         """Show the Salaries page, and load it."""

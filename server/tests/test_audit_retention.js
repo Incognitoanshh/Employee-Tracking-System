@@ -73,7 +73,13 @@ async function main() {
             ('A001','PASSWORD RESET : by A001',                 NOW() - INTERVAL '60 days'),
             ('A001','SCREENSHOTS DELETED : 3 capture(s) of E001', NOW() - INTERVAL '45 days'),
             ('SA001','RETENTION CHANGED : log_retention_days=31', NOW() - INTERVAL '3 days'),
-            ('A001','PASSWORD RESET : by A001',                 NOW() - INTERVAL '1 days')`);
+            ('A001','PASSWORD RESET : by A001',                 NOW() - INTERVAL '1 days'),
+            ('A001','SALARY SET : 30000 per month from 2026-01-01', NOW() - INTERVAL '50 days'),
+            ('A001','PAYROLL FINALIZED : 2026-06', NOW() - INTERVAL '40 days'),
+            ('A001','PAYROLL DRAFT REFRESHED : 2026-06', NOW() - INTERVAL '40 days'),
+            ('A001','PAYROLL ADJUSTMENT : 500 added', NOW() - INTERVAL '40 days'),
+            ('A001','PAYROLL DEDUCTION : 1000 deducted', NOW() - INTERVAL '40 days'),
+            ('A001','PAYROLL OVERTIME : 10 hours', NOW() - INTERVAL '40 days')`);
 
         process.env.DB_HOST = process.env.PGHOST || "127.0.0.1";
         process.env.DB_PORT = process.env.PGPORT || "5432";
@@ -101,7 +107,7 @@ async function main() {
               WHERE created_at < NOW() - INTERVAL '31 days' AND (${auditRowsSql()})`);
         check("noise older than 31 days is found", Number(noiseOld) === 40, noiseOld);
         check("and the administrative rows are told apart from it",
-            Number(auditOld) === 2, auditOld);
+            Number(auditOld) === 8, auditOld);
 
         // Simulate the purge's two statements at a 31-day noise period.
         psql(DB, `DELETE FROM activity_logs
@@ -115,6 +121,9 @@ async function main() {
         check("so does the screenshot deletion from 45 days ago",
             Number(psql(DB,
                 `SELECT COUNT(*) FROM activity_logs WHERE activity LIKE 'SCREENSHOTS DELETED%'`)) === 1);
+        check("and the 6 payroll actions from 40-50 days ago survive",
+            Number(psql(DB,
+                `SELECT COUNT(*) FROM activity_logs WHERE activity LIKE 'PAYROLL%' OR activity LIKE 'SALARY SET%'`)) === 6);
         check("and recent sign-ins are untouched",
             Number(psql(DB,
                 `SELECT COUNT(*) FROM activity_logs WHERE activity LIKE 'LOGIN SUCCESS%'`)) === 5);
@@ -148,7 +157,7 @@ async function main() {
         const wide = psql(DB, `SELECT ((NOW() AT TIME ZONE 'Asia/Kolkata')::date - 90)::text`);
         res = await api("GET", `/admin/reports/audit?from=${wide}&to=${today}`, { token: sa });
         check("a 90 day range still finds the 60-day-old reset — it was kept",
-            res.body.total === 4, JSON.stringify(res.body.total));
+            res.body.total === 10, JSON.stringify(res.body.total));
 
         // ── the setting is real, and bounded ────────────────────────────
         res = await api("GET", "/admin/retention", { token: sa });
@@ -161,7 +170,7 @@ async function main() {
         check("31 days for the noise is accepted", res.status === 200, `status ${res.status}`);
 
         res = await api("POST", "/admin/retention",
-            { token: sa, body: { audit_log_retention_days: 30 } });
+            { token: sa, body: { audit_log_retention_days: 364 } });
         check("audit retention cannot be dropped below its floor",
             res.status === 400, `status ${res.status}`);
 

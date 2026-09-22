@@ -169,8 +169,9 @@ off_radius = [int(v) for v in re.findall(r"border-radius: ?(\d+)px", THEMED_CODE
 CEILINGS = {
     "off-scale font sizes": (len(off_type), 0),
     "off-scale border radii": (len(off_radius), 0),
+    # 13: base_window's scrollbar grey went to the shared rule.
     "hard-coded hex colours": (
-        len(set(re.findall(r"#[0-9a-fA-F]{6}", ALL_THEMED))), 15),
+        len(set(re.findall(r"#[0-9a-fA-F]{6}", ALL_THEMED))), 13),
 }
 for label, (found, ceiling) in CEILINGS.items():
     check(f"{label}: {found} (ceiling {ceiling})",

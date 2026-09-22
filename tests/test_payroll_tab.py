@@ -365,6 +365,186 @@ check("an ungenerated month offers neither button",
 check("and shows an empty table", tab._table.rowCount() == 0,
       str(tab._table.rowCount()))
 
+# ── an empty month has to say where the data IS ─────────────────────────
+#
+# Reported off a live screen: the page opens on last month, that month had no
+# run, so the table was empty, all five cards read "—" and the chip said "Not
+# generated" — and it was read as the product being broken. Nothing was
+# broken; the data was two months back and the page would not say so.
+#
+# The months come from the history the chart already fetches, so this costs
+# no extra request — and that request RACES the month's own, which is why the
+# note is written from both and checked from both here.
+HISTORY = {"data": [
+    {"month": "2026-04", "status": "DRAFT", "employees": 4},
+    {"month": "2026-06", "status": "FINALIZED", "employees": 4},
+    {"month": "2026-07", "status": "FINALIZED", "employees": 4},
+]}
+
+tab._history = []
+tab._month = "2026-08"
+tab._month_box.setText("2026-08")
+tab._populate({"run": None, "lines": [], "totals": {}})
+check("an empty month explains itself", not tab._empty_row.isHidden())
+# Before the history lands there is nothing to offer, and offering a button
+# that goes nowhere is worse than none.
+check("with nothing to open before the history arrives",
+      tab._open_latest.isHidden(), tab._open_latest.text())
+check("and it still says what to press",
+      "Generate draft" in tab._empty_note.text(), tab._empty_note.text())
+
+tab._fill_chart(HISTORY)
+check("once the history lands it names the nearest month that has one",
+      "2026-08" in tab._empty_note.text() and "2026-07" in tab._empty_note.text(),
+      tab._empty_note.text())
+check("says which kind it is, and how many people are on it",
+      "finalised" in tab._empty_note.text() and "4 people" in tab._empty_note.text(),
+      tab._empty_note.text())
+# NOT "nothing is missing" as a reassurance — as the fact. An empty month
+# that was never generated is not a failed load, and the difference is the
+# whole report.
+check("and that nothing here is missing",
+      "nothing here is missing" in tab._empty_note.text(), tab._empty_note.text())
+check("the way there is one press", not tab._open_latest.isHidden()
+      and tab._open_latest.text() == "Open 2026-07", tab._open_latest.text())
+
+loaded = []
+real_load = tab._load
+tab._load = lambda: loaded.append(tab._month_box.text())
+try:
+    tab._open_latest.click()
+finally:
+    tab._load = real_load
+check("and pressing it opens that month", loaded == ["2026-07"], str(loaded))
+
+# THE MONTH ON SCREEN IS NEVER THE ONE OFFERED. A run deleted while the
+# history still lists the month would otherwise offer "Open 2026-07" to
+# somebody already looking at an empty 2026-07, and pressing it would do
+# nothing at all.
+tab._month = "2026-07"
+tab._month_box.setText("2026-07")
+tab._populate({"run": None, "lines": [], "totals": {}})
+check("the month already on screen is not offered back",
+      tab._open_latest.text() == "Open 2026-06", tab._open_latest.text())
+
+tab._populate({
+    "run": {"month": "2026-06", "status": "FINALIZED", "working_days": 26},
+    "lines": [LINE],
+    "totals": {"gross": 26000, "deductions": 2800, "net": 25200},
+})
+check("and a month with figures in it says none of this",
+      tab._empty_row.isHidden())
+
+# ── a zero that explains itself ─────────────────────────────────────────
+#
+# Reported from a live screen: a new employee's salary had been set, the month
+# showed ₹0.00, and the Set salary page showed ₹25,000 two clicks away —
+# "rajesh ka salary set h already kya h bhai har ek cheez ka mapping dekh na".
+# Both figures were right. A month is paid on the salary in force DURING it,
+# and that one starts on the first of the next month. Nothing said so.
+#
+# The two zeroes are not the same thing and do not want the same answer: one
+# needs a salary set, the other needs its month to arrive.
+tab._populate({
+    "run": {"month": "2026-08", "status": "DRAFT", "working_days": 26},
+    "lines": [
+        dict(LINE, employee_id="E900", employee_name="adi",
+             gross_monthly=0, net_pay=0, salary_starts_on=None),
+        dict(LINE, employee_id="E901", employee_name="rajesh r",
+             gross_monthly=0, net_pay=0, salary_starts_on="2026-09-01"),
+        dict(LINE, employee_id="E902", employee_name="Asha", gross_monthly=52000),
+    ],
+    "totals": {"gross": 52000, "deductions": 0, "net": 52000},
+})
+note = tab._zero_note.text()
+check("a month that pays somebody nothing says who", not tab._zero_note.isHidden())
+check("naming both of them", "adi" in note and "rajesh r" in note, note)
+check("and NOT the person who was paid", "Asha" not in note, note)
+check("one of them needs a salary set", "no salary set" in note, note)
+check("the other is waiting for the month its pay starts in",
+      "01 Sep 2026" in note or "1 Sep 2026" in note, note)
+check("and the rule is stated, not left to be guessed",
+      "in force during it" in note, note)
+
+# ON THE FIGURE ITSELF TOO. The note is above the table; somebody reading a
+# row wants the answer on the row.
+tip_none = tab._table.item(0, 1).toolTip()
+tip_later = tab._table.item(1, 1).toolTip()
+check("the ₹0.00 cell carries the reason as well",
+      "no salary on record" in tip_none, tip_none)
+check("and the other says when the pay begins",
+      "starts on" in tip_later and "Sep 2026" in tip_later, tip_later)
+check("a figure that was paid explains nothing",
+      not tab._table.item(2, 1).toolTip(), tab._table.item(2, 1).toolTip())
+
+tab._populate({
+    "run": {"month": "2026-08", "status": "DRAFT", "working_days": 26},
+    "lines": [dict(LINE, employee_id="E902", employee_name="Asha", gross_monthly=52000)],
+    "totals": {"gross": 52000, "deductions": 0, "net": 52000},
+})
+check("and a month where everybody is paid says none of it",
+      tab._zero_note.isHidden())
+
+# ── everybody on the run is on the page ─────────────────────────────────
+#
+# Reported with the count: "total sab mila kr 8 hai but yaha 5 show ho rha
+# hai… ye scrollable hona chahiye yaha saare employee aur admins dikhne
+# chahiye". Six people were on the run and five were on screen. The table had
+# a 340px minimum and a stretch factor, and a stretch factor inside a scroll
+# area means nothing — so it stayed 340px whether it held five people or
+# fifty, and the rest were inside its own small scroll, in a page that
+# scrolls too. The bottom was hidden twice.
+#
+# MEASURED IN PIXELS, not "does it have a scrollbar": the table is not on
+# screen in this test, and a scrollbar's range is not settled until it is.
+row_h = tab._table.verticalHeader().defaultSectionSize()
+head = tab._table.horizontalHeader().height()
+
+MANY = [dict(LINE, employee_id=f"E1{n:02}", employee_name=f"Person {n}")
+        for n in range(6)]
+tab._populate({
+    "run": {"month": "2026-08", "status": "DRAFT", "working_days": 26},
+    "lines": MANY,
+    "totals": {"gross": 156000, "deductions": 0, "net": 156000},
+})
+check("six people make a table six rows tall",
+      tab._table.height() >= head + 6 * row_h,
+      f"{tab._table.height()}px for {head} + 6 x {row_h}")
+# THE VIEWPORT, NOT THE WIDGET. This table is fifteen columns wide and always
+# carries a horizontal scrollbar, and that bar takes its height out of the
+# rows: the first fix left the viewport ten pixels short, so the last person
+# was still cut in half and the table still grew a scrollbar of its own.
+app.processEvents()
+check("and the rows fit INSIDE it, under the horizontal scrollbar",
+      tab._table.viewport().height() >= 6 * row_h,
+      f"viewport {tab._table.viewport().height()}px for 6 x {row_h}")
+
+# AND IT KEEPS GROWING. Forty people is the case the 340px box was worst
+# for — thirty-four of them behind an inner scrollbar.
+FORTY = [dict(LINE, employee_id=f"E2{n:02}", employee_name=f"Person {n}")
+         for n in range(40)]
+tab._populate({
+    "run": {"month": "2026-08", "status": "DRAFT", "working_days": 26},
+    "lines": FORTY,
+    "totals": {"gross": 1040000, "deductions": 0, "net": 1040000},
+})
+check("and forty make it forty rows tall, not a 340px window onto them",
+      tab._table.height() >= head + 40 * row_h,
+      f"{tab._table.height()}px for {head} + 40 x {row_h}")
+
+# A FILTER SHRINKS IT AGAIN. Hidden rows are still rows to rowCount, so
+# searching one name used to leave that name with two thousand pixels of
+# empty table under it.
+tab._search.setText("Person 7")
+app.processEvents()
+check("one match is one row tall",
+      tab._table.height() < head + 3 * row_h,
+      f"{tab._table.height()}px for {head} + 1 x {row_h}")
+tab._search.setText("")
+app.processEvents()
+check("and clearing the search brings the height back",
+      tab._table.height() >= head + 40 * row_h, str(tab._table.height()))
+
 # ── the salary form is a PAGE, not a dialog ─────────────────────────────
 #
 # It was three modals — a list, a form and a history window — that could not
@@ -439,6 +619,186 @@ check("the parts add back to the monthly CTC",
 check("and the monthly gross shown is that sum",
       abs(page._gross.value() - sum(amounts)) < 0.01,
       f"{page._gross.value()} vs {sum(amounts):.2f}")
+
+# ── THE WHOLE SALARY STRUCTURE CAN BE SEEN ──────────────────────────────
+#
+# REPORTED AS: "set salary kar rahe to full view nahi hai". Measured, two
+# faults stacked on top of each other:
+#
+#   * the component table had setMinimumHeight(200) — five rows in a box
+#     three rows deep — so Conveyance and Fixed Allowance lived inside the
+#     TABLE's own scroll, even with the page scrolled to the bottom;
+#   * the page was split evenly, so on a 1180px window the table got 503px
+#     against the 652px its columns need, grew a horizontal scrollbar, and
+#     that scrollbar took the height the last row needed.
+#
+# So the check is taken at a small laptop's size, with the page scrolled to
+# its end, and asks the three things that together mean "you can read it":
+# the table does not scroll inside itself, it does not scroll sideways, and
+# its last row is inside the window.
+from PySide6.QtCore import QPoint                                      # noqa: E402
+
+cut = []
+for width, height in ((1180, 640), (1180, 760), (1520, 900)):
+    page.resize(width, height)
+    page.show()
+    for _ in range(4):
+        app.processEvents()
+    page._restate()
+    for _ in range(3):
+        app.processEvents()
+    bar = page._scroll.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    app.processEvents()
+    table, viewport = page._components, page._scroll.viewport()
+    last = table.rowCount() - 1
+    bottom = table.viewport().mapTo(
+        viewport, QPoint(0, table.rowViewportPosition(last)
+                         + table.rowHeight(last))).y()
+    if table.verticalScrollBar().maximum() > 0:
+        cut.append(f"{width}x{height}: the table scrolls inside itself")
+    if table.horizontalScrollBar().isVisible():
+        cut.append(f"{width}x{height}: the table scrolls sideways")
+    if bottom > viewport.height():
+        cut.append(f"{width}x{height}: last row ends at {bottom}px of {viewport.height()}")
+    bar.setValue(0)
+check("every component row can be read, on a small laptop as well",
+      not cut, "; ".join(cut))
+check("and every figure is shown in full, not ellipsised",
+      not any("…" in page._components.item(r, c).text()
+              for r in range(page._components.rowCount()) for c in (2, 3)))
+page.hide()
+
+# ── A COMPONENT SET BY HAND ─────────────────────────────────────────────
+#
+# "Dono option rakho — auto calculation bhi, aur zaroorat pade to haath se,
+# kyunki bahut saare components variable hote hain." The CTC fills every row;
+# any row but the balance can be typed over; the balance takes the difference
+# so the parts still equal the CTC. server/tests/test_salary_ctc.js holds the
+# arithmetic; these hold what the page lets somebody do and what it sends.
+print("\nA component set by hand")
+
+posted_salaries: list = []
+
+
+class _CaptureSalary:
+    def __init__(self, url, body=None, *a, **k):
+        posted_salaries.append((url, body))
+
+    def __getattr__(self, _name):
+        return type("_S", (), {"connect": lambda *a, **k: None})()
+
+    def start(self):
+        pass
+
+
+real_post_worker, real_track = panel._PostWorker, panel._track_worker
+panel._PostWorker = _CaptureSalary
+panel._track_worker = lambda *a, **k: None
+try:
+    page._ctc.setValue(600000)                 # 50,000 a month
+    page._template = [dict(c) for c in panel._SALARY_TEMPLATE]
+    page._restate()
+    names = [page._components.item(r, 0).text()
+             for r in range(page._components.rowCount())]
+    hra_row, balance_row = names.index("House Rent Allowance"), len(names) - 1
+
+    def monthly(row):
+        return float(page._components.item(row, 2).text()
+                     .replace("₹", "").replace(",", ""))
+
+    editable = panel.Qt.ItemFlag.ItemIsEditable
+    check("an ordinary component's monthly figure can be edited",
+          bool(page._components.item(hra_row, 2).flags() & editable))
+    # THE BALANCE IS NOT TYPED. It is whatever the others leave, which is the
+    # only thing that keeps the parts equal to the CTC after an edit.
+    check("the balance row cannot be — it is what the others leave",
+          not page._components.item(balance_row, 2).flags() & editable)
+
+    # Typed over, as a double-click and Enter would.
+    page._components.item(hra_row, 2).setText("15000")
+    check("the typed figure is taken", monthly(hra_row) == 15000.0,
+          str(monthly(hra_row)))
+    check("and the row now says it was set by hand",
+          page._components.item(hra_row, 1).text() == "Manual",
+          page._components.item(hra_row, 1).text())
+    total = round(sum(monthly(r) for r in range(page._components.rowCount())), 2)
+    check("the balance moves so the parts still equal the CTC",
+          total == 50000.0, f"parts come to {total}")
+    check("and the monthly gross shown is still that sum",
+          abs(page._gross.value() - 50000.0) < 0.01, str(page._gross.value()))
+    check("Reset is offered once something has been set by hand",
+          page._reset_split.isEnabled())
+
+    # WHAT IS SENT. The split goes with the save only when it was changed —
+    # sending the template anyway would freeze today's policy into this
+    # person, so a later change to the arrangement would pass them by.
+    page._selected = {"employee_id": "E001"}
+    page._save.setEnabled(True)
+    page._save_salary()
+    body = posted_salaries[-1][1] if posted_salaries else {}
+    sent = {c["name"]: c for c in body.get("components") or []}
+    check("the save carries the split, with the typed figure as FIXED",
+          sent.get("House Rent Allowance", {}).get("rule") == "FIXED"
+          and sent["House Rent Allowance"].get("value") == 15000.0,
+          str(sent.get("House Rent Allowance")))
+    check("and nothing the server does not use", all(
+        set(c) == {"name", "rule", "value"} for c in body.get("components") or []),
+        str(body.get("components")))
+
+    # ── TOO MUCH, BY HAND ───────────────────────────────────────────────
+    # The balance cannot go below zero, so an overshoot is not an error the
+    # arithmetic raises: it is a gross bigger than the CTC. Held back here.
+    basic_row = names.index("Basic")
+    page._components.item(basic_row, 2).setText("40000")
+    check("figures that come to more than the CTC hold the save back",
+          not page._save.isEnabled())
+    check("and say by how much", "more than the CTC" in page._split_note.text(),
+          page._split_note.text())
+
+    # ── BACK TO THE CTC SPLIT ───────────────────────────────────────────
+    page._reset_template()
+    check("Reset puts every row back on its rule",
+          all(page._components.item(r, 1).text() != "Manual"
+              for r in range(page._components.rowCount())))
+    check("the save is allowed again", page._save.isEnabled())
+    posted_salaries.clear()
+    page._save_salary()
+    check("and a save with nothing set by hand sends no split of its own",
+          posted_salaries and "components" not in posted_salaries[-1][1],
+          str(posted_salaries[-1][1]) if posted_salaries else "nothing sent")
+
+    # ── IT COMES BACK AS IT WAS SAVED ───────────────────────────────────
+    #
+    # The page used to rebuild every person's split from the company template
+    # when they were opened: an override was saved, shown as gone the next
+    # time, and erased by the next save.
+    page._fill({"data": [{
+        "employee_id": "E777", "employee_name": "Override Person",
+        "gross_monthly": 50000, "overtime_hourly": 0,
+        "effective_from": "2026-03-01", "ctc_annual": 600000,
+        "epf_enabled": False, "esi_enabled": False, "pt_enabled": False,
+        "components": [
+            {"name": "Basic", "rule": "PERCENT_CTC", "value": 50, "monthly": 25000},
+            {"name": "DA", "rule": "PERCENT_BASIC", "value": 20, "monthly": 5000},
+            {"name": "House Rent Allowance", "rule": "FIXED", "value": 15000,
+             "monthly": 15000},
+            {"name": "Conveyance Allowance", "rule": "PERCENT_BASIC", "value": 15,
+             "monthly": 3750},
+            {"name": "Fixed Allowance", "rule": "BALANCE", "value": 0,
+             "monthly": 1250}]}], "template": None})
+    page._table.selectRow(0)
+    app.processEvents()
+    reopened = {page._components.item(r, 0).text(): r
+                for r in range(page._components.rowCount())}
+    hra = reopened.get("House Rent Allowance")
+    check("opening somebody shows the figure they had set by hand",
+          hra is not None and monthly(hra) == 15000.0,
+          str(monthly(hra)) if hra is not None else "no HRA row")
+    check("still marked as set by hand",
+          hra is not None and page._components.item(hra, 1).text() == "Manual")
+finally:
+    panel._PostWorker, panel._track_worker = real_post_worker, real_track
 
 # ── a page that is not in the menu ──────────────────────────────────────
 #

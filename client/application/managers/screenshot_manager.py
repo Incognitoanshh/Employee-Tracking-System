@@ -242,8 +242,178 @@ def _grab_every_screen():
     return pyautogui.screenshot()
 
 
+# ── CAN THE SCREEN BE READ AT ALL, RIGHT NOW ─────────────────────────────
+#
+# Reported from production, on one employee's machine:
+#
+#     ScreenshotManager: capture failed — screen grab failed
+#
+# with USER IDLE (61.4s) logged the moment before it. That sentence is not
+# ours and not Python's. It is the single error Pillow's Windows grabber
+# raises — PyImaging_GrabScreenWin32 — when the GDI copy of the screen
+# (CreateDC, BitBlt, GetDIBits) is refused. Windows refuses it when there is
+# no visible desktop to copy: the workstation is locked, the lock screen or a
+# security prompt owns the input desktop, or this is a Remote Desktop session
+# whose window is minimised or disconnected. The machine it was reported from
+# is a Windows Server used over Remote Desktop, where that is the every-day
+# case rather than the exception.
+#
+# NOTHING IS WRONG WITH THE APP WHEN THIS HAPPENS, and the old line said the
+# opposite: it was read as a broken build. Worse, the capture was lost. These
+# are single-shot timers, so the day simply ended short of the configured
+# count, with an error where the explanation should have been.
+#
+# So the state is asked for FIRST, in one cheap call, and a capture that
+# cannot be taken is POSTPONED rather than failed — the scheduler spreads
+# what is left of the budget over what is left of the shift, which is exactly
+# what it already does for a machine that was asleep.
+
+
+#: WTSActive — this session is attached to a screen.
+WINDOWS_SESSION_ACTIVE = 0
+
+
+def _win_input_desktop_name():
+    """The desktop receiving input, or None if we may not even ask.
+
+    A locked workstation, the lock screen, a UAC prompt and a password
+    protected screen saver all switch input to a desktop this process has no
+    right to open. OpenInputDesktop failing IS the signal — there is no
+    separate "is it locked" call that works from a normal session.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    DESKTOP_READOBJECTS = 0x0001
+    handle = user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS)
+    if not handle:
+        return None
+    try:
+        UOI_NAME = 2
+        name = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if not user32.GetUserObjectInformationW(
+                handle, UOI_NAME, name, ctypes.sizeof(name),
+                ctypes.byref(needed)):
+            return ""            # opened it, could not name it: good enough
+        return name.value
+    finally:
+        user32.CloseDesktop(handle)
+
+
+def _win_session_state():
+    """WTSActive (0) when this session has a screen; the WTS code otherwise.
+
+    A Remote Desktop session that has been disconnected keeps running with
+    nothing to draw on, and every copy of the screen taken from it fails.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    wtsapi = ctypes.windll.wtsapi32
+    WTS_CURRENT_SERVER_HANDLE = 0
+    WTS_CURRENT_SESSION = -1
+    WTS_CONNECT_STATE = 8
+    buffer = ctypes.POINTER(ctypes.c_int)()
+    returned = wintypes.DWORD()
+    if not wtsapi.WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_CONNECT_STATE,
+            ctypes.byref(buffer), ctypes.byref(returned)):
+        return WINDOWS_SESSION_ACTIVE          # cannot tell: assume it is fine
+    try:
+        return int(buffer.contents.value)
+    finally:
+        wtsapi.WTSFreeMemory(buffer)
+
+
+def _windows_desktop_ready():
+    """(can Windows copy the screen now, and if not, why not)."""
+    try:
+        if _win_session_state() != WINDOWS_SESSION_ACTIVE:
+            return False, ("this Remote Desktop session is not connected to a "
+                           "screen at the moment")
+        name = _win_input_desktop_name()
+        if name is None:
+            return False, ("the screen is locked, or Windows is showing a "
+                           "security prompt")
+        if name and name.lower() != "default":
+            return False, (f"the {name} desktop is in front — a lock screen "
+                           f"or a screen saver")
+    except Exception as error:
+        # NEVER BLOCK A CAPTURE BECAUSE THE CHECK ITSELF BROKE. A screenshot
+        # that might have worked is worth more than a tidy reason for not
+        # trying, and the capture reports its own failure well enough.
+        LoggerService.log_verbose(
+            f"ScreenshotManager: could not read the desktop state — {error}")
+        return True, ""
+    return True, ""
+
+
+def _desktop_ready():
+    """Whether the screen can be read at all. Windows only; elsewhere, yes.
+
+    macOS has its own answer already — see the permission note in
+    capture_screenshot — and on Linux there is nothing equivalent to ask.
+    """
+    if sys.platform != "win32":
+        return True, ""
+    return _windows_desktop_ready()
+
+
+def _capture_failure_hint(error, platform, permission_missing):
+    """(what to add to the log line, whether to take this capture later).
+
+    SAY WHAT IT MEANS, NOT WHAT IT RETURNED. The line used to read, in full:
+
+        capture failed — Command '['screencapture', '-x', '/var/…png']'
+        returned non-zero exit status 1
+
+    which is what an administrator sees when a whole day has no screenshots
+    in it. Nothing in it says "permission", so it was read as a broken build
+    and cost a day of looking in the wrong place.
+    """
+    text = str(error)
+    if platform == "win32" and "screen grab failed" in text:
+        return (
+            "  [Windows would not copy the screen. That is its answer while "
+            "the machine is locked, while a security prompt is up, or when a "
+            "Remote Desktop window is minimised or disconnected — the session "
+            "has nothing on screen to copy. Nothing is wrong with the app. If "
+            "this machine is worked on over Remote Desktop, set "
+            "RemoteDesktop_SuppressWhenMinimized to 2 under HKCU\\Software\\"
+            "Microsoft\\Terminal Server Client ON THE COMPUTER YOU CONNECT "
+            "FROM, so the session keeps drawing while the window is "
+            "minimised.]", True)
+    if platform == "darwin" and permission_missing:
+        # An exit status of 1 from screencapture is almost always TCC
+        # refusing. The tool does not distinguish, so neither can we with
+        # certainty, but we can say which it usually is.
+        return (
+            "  [macOS refused the capture: Screen Recording is not granted to "
+            "THIS build. The switch in System Settings may look ON and still "
+            "belong to a previous build — this app is not code-signed, so "
+            "macOS files the permission against the binary itself. Remove "
+            "Amaze Connect from System Settings › Privacy & Security › Screen "
+            "& System Audio Recording with the “−” button, reopen the app, "
+            "and allow it when asked.]", False)
+    return "", False
+
+
 class ScreenshotManager:
     STORAGE_PATH = os.path.join(STORAGE_DIR, "screenshots")
+
+    # WHAT THE LAST ATTEMPT DID. The panels read this to decide whether to
+    # ask the scheduler for the capture again: a screen that could not be
+    # read is a capture postponed, not a capture spent.
+    CAPTURED, POSTPONED, FAILED, SKIPPED = (
+        "captured", "postponed", "failed", "skipped")
+    last_outcome = SKIPPED
+
+    @classmethod
+    def should_try_again(cls) -> bool:
+        """True when the last capture did not happen for a passing reason."""
+        return cls.last_outcome == cls.POSTPONED
 
     # Asked at most once per run — see _ask_for_screen_access_once. A prompt
     # per failed capture would be one every few minutes, all day.
@@ -399,6 +569,7 @@ class ScreenshotManager:
         # defence-in-depth hai (agar kabhi koi aur code path capture trigger
         # kare to bhi super admin safe rahe).
         if getattr(SessionManager, "role", "") == "super_admin":
+            cls.last_outcome = cls.SKIPPED
             LoggerService.log_verbose(
                 "ScreenshotManager: super admin — screenshot skipped"
             )
@@ -443,8 +614,22 @@ class ScreenshotManager:
         allowed = cls.screenshots_per_day()
         taken = cls.captures_today()
         if taken >= allowed:
+            cls.last_outcome = cls.SKIPPED
             LoggerService.log(
                 f"SCREENSHOT SKIPPED : daily limit reached ({taken}/{allowed})"
+            )
+            return None
+
+        # NO SCREEN TO COPY — POSTPONED, NOT FAILED. See the note above
+        # _win_input_desktop_name. The budget is untouched, and the panel
+        # asks the scheduler to spread what is left over the rest of the
+        # shift, so a locked hour costs the day nothing.
+        ready, why = _desktop_ready()
+        if not ready:
+            cls.last_outcome = cls.POSTPONED
+            LoggerService.log(
+                f"SCREENSHOT POSTPONED : {why} — this capture will be taken "
+                f"later, and the day's count still stands at {taken}/{allowed}"
             )
             return None
 
@@ -525,36 +710,28 @@ class ScreenshotManager:
             connection.commit()
             connection.close()
         except Exception as error:
-            # SAY WHAT IT MEANS, NOT WHAT IT RETURNED.
-            #
-            # This line used to read, in full:
-            #
-            #   capture failed — Command '['screencapture', '-x', '/var/…png']'
-            #   returned non-zero exit status 1
-            #
-            # which is the message an administrator sees when a whole day has
-            # no screenshots in it. Nothing in it says "permission", so it was
-            # read as a broken build and cost a day of looking in the wrong
-            # place. On macOS an exit status of 1 from screencapture is almost
-            # always TCC refusing — the tool does not distinguish, so neither
-            # can we with certainty, but we can say which it usually is.
-            hint = ""
+            # What the failure MEANS, and whether it is worth trying again —
+            # see _capture_failure_hint.
+            hint, again = _capture_failure_hint(
+                error, sys.platform, permission_missing)
             if sys.platform == "darwin" and permission_missing:
-                hint = (
-                    "  [macOS refused the capture: Screen Recording is not "
-                    "granted to THIS build. The switch in System Settings may "
-                    "look ON and still belong to a previous build — this app "
-                    "is not code-signed, so macOS files the permission against "
-                    "the binary itself. Remove Amaze Connect from System "
-                    "Settings › Privacy & Security › Screen & System Audio "
-                    "Recording with the “−” button, reopen the app, and allow "
-                    "it when asked.]")
-                # And ASK, once per run. The system prompt is the only thing
-                # that can actually fix this from inside the app, and the
-                # person is at the machine right now — telling them in a log
-                # they cannot see is not much use on its own.
+                # ASK, once per run. The system prompt is the only thing that
+                # can actually fix this from inside the app, and the person is
+                # at the machine right now — telling them in a log they cannot
+                # see is not much use on its own.
                 cls._ask_for_screen_access_once()
-            LoggerService.log(f"ScreenshotManager: capture failed — {error}{hint}")
+            if again:
+                # Windows refusing the copy of a screen that is not there is
+                # not a failure of ours, and it must not cost the day a
+                # capture. Same treatment as a locked screen above.
+                cls.last_outcome = cls.POSTPONED
+                LoggerService.log(
+                    f"SCREENSHOT POSTPONED : {error} — this capture will be "
+                    f"taken later.{hint}")
+            else:
+                cls.last_outcome = cls.FAILED
+                LoggerService.log(
+                    f"ScreenshotManager: capture failed — {error}{hint}")
             return None
 
         # Server ko encrypted (.enc) bytes upload karo — plain PNG kabhi
@@ -589,6 +766,7 @@ class ScreenshotManager:
                 f"ScreenshotManager: upload error, will retry — {error}"
             )
 
+        cls.last_outcome = cls.CAPTURED
         return {
             "id": screenshot_id,
             "path": enc_filepath,

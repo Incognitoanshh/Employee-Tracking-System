@@ -473,6 +473,18 @@ class SchedulerService(QObject):
     #  person would notice.
     REPLAN_DEBOUNCE_MS = 2000
 
+    def capture_postponed(self):
+        """A capture that could not be taken must not cost the day its count.
+
+        Called when the screen could not be read at all — the machine was
+        locked, a security prompt was up, or a Remote Desktop session had
+        nothing on it to copy. Nothing was spent: the budget is counted from
+        the rows in the database, and no row was written. So the plan is made
+        again over whatever is left of the shift, which is the same treatment
+        a machine that slept through a capture already gets.
+        """
+        self._replan_after_skip()
+
     def _replan_after_skip(self):
         """Spread whatever budget is left over whatever shift is left."""
         pending = getattr(self, "_replan_timer", None)

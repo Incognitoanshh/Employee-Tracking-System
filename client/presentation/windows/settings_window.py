@@ -48,7 +48,7 @@ from client.infrastructure.database.database import Database
 from client.services.settings_service import SettingsService
 
 from client.presentation.widgets import icons as _icons
-from client.presentation.theme import C, R_SM, Type
+from client.presentation.theme import C, R_SM, Type, scrollbar
 from client.core.time_ist import IST  # single source of truth
 
 
@@ -304,11 +304,10 @@ class SettingsWindow(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea{background:transparent;}"
-            f"QScrollBar:vertical{{background:{C.BG};width:6px;border-radius:12px;}}"
-            f"QScrollBar::handle:vertical{{background:{C.BORDER_SOFT};border-radius:12px;}}"
-        )
+        # The shared scrollbar, both directions. This window kept its own:
+        # a six-pixel bar in a border colour, and no horizontal rule at all,
+        # so on a Mac that bar was the system's overlay and faded away.
+        scroll.setStyleSheet("QScrollArea{background:transparent;}" + scrollbar())
         content = QWidget()
         content.setStyleSheet("background:transparent;")
         layout = QVBoxLayout(content)

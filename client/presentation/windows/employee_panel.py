@@ -1697,6 +1697,13 @@ class EmployeePanel(QWidget):
         result = ScreenshotManager.capture_screenshot()
         if result:
             self.pages["dashboard"].c_shots.push_point(1)
+        elif ScreenshotManager.should_try_again():
+            # The screen could not be read — locked, or a remote session with
+            # nothing on it. The day's count was not spent, so ask for this
+            # one again instead of losing it.
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None:
+                scheduler.capture_postponed()
         self._refresh_current()
 
     def _on_idle(self, status: str):

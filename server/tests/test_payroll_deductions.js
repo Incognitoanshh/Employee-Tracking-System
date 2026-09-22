@@ -204,6 +204,16 @@ async function main() {
         Number(asha?.other_deductions) === 1800, `other=${asha?.other_deductions}`);
     check("and the lateness is recomputed, not doubled",
         Number(asha?.late_minutes) === 90, `late_minutes=${asha?.late_minutes}`);
+    // AND THE OVERTIME THAT WAS ENTERED. This used to be reset to nothing on
+    // every rebuild, on the grounds that overtime is entered by hand after
+    // generation — which it still is. What changed is that a draft is now
+    // rebuilt on its own whenever somebody's salary is saved, so a rebuild
+    // that threw overtime away would erase every approved hour in the month
+    // the moment anybody's pay was corrected, with nothing logged. Entered
+    // overtime is kept exactly as entered deductions and adjustments are.
+    check("and the overtime entered by hand survives the rebuild",
+        Number(asha?.overtime_hours) === 10 && Number(asha?.overtime_amount) === 2000,
+        `hours=${asha?.overtime_hours} amount=${asha?.overtime_amount}`);
 
     // ── removing one ────────────────────────────────────────────────────
     const list = await api("GET", "/admin/payroll/2026-06", { token });
@@ -213,10 +223,12 @@ async function main() {
     check("it can be removed while the month is a draft", res.status === 200,
         JSON.stringify(res.body));
     asha = await lineFor("E001");
-    check("and the net goes back up",
+    // Gross, plus the ten hours of overtime that the rebuild above kept.
+    check("and the net goes back up by exactly the deduction removed",
         Number(asha?.other_deductions) === 0
-        && Number(asha?.net_before_adjustments) === 26000,
-        `other=${asha?.other_deductions} net=${asha?.net_before_adjustments}`);
+        && Number(asha?.net_before_adjustments) === 26000 + 2000,
+        `other=${asha?.other_deductions} net=${asha?.net_before_adjustments}`
+        + ", expected 28000");
 
     // ── reports ─────────────────────────────────────────────────────────
     res = await api("GET", "/admin/payroll/2026-06/report?group=employee", { token });
@@ -330,10 +342,11 @@ async function main() {
     check("and their latest FINALISED payslip, not a draft",
         res.body.latest_payroll?.month === "2026-06",
         JSON.stringify(res.body.latest_payroll));
-    // The 200 fine added above comes off the net the employee is shown.
+    // The 200 fine added above comes off the net the employee is shown — the
+    // net that also carries the ten overtime hours kept through the rebuild.
     check("the payslip's net includes the adjustments made to it",
-        Number(res.body.latest_payroll?.net_pay) === 26000 - 200,
-        JSON.stringify(res.body.latest_payroll?.net_pay));
+        Number(res.body.latest_payroll?.net_pay) === 26000 + 2000 - 200,
+        `${JSON.stringify(res.body.latest_payroll?.net_pay)}, expected 27800`);
 
     // THE ROUTE TAKES NO EMPLOYEE ID, so there is nothing to change to a
     // colleague's. Asked as Bilal, it answers about Bilal.

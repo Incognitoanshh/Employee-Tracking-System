@@ -70,7 +70,8 @@ panel._track_worker = lambda *a, **k: None
 PEOPLE = [
     {"employee_id": "26AMZEM001", "username": "asha", "full_name": "Asha Verma",
      "role": "employee", "designation": "QA Engineer",
-     "email": "asha@amazeinternet.com", "department": "Engineering",
+     "email": "asha@amazeinternet.com", "personal_email": "asha.v@gmail.com",
+     "department": "Engineering",
      "status": "online", "last_seen": None, "suspended": False},
     {"employee_id": "26AMZEM002", "username": "bilal", "full_name": "Bilal Khan",
      "role": "admin", "designation": "Designer", "email": None,
@@ -86,6 +87,12 @@ PEOPLE = [
 PAYLOAD = {"data": PEOPLE, "total": 3,
            "departments": ["Design", "Engineering"],
            "role_counts": {}, "role_limits": {}}
+
+
+def _row_text(page, key):
+    """A missing row reports as a failure, not a KeyError that ends the run."""
+    row = page._profile_rows.get(key)
+    return row.text() if row is not None else f"<no {key} row>"
 
 
 def build_tab():
@@ -107,8 +114,9 @@ try:
 
     columns = [tab._table.horizontalHeaderItem(i).text()
                for i in range(tab._table.columnCount())]
-    check("the columns are the person, their email, department, role and state",
-          columns == ["Employee", "Work email", "Department", "Role",
+    # The list says which address it shows — a person now has two.
+    check("the columns are the person, their official email, department, role and state",
+          columns == ["Employee", "Official email", "Department", "Role",
                       "Status", "Actions"], str(columns))
 
     asked.clear()
@@ -286,8 +294,19 @@ try:
     try:
         tab._export_employees_csv()
         headers, rows = exported[0]
-        check("the CSV carries the work email and department it shows",
-              "Work email" in headers and "Department" in headers, str(headers))
+        check("the CSV carries both emails and the department",
+              "Official email" in headers and "Personal email" in headers
+              and "Department" in headers, str(headers))
+        # A header without its value slides every later column one to the
+        # left — the department would sit under "Personal email".
+        check("and each row is as long as the header",
+              all(len(r) == len(headers) for r in rows),
+              str([len(r) for r in rows]) + " vs " + str(len(headers)))
+        check("with each address under its own heading",
+              rows[0][headers.index("Official email")] == "asha@amazeinternet.com"
+              and rows[0][headers.index("Personal email")] == "asha.v@gmail.com"
+              and rows[0][headers.index("Department")] == "Engineering",
+              str(rows[0]))
         check("and a suspended account exports as suspended",
               rows[1][headers.index("Status")] == "Suspended",
               str(rows[1]))
@@ -321,11 +340,18 @@ try:
           f"{page._profile_rows['department'].text()} / "
           f"{page._profile_rows['email'].text()}")
 
+    check("and the personal email beside the official one",
+          _row_text(page, "personal_email") == "asha.v@gmail.com",
+          _row_text(page, "personal_email"))
+
     # SOMEBODY WITH NO LOGIN IS NOT "None". The payroll-only record has a
     # NULL username, and str(None) on a screen is a bug people report.
     page.load(PEOPLE[2])
     check("a person with no login says so, rather than showing None",
           "None" not in page._sub.text(), page._sub.text())
+    check("and no personal email on record is a dash, not a made-up value",
+          _row_text(page, "personal_email") == "—",
+          _row_text(page, "personal_email"))
 
     # A NEW PERSON STARTS AT ZERO. These count up on the one-second timer,
     # and carrying them over shows the last employee's minutes under this

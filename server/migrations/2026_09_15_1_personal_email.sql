@@ -1,0 +1,17 @@
+-- Two email addresses: the one the company gave, and the person's own.
+--
+-- The owner's words: "employee profile me 2 email hoga — ek official email,
+-- aur ek personal email." They are different facts with different lives. The
+-- official address is the company's — it is what reports, notifications and
+-- the audit log go to, and it stops working the day somebody leaves. The
+-- personal one is how to reach them anyway: for a relieving letter, a final
+-- payslip, or a form-16 in June for a job they left in March.
+--
+-- `email` keeps its meaning and becomes, in every label, the OFFICIAL address.
+-- Renaming the column would have been tidier and would have touched every
+-- query that reads it — verification, alert mail, the employee list — for no
+-- gain in what is stored; the product's own vocabulary changes instead.
+--
+-- Nullable and unconstrained beyond its length: plenty of people will not
+-- hand one over, and "not given" must stay distinguishable from "blank".
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);

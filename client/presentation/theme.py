@@ -467,14 +467,29 @@ def scrollbar(bg: str | None = None) -> str:
     # NOT `bg: str = C.BG`. A default argument is evaluated once, when the
     # module is imported — so it would hold the dark background for the life
     # of the process and every scrollbar would stay dark in the light theme.
+    #
+    # A HANDLE THAT CAN BE SEEN. It was drawn in C.BORDER, a six-percent wash,
+    # and a border is designed not to be noticed. Every bar in both panels,
+    # drawn and measured, stood 1.00 to 1.24 to 1 against its own track — a
+    # page that scrolled gave no sign that it did, which is how it came back:
+    # "scrollable screen me scrollbar ya visual indicator hona chahiye".
+    #
+    # TEXT_DIM clears 3:1, the WCAG floor for the part of a control a person
+    # has to see to use it, over every surface either panel paints: 3.36:1 on
+    # the darkest, 5.13:1 in the light theme. Six pixels of handle rather than
+    # four. The admin console and the tray's windows take this same rule
+    # instead of keeping their own, which is how one of them drifted to a
+    # hairline. tests/test_scrollbars.py draws every bar in the product.
     bg = bg or C.BG
     return f"""
-        QScrollBar:vertical {{ background:{bg}; width:8px; border-radius:4px; margin:2px; }}
-        QScrollBar::handle:vertical {{ background:{C.BORDER}; border-radius:4px; min-height:30px; }}
-        QScrollBar::handle:vertical:hover {{ background:{C.TEXT_DIM}; }}
+        QScrollBar:vertical {{ background:{bg}; width:10px; border-radius:{Radius.PILL}px; margin:2px; }}
+        QScrollBar::handle:vertical {{ background:{C.TEXT_DIM}; border-radius:{Radius.PILL}px; min-height:36px; }}
+        QScrollBar::handle:vertical:hover {{ background:{C.TEXT_MUTED}; }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-        QScrollBar:horizontal {{ background:{bg}; height:8px; border-radius:4px; margin:2px; }}
-        QScrollBar::handle:horizontal {{ background:{C.BORDER}; border-radius:4px; min-width:30px; }}
+        QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
+        QScrollBar:horizontal {{ background:{bg}; height:10px; border-radius:{Radius.PILL}px; margin:2px; }}
+        QScrollBar::handle:horizontal {{ background:{C.TEXT_DIM}; border-radius:{Radius.PILL}px; min-width:36px; }}
+        QScrollBar::handle:horizontal:hover {{ background:{C.TEXT_MUTED}; }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
     """
 

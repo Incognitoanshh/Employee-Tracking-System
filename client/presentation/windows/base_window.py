@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QWidget
 from client.themes.theme_manager import ThemeManager
+from client.presentation.theme import scrollbar
 
 
 class BaseWindow(QWidget):
@@ -9,6 +10,9 @@ class BaseWindow(QWidget):
         self.setup_window()
 
     def setup_window(self):
+        # The shared scrollbar rather than a copy of one: this window's own
+        # was six pixels in a fixed grey, vertical only, and did not follow
+        # the theme. See theme.scrollbar().
         self.setStyleSheet(f"""
             QWidget {{
                 background-color: {ThemeManager.background()};
@@ -16,16 +20,4 @@ class BaseWindow(QWidget):
                 font-family: 'Segoe UI', Arial, sans-serif;
                 font-size: 13px;
             }}
-            QScrollBar:vertical {{
-                background: {ThemeManager.background()};
-                width: 6px;
-                border-radius:12px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: #334155;
-                border-radius:12px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-        """)
+        """ + scrollbar(ThemeManager.background()))

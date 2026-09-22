@@ -1,12 +1,17 @@
 /**
  * A person's own account page, and the line around what they may change.
  *
- * THE RULE THIS EXISTS TO HOLD. An employee owns two things about themselves:
- * their phone number and their photo. Everything else on that page — role,
- * employee id, department, manager, joining date, employment status, hours,
- * attendance — is the company's record of them, and a monitoring product
- * where the monitored can edit their own department or their own hours is not
- * a monitoring product.
+ * THE RULE THIS EXISTS TO HOLD. An employee owns ONE thing about themselves:
+ * their photo. Everything else on that page — their name, their official and
+ * personal email, their phone, role, employee id, department, manager,
+ * joining date, employment status, hours, attendance — is the company's
+ * record of them, and a monitoring product where the monitored can edit their
+ * own department or their own hours is not a monitoring product.
+ *
+ * It was the phone and the email as well until the owner's rule: "employee
+ * khud se koi bhi value change nahi kar sakta apne profile ka." Those now
+ * change through the administrator's endpoint, which also had to learn to
+ * un-verify an address it changes — the tick belonged to the old one.
  *
  * None of these routes take an employee id. That is deliberate and worth a
  * check of its own: there is no parameter to tamper with, so the only way to
@@ -137,65 +142,84 @@ async function main() {
         check("anonymous cannot read it",
             (await api("GET", "/profile/me")).status === 401);
 
-        console.log("\nThe two things I own");
+        // ── WHAT I MAY CHANGE ABOUT MYSELF: MY PHOTO, AND NOTHING ELSE ──
+        //
+        // It used to be the phone and the email too. The owner's rule since:
+        // "employee khud se koi bhi value change nahi kar sakta apne profile
+        // ka" — the photo is the one exception, agreed after. The route is
+        // kept and REFUSES, with a reason that says who to ask, so an older
+        // client's Save gets an answer rather than a 404.
+        console.log("\nMy details are the company's record, not mine to edit");
+        psql(DB, `UPDATE employees SET phone='+91 90000 00000', email='kept@amaze.co'
+                   WHERE employee_id='E001'`);
         res = await api("PATCH", "/profile/me", { token: employee, body: { phone: "+91 98765 43210" } });
-        check("my phone number saves", res.status === 200, JSON.stringify(res.body).slice(0, 120));
-        check("and is there when the page is read again",
-            (await api("GET", "/profile/me", { token: employee })).body.profile.phone
-                === "+91 98765 43210");
-        res = await api("PATCH", "/profile/me", { token: employee, body: { phone: "" } });
-        check("clearing it is allowed — people change numbers", res.status === 200);
-        check("and it is actually cleared",
-            psql(DB, `SELECT COALESCE(phone,'(null)') FROM employees WHERE employee_id='E001'`)
-                === "(null)");
-        res = await api("PATCH", "/profile/me", { token: employee, body: { phone: "not a phone" } });
-        check("nonsense is refused with a reason", res.status === 400,
-            JSON.stringify(res.body).slice(0, 120));
-        res = await api("PATCH", "/profile/me", { token: employee, body: { phone: "9".repeat(60) } });
-        check("and so is something absurdly long", res.status === 400, `HTTP ${res.status}`);
-
-        console.log("\nMy email address");
+        check("I cannot change my own phone number", res.status === 403,
+            `HTTP ${res.status} ${JSON.stringify(res.body).slice(0, 100)}`);
+        check("and I am told who can", /administrator/i.test(res.body.message || ""),
+            res.body.message);
+        res = await api("PATCH", "/profile/me", { token: employee, body: { email: "mine@gmail.com" } });
+        check("nor my own email", res.status === 403, `HTTP ${res.status}`);
         res = await api("PATCH", "/profile/me",
-            { token: employee, body: { email: "rajesh@amaze.co" } });
-        check("my email saves", res.status === 200,
-            JSON.stringify(res.body).slice(0, 120));
-        check("and it comes back on the profile",
-            (await api("GET", "/profile/me", { token: employee })).body.profile.email
-                === "rajesh@amaze.co");
+            { token: employee, body: { full_name: "Somebody Else", phone: "" } });
+        check("nor my name, nor clear a field", res.status === 403, `HTTP ${res.status}`);
+        check("and none of those attempts changed anything",
+            psql(DB, `SELECT phone || '|' || email || '|' || full_name
+                        FROM employees WHERE employee_id='E001'`)
+                === "+91 90000 00000|kept@amaze.co|Rajesh Kumar",
+            psql(DB, `SELECT phone || '|' || email || '|' || full_name
+                        FROM employees WHERE employee_id='E001'`));
 
-        // THE TYPO EVERYBODY MAKES, and the one a shape check is for. Nothing
-        // here claims the address WORKS — only sending to it can — so what is
-        // refused is what cannot possibly be an address.
+        // ── TWO ADDRESSES, SET BY AN ADMINISTRATOR ──────────────────────
+        //
+        // "Employee profile me 2 email hoga — ek official email, aur ek
+        // personal email." The official one is the company's and stops working
+        // when somebody leaves; the personal one is how to reach them anyway.
+        console.log("\nAn official address and a personal one");
+        res = await api("POST", "/admin/employees/E001/profile", { token: owner,
+            body: { email: "rajesh@amaze.co", personal_email: "rajesh.k@gmail.com" } });
+        check("an administrator sets both addresses", res.status === 200,
+            JSON.stringify(res.body).slice(0, 140));
+        let mine = (await api("GET", "/profile/me", { token: employee })).body.profile;
+        check("I see my official address", mine.email === "rajesh@amaze.co", mine.email);
+        check("and my personal one, beside it", mine.personal_email === "rajesh.k@gmail.com",
+            String(mine.personal_email));
+
+        res = await api("POST", "/admin/employees/E001/profile", { token: owner,
+            body: { personal_email: "rajesh.k@gmail" } });
+        check("a personal address that cannot be one is refused", res.status === 400,
+            `HTTP ${res.status}`);
+        // SETTING ONE MUST NOT WIPE THE OTHER — each field has its own
+        // "was it sent" flag for exactly this.
+        res = await api("POST", "/admin/employees/E001/profile", { token: owner,
+            body: { personal_email: "rajesh.home@gmail.com" } });
+        mine = (await api("GET", "/profile/me", { token: employee })).body.profile;
+        check("changing the personal address alone leaves the official one",
+            res.status === 200 && mine.email === "rajesh@amaze.co"
+            && mine.personal_email === "rajesh.home@gmail.com",
+            `${mine.email} / ${mine.personal_email}`);
+
+        // THE SHAPE CHECK ON THE OFFICIAL ADDRESS, now on the administrator's
+        // side of the fence: the typo everybody makes is still refused.
         for (const bad of ["ansh@gmail", "no-at-sign.com", "two@@at.com", "@nothing.com"]) {
-            res = await api("PATCH", "/profile/me", { token: employee, body: { email: bad } });
-            check(`"${bad}" is refused`, res.status === 400, `HTTP ${res.status}`);
+            res = await api("POST", "/admin/employees/E001/profile",
+                { token: owner, body: { email: bad } });
+            check(`"${bad}" is refused as an official address`, res.status === 400,
+                `HTTP ${res.status}`);
         }
         check("and the refusals changed nothing",
             psql(DB, `SELECT email FROM employees WHERE employee_id='E001'`)
                 === "rajesh@amaze.co");
 
-        // SAVING ONE MUST NOT WIPE THE OTHER. The page sends both together,
-        // but anything else calling this endpoint may send one — and a
-        // COALESCE-free UPDATE would have written NULL over the field that
-        // was not mentioned.
-        res = await api("PATCH", "/profile/me",
-            { token: employee, body: { phone: "+91 99999 11111" } });
-        check("saving only the phone leaves the email alone",
-            res.status === 200
-            && psql(DB, `SELECT email FROM employees WHERE employee_id='E001'`)
-                === "rajesh@amaze.co");
-        res = await api("PATCH", "/profile/me", { token: employee, body: { email: "" } });
-        check("an empty address clears it, which people do want",
-            res.status === 200
-            && psql(DB, `SELECT COALESCE(email,'(null)') FROM employees WHERE employee_id='E001'`)
-                === "(null)");
-        check("and the phone survived that too",
-            psql(DB, `SELECT phone FROM employees WHERE employee_id='E001'`)
-                === "+91 99999 11111");
+        // ── MY PHOTO STAYS MINE ─────────────────────────────────────────
+        // The one agreed exception. Removing it is a photo change like any
+        // other, and has to go on working for the person themselves.
+        res = await api("DELETE", "/profile/me/photo", { token: employee });
+        check("I can still remove my own photo", res.status === 200 || res.status === 204,
+            `HTTP ${res.status}`);
 
+        // VERIFYING an address is not changing it: the person proves the one
+        // the administrator entered reaches them, and it stays with them.
         console.log("\nProving the email address");
-        await api("PATCH", "/profile/me",
-            { token: employee, body: { email: "rajesh@amaze.co" } });
 
         res = await api("POST", "/profile/me/email/code", { token: employee });
         check("a code can be asked for", res.status === 200, `HTTP ${res.status}`);
@@ -264,10 +288,26 @@ async function main() {
             psql(DB, `SELECT COUNT(*) FROM email_verifications WHERE employee_id='E001'`)
                 === "0");
 
+        // ── AN ADDRESS CHANGED BY AN ADMINISTRATOR IS UNPROVED ──────────
+        //
+        // The administrator's endpoint is now the only way an official
+        // address changes, and it never touched the verification: the tick
+        // earned by the old address was carried onto the new one. Re-saving
+        // the SAME address must not throw a verification away, though.
+        res = await api("POST", "/admin/employees/E001/profile",
+            { token: owner, body: { email: "rajesh@amaze.co" } });
+        check("re-saving the same address keeps it verified",
+            (await api("GET", "/profile/me", { token: employee }))
+                .body.profile.email_verified === true);
+        res = await api("POST", "/admin/employees/E001/profile",
+            { token: owner, body: { email: "rajesh2@amaze.co" } });
+        check("an administrator changing the address takes the tick away",
+            res.status === 200
+            && (await api("GET", "/profile/me", { token: employee }))
+                .body.profile.email_verified === false);
+
         // GUESSING IS BOUNDED. Six digits is a million possibilities against a
         // person and nothing at all against a loop.
-        await api("PATCH", "/profile/me",
-            { token: employee, body: { email: "rajesh2@amaze.co" } });
         posted.length = 0;
         psql(DB, `DELETE FROM email_verifications`);
         await api("POST", "/profile/me/email/code", { token: employee });
@@ -285,53 +325,39 @@ async function main() {
         check("and the real code no longer works either — ask for a new one",
             res.status === 429, `HTTP ${res.status}`);
 
-        // CHANGING THE ADDRESS UN-PROVES IT. Carrying the tick across would
-        // make the tick mean nothing, and something is eventually sent on the
-        // strength of it.
-        psql(DB, `DELETE FROM email_verifications`);
-        psql(DB, `UPDATE employees SET email='rajesh@amaze.co',
-                  email_verified_at = NOW() WHERE employee_id='E001'`);
-        await api("PATCH", "/profile/me",
-            { token: employee, body: { email: "somewhere-else@amaze.co" } });
-        check("a new address is not verified",
-            (await api("GET", "/profile/me", { token: employee }))
-                .body.profile.email_verified === false);
-
-        // ...but saving the SAME address again is not a change, and must not
-        // throw away a verification somebody has already done. The page sends
-        // phone and email together, so this happens on every phone edit.
-        psql(DB, `UPDATE employees SET email_verified_at = NOW() WHERE employee_id='E001'`);
-        await api("PATCH", "/profile/me", {
-            token: employee,
-            body: { email: "somewhere-else@amaze.co", phone: "+91 98888 77777" },
-        });
-        check("saving the same address keeps it verified",
-            (await api("GET", "/profile/me", { token: employee }))
-                .body.profile.email_verified === true,
-            "editing a phone number would otherwise un-verify the email every time");
-
         res = await api("POST", "/profile/me/email/verify",
             { token: employee, body: { code: "12345" } });
         check("a code of the wrong shape never reaches the database",
             res.status === 400, `HTTP ${res.status}`);
 
         console.log("\nWhat an employee must NOT be able to change about themselves");
-        // Sent through their own endpoint, which only reads `phone` — the
-        // rest must be ignored rather than quietly applied.
-        await api("PATCH", "/profile/me", {
+        // EVERYTHING, now. Their own endpoint used to write the phone and the
+        // email and ignore the rest; it writes nothing at all, so the check is
+        // no longer "did it ignore the extra fields" but "did it change
+        // anything whatsoever".
+        psql(DB, `UPDATE employees SET phone='+91 90000 00000', email='rajesh@amaze.co',
+                         personal_email='rajesh.k@gmail.com'
+                   WHERE employee_id='E001'`);
+        const untouched = () => psql(DB,
+            `SELECT role||'|'||designation||'|'||COALESCE(department,'-')||'|'||employee_id
+                    ||'|'||COALESCE(phone,'-')||'|'||COALESCE(email,'-')
+                    ||'|'||COALESCE(personal_email,'-')
+               FROM employees WHERE employee_id='E001'`);
+        const was2 = untouched();
+        res = await api("PATCH", "/profile/me", {
             token: employee,
             body: {
-                phone: "+91 90000 00000",
+                phone: "+91 11111 11111", email: "mine@gmail.com",
+                personal_email: "other@gmail.com", full_name: "Somebody Else",
                 role: "super_admin", department: "Board", designation: "CEO",
                 employee_id: "SA01", employment_status: "terminated",
                 reporting_manager: null, joining_date: "2000-01-01",
             },
         });
-        const after = psql(DB,
-            `SELECT role||'|'||designation||'|'||COALESCE(department,'-')||'|'||employee_id
-               FROM employees WHERE employee_id='E001'`);
-        check("role, designation, department and id are all untouched",
-            after === "employee|Developer|-|E001", after);
+        check("their own endpoint refuses the whole request", res.status === 403,
+            `HTTP ${res.status}`);
+        check("and not one field moved — not even the two they used to own",
+            untouched() === was2, `${was2}  ->  ${untouched()}`);
 
         // And through the administrator's endpoint, which is the one that CAN
         // write them — an employee's token must not reach it at all.

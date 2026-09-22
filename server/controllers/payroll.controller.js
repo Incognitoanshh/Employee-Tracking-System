@@ -65,13 +65,19 @@ exports.listSalaries = async (req, res) => {
                     e.department,
                     s.gross_monthly, s.overtime_hourly, s.ctc_annual,
                     s.epf_enabled, s.esi_enabled, s.pt_enabled,
-                    s.effective_from::text, s.remarks
+                    s.effective_from::text, s.remarks,
+                    -- Which salary version is in force, so its own split can
+                    -- be looked up below. Selected inside the LATERAL and not
+                    -- carried out of it, every row came back with no id and
+                    -- every person with an empty split.
+                    s.salary_id
                FROM employees e
                LEFT JOIN LATERAL (
                    -- The salary in force TODAY: the most recent one that has
                    -- already taken effect. A rise dated next month is stored
                    -- and does not show here until it applies.
-                   SELECT gross_monthly, overtime_hourly, effective_from, remarks,
+                   SELECT id AS salary_id, gross_monthly, overtime_hourly,
+                          effective_from, remarks,
                           ctc_annual, epf_enabled, esi_enabled, pt_enabled
                      FROM employee_salaries
                     WHERE employee_id = e.employee_id
@@ -80,6 +86,34 @@ exports.listSalaries = async (req, res) => {
                ) s ON TRUE
               WHERE e.role <> 'super_admin'
               ORDER BY e.employee_id`);
+
+        // EACH PERSON'S OWN SPLIT, AS SAVED — rules as well as amounts.
+        //
+        // A component can now be set by hand ("dono option rakho — auto bhi,
+        // aur zaroorat pade to haath se"), which makes the company template
+        // only the STARTING point. The page used to rebuild every person's
+        // split from that template whenever they were opened, so an override
+        // would have been saved, shown as gone the next time, and then erased
+        // by the next save — which would send the template again. The saved
+        // components are the truth about a salary; they come down with it.
+        const salaryIds = rows.rows.map((r) => r.salary_id).filter(Boolean);
+        const splitBy = new Map();
+        if (salaryIds.length) {
+            for (const part of (await pool.query(
+                `SELECT salary_id, name, rule, value, monthly
+                   FROM salary_components
+                  WHERE salary_id = ANY($1)
+                  ORDER BY salary_id, position, id`, [salaryIds])).rows) {
+                if (!splitBy.has(part.salary_id)) splitBy.set(part.salary_id, []);
+                splitBy.get(part.salary_id).push({
+                    name: part.name, rule: part.rule,
+                    value: Number(part.value), monthly: Number(part.monthly),
+                });
+            }
+        }
+        for (const row of rows.rows) {
+            row.components = splitBy.get(row.salary_id) || [];
+        }
 
         // THE COMPANY'S SPLIT, SENT WITH THE LIST.
         //
@@ -147,6 +181,22 @@ exports.setSalary = async (req, res) => {
         }
         split = splitCTC(annual / 12, template);
         derivedGross = money(split.reduce((sum, row) => sum + row.monthly, 0));
+
+        // A SPLIT THAT COMES TO MORE THAN THE CTC IS REFUSED, not saved.
+        //
+        // Components can now be set by hand, and the balance row cannot go
+        // below zero — so figures that overshoot do not fail on their own,
+        // they make the monthly gross bigger than the CTC it was meant to
+        // divide: a salary stored as six lakh a year that pays 55,500 a month.
+        // The panel stops this before sending it; this is the same rule for
+        // anything that reaches the API another way. A paisa of rounding is
+        // allowed for, and nothing more.
+        const monthlyCtc = money(annual / 12);
+        if (derivedGross - monthlyCtc > 0.01) {
+            return fail(res, 400,
+                `The components come to ${derivedGross} a month, which is more than `
+                + `the CTC allows (${monthlyCtc}). Lower one of them, or raise the CTC.`);
+        }
     }
 
     const gross = derivedGross !== null ? derivedGross : Number(gross_monthly);
@@ -171,16 +221,45 @@ exports.setSalary = async (req, res) => {
     const note = remarks === undefined || remarks === null
         ? null : String(remarks).trim().slice(0, 2000) || null;
 
+    // THE CONNECTION IS TAKEN OUTSIDE THE try, AND RELEASED IN ONE PLACE.
+    //
+    // It used to be `const client` declared INSIDE the try, with the catch
+    // doing `client.query("ROLLBACK")` and `client.release()`. A const is
+    // scoped to its block, so in the catch `client` did not exist: any error
+    // part-way through a save threw ReferenceError out of the error handler,
+    // and the connection was never rolled back and never released.
+    //
+    // Measured, not inferred: a save made to fail inside the transaction left
+    // the pool at 3 connections with 2 idle — one checked out for good, holding
+    // an aborted transaction — and pool.end() then waited on it for ever. The
+    // pool is ten connections, so ten failed salary saves would have been the
+    // whole server hanging on every request that needs the database.
+    //
+    // Now: one connect before the try, and exactly one release, in finally,
+    // whichever way out the request takes.
+    const client = await pool.connect();
+    // WRITTEN ONLY ONCE THE SAVE HAS COMMITTED. writeAudit goes through the
+    // pool, outside this transaction, so an entry written in the middle of it
+    // survived a rollback: the log said a salary was set and the drafts were
+    // refreshed when nothing had been saved at all. An audit trail that can
+    // describe things that did not happen is worse than none.
+    const audits = [];
     try {
-        const target = await pool.query(
+        await client.query("BEGIN");
+
+        const target = await client.query(
             `SELECT role, COALESCE(full_name, username) AS name FROM employees
               WHERE employee_id = $1`, [employee_id]);
-        if (target.rowCount === 0) return fail(res, 404, "No such employee.");
+        if (target.rowCount === 0) {
+            await client.query("ROLLBACK");
+            return fail(res, 404, "No such employee.");
+        }
         if (target.rows[0].role === "super_admin") {
+            await client.query("ROLLBACK");
             return fail(res, 400, "The super admin is the owner, not an employee on payroll.");
         }
 
-        const row = (await pool.query(
+        const row = (await client.query(
             `INSERT INTO employee_salaries
                  (employee_id, gross_monthly, overtime_hourly, effective_from,
                   created_by, remarks, ctc_annual,
@@ -214,10 +293,10 @@ exports.setSalary = async (req, res) => {
         // wholesale rather than merged: a split is one arrangement, and half
         // of an old one beside half of a new one is not an arrangement at all.
         if (split) {
-            await pool.query(`DELETE FROM salary_components WHERE salary_id = $1`,
+            await client.query(`DELETE FROM salary_components WHERE salary_id = $1`,
                              [row.id]);
             for (const [index, part] of split.entries()) {
-                await pool.query(
+                await client.query(
                     `INSERT INTO salary_components
                          (salary_id, position, name, rule, value, monthly)
                      VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -232,7 +311,7 @@ exports.setSalary = async (req, res) => {
         // split. Rebuild every *affected* draft now; finalised payroll is
         // intentionally excluded because it is a statement of what was paid.
         // generateDraft preserves manually entered adjustments and deductions.
-        const drafts = (await pool.query(
+        const drafts = (await client.query(
             `SELECT TO_CHAR(month, 'YYYY-MM') AS month
                FROM payroll_runs
               WHERE status = 'DRAFT'
@@ -240,18 +319,29 @@ exports.setSalary = async (req, res) => {
                     >= $1::date
               ORDER BY month`, [row.effective_from])).rows;
         for (const draft of drafts) {
-            await generateDraft(`${draft.month}-01`, me(req));
-            await writeAudit(me(req),
-                `PAYROLL DRAFT REFRESHED : ${draft.month} after salary update for ${employee_id}`);
+            await generateDraft(`${draft.month}-01`, me(req), client);
+            audits.push([me(req),
+                `PAYROLL DRAFT REFRESHED : ${draft.month} after salary update for ${employee_id}`]);
         }
 
-        await writeAudit(employee_id,
+        audits.push([employee_id,
             `SALARY SET : ${gross} per month from ${row.effective_from} by ${me(req)}`
-            + (note ? ` — ${note}` : ""));
+            + (note ? ` — ${note}` : "")]);
+
+        await client.query("COMMIT");
+
+        for (const [who, what] of audits) await writeAudit(who, what);
         return res.json({ success: true, salary: row,
                           refreshed_drafts: drafts.map((draft) => draft.month) });
     } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        // A draft finalised by somebody else between being listed above and
+        // being rebuilt: the whole save is rolled back, and the reason given
+        // is the real one rather than "internal server error".
+        if (error.status === 409) return fail(res, 409, error.message);
         return serverError(res, req, error);
+    } finally {
+        client.release();
     }
 };
 
@@ -293,20 +383,21 @@ exports.salaryHistory = async (req, res) => {
  * month cannot have one number of working days on the payslip and another in
  * the report.
  */
-async function gatherMonth(monthFirst) {
-    const bounds = (await pool.query(
+async function gatherMonth(monthFirst, txClient = null) {
+    const queryClient = txClient || pool;
+    const bounds = (await queryClient.query(
         `SELECT $1::date AS first,
                 (DATE_TRUNC('month', $1::date) + INTERVAL '1 month - 1 day')::date AS last`,
         [monthFirst])).rows[0];
     const first = String(bounds.first).slice(0, 10);
     const last = String(bounds.last).slice(0, 10);
 
-    const global = (await pool.query(
+    const global = (await queryClient.query(
         `SELECT weekly_offs, shift_start, shift_end, late_grace_minutes
            FROM employee_configs WHERE employee_id IS NULL`
     )).rows[0] || {};
 
-    const configs = new Map((await pool.query(
+    const configs = new Map((await queryClient.query(
         `SELECT employee_id, weekly_offs, shift_start, shift_end, late_grace_minutes
            FROM employee_configs WHERE employee_id IS NOT NULL`
     )).rows.map((r) => [r.employee_id, r]));
@@ -334,7 +425,7 @@ async function gatherMonth(monthFirst) {
     // THE LATENESS POLICY, as it stands at the moment of generation. Read once
     // and frozen into the run like every other component: turning the policy
     // on in October must not retroactively fine anybody for August.
-    const settings = new Map((await pool.query(
+    const settings = new Map((await queryClient.query(
         `SELECT key, value FROM app_settings
           WHERE key IN ('late_deduction_mode', 'late_deduction_free_days',
                         'payroll_hours_per_day')`)).rows.map((r) => [r.key, r.value]));
@@ -344,7 +435,7 @@ async function gatherMonth(monthFirst) {
         hoursPerDay: Number(settings.get("payroll_hours_per_day") || 8) || 8,
     };
 
-    const holidays = new Set((await pool.query(
+    const holidays = new Set((await queryClient.query(
         `SELECT TO_CHAR(holiday_date,'YYYY-MM-DD') AS d FROM holidays
           WHERE holiday_date BETWEEN $1::date AND $2::date`, [first, last]))
         .rows.map((r) => r.d));
@@ -359,7 +450,7 @@ async function gatherMonth(monthFirst) {
     // morning.
     const present = new Map();
     const firstLogin = new Map();
-    for (const row of (await pool.query(
+    for (const row of (await queryClient.query(
         `SELECT employee_id, ${istDate("login_time")}::text AS d,
                 MIN(login_time) AS first_login,
                 EXTRACT(HOUR   FROM (MIN(login_time) AT TIME ZONE 'UTC')
@@ -379,7 +470,7 @@ async function gatherMonth(monthFirst) {
     // Approved leave, one entry per day, with what kind it was — the kind is
     // what decides whether it costs anything.
     const leave = new Map();
-    for (const row of (await pool.query(
+    for (const row of (await queryClient.query(
         `SELECT l.employee_id, TO_CHAR(day::date,'YYYY-MM-DD') AS d,
                 l.leave_type, l.half_day
            FROM leave_requests l
@@ -402,8 +493,9 @@ async function gatherMonth(monthFirst) {
  * attendance row or approves a late leave request and generates again. A
  * FINALIZED month is refused — that is what finalising means.
  */
-async function generateDraft(first, actor) {
-        const existing = await pool.query(
+async function generateDraft(first, actor, txClient = null) {
+        const queryClient = txClient || pool;
+        const existing = await queryClient.query(
             `SELECT id, status FROM payroll_runs WHERE month = $1::date`, [first]);
         if (existing.rowCount && existing.rows[0].status === "FINALIZED") {
             const error = new Error(
@@ -412,8 +504,8 @@ async function generateDraft(first, actor) {
             throw error;
         }
 
-        const month = await gatherMonth(first);
-        const people = (await pool.query(
+        const month = await gatherMonth(first, queryClient);
+        const people = (await queryClient.query(
             `SELECT e.employee_id, COALESCE(e.full_name, e.username) AS name,
                     ${istDate("e.created_at")}::text AS joined_on,
                     s.gross_monthly, s.overtime_hourly, s.salary_id,
@@ -436,7 +528,7 @@ async function generateDraft(first, actor) {
         const enteredDeductions = new Map();
         const enteredOvertime = new Map();
         if (existing.rowCount) {
-            for (const row of (await pool.query(
+            for (const row of (await queryClient.query(
                 // NOT automatic ones. Those are derived from the salary and
                 // the rates, and are rebuilt below like the lines are. Adding
                 // them to this total as well would deduct them twice.
@@ -449,7 +541,7 @@ async function generateDraft(first, actor) {
             // Overtime hours are an approved manual entry on the line itself.
             // A salary-triggered rebuild must retain those hours while using
             // the newly saved rate, just as it retains manual deductions.
-            for (const row of (await pool.query(
+            for (const row of (await queryClient.query(
                 `SELECT employee_id, overtime_hours FROM payroll_lines WHERE run_id = $1`,
                 [existing.rows[0].id])).rows) {
                 enteredOvertime.set(row.employee_id, Number(row.overtime_hours) || 0);
@@ -460,7 +552,7 @@ async function generateDraft(first, actor) {
         //
         // Read ONCE for the run rather than per person: the rates are one row
         // of settings, and the components are one query for everybody on it.
-        const rateRows = new Map((await pool.query(
+        const rateRows = new Map((await queryClient.query(
             `SELECT key, value FROM app_settings
               WHERE key IN ('epf_rate','epf_wage_ceiling','esi_rate',
                             'esi_wage_ceiling','professional_tax')`
@@ -481,7 +573,7 @@ async function generateDraft(first, actor) {
         // in-place salary correction rewrites salary_components under the same
         // id, and a frozen payslip must not pick that up.
         const splitFor = new Map();
-        for (const row of (await pool.query(
+        for (const row of (await queryClient.query(
             `SELECT salary_id, name, rule, value, monthly, position
                FROM salary_components
               WHERE salary_id = ANY($1)
@@ -493,10 +585,10 @@ async function generateDraft(first, actor) {
             splitFor.get(row.salary_id).push(row);
         }
 
-        const client = await pool.connect();
+        const client = txClient || await pool.connect();
         let runId;
         try {
-            await client.query("BEGIN");
+            if (!txClient) await client.query("BEGIN");
 
             // The working days of the month, by the global calendar. Somebody
             // with their own weekly offs gets their own count below.
@@ -698,12 +790,12 @@ async function generateDraft(first, actor) {
                 }
             }
 
-            await client.query("COMMIT");
+            if (!txClient) await client.query("COMMIT");
         } catch (error) {
-            await client.query("ROLLBACK").catch(() => {});
+            if (!txClient) await client.query("ROLLBACK").catch(() => {});
             throw error;
         } finally {
-            client.release();
+            if (!txClient) client.release();
         }
 
         return runId;
@@ -916,6 +1008,36 @@ exports.getRun = async (req, res) => {
                                  WHERE l.run_id = $1
                                    AND l.employee_id = e.employee_id)
               ORDER BY e.employee_id`, [found.run.id])).rows;
+
+        // ── A ZERO THAT EXPLAINS ITSELF ─────────────────────────────────
+        //
+        // Reported, and fairly: somebody set a new employee's salary, opened
+        // the month, and the row said ₹0.00 while the Set salary page two
+        // clicks away said ₹25,000. Both were right. A month is paid on the
+        // salary in force DURING it, and that salary starts on the first of
+        // the next one — but nothing on the screen said so, and a figure that
+        // contradicts another screen without explaining itself is read as a
+        // broken figure. ("rajesh ka salary set h already kya h bhai har ek
+        // cheez ka mapping dekh na.")
+        //
+        // So a line worth nothing carries the date its pay begins, or null
+        // when there is no salary on record at all. Two different situations
+        // with two different answers — set a salary, or wait for the month it
+        // starts in — and the page can now tell them apart.
+        const zeroes = found.lines.filter(
+            (line) => Number(line.gross_monthly) === 0);
+        if (zeroes.length) {
+            const starts = new Map((await pool.query(
+                `SELECT employee_id, MIN(effective_from)::text AS starts_on
+                   FROM employee_salaries
+                  WHERE employee_id = ANY($1::varchar[])
+                  GROUP BY employee_id`,
+                [zeroes.map((line) => line.employee_id)])).rows
+                .map((row) => [row.employee_id, row.starts_on]));
+            for (const line of zeroes) {
+                line.salary_starts_on = starts.get(line.employee_id) || null;
+            }
+        }
 
         return res.json({ success: true, ...found, totals,
                           missing_employees: missing });

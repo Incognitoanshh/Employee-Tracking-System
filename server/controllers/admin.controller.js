@@ -177,6 +177,7 @@ exports.getEmployees = async (req, res) => {
                 -- looking like two different accounts.
                 e.photo,
                 e.email,
+                e.personal_email,
                 e.phone,
                 e.department,
                 e.reporting_manager,
@@ -198,7 +199,7 @@ exports.getEmployees = async (req, res) => {
                 e.suspended
             FROM (
                 SELECT employee_id, username, role, full_name, designation,
-                       suspended, photo, email, phone, department,
+                       suspended, photo, email, personal_email, phone, department,
                        reporting_manager, joining_date
                 FROM employees
                 ${searchWhere}
@@ -377,6 +378,11 @@ const ONBOARDING_FIELDS = [
     ["email", (v) => String(v).trim(),
      (v) => v.length <= 255 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v),
      "That does not look like an email address."],
+    // The person's own address, beside the official one above. See the
+    // migration that adds it for why they are two different facts.
+    ["personal_email", (v) => String(v).trim(),
+     (v) => v.length <= 255 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v),
+     "The personal email does not look like an email address."],
     ["phone", (v) => String(v).trim(), (v) => v.length <= 32,
      "A phone number is 32 characters at most."],
     ["department", (v) => String(v).trim(), (v) => v.length <= 120,
@@ -696,7 +702,10 @@ exports.updateProfile = async (req, res) => {
         });
     }
 
-    if (!hasName && !hasRole && !hasEmail && !hasPhone && !org.length) {
+    // personal_email counts as a change on its own — a request that only sets
+    // somebody's personal address is a real edit, not an empty one.
+    if (!hasName && !hasRole && !hasEmail && !hasPhone && !org.length
+        && !("personal_email" in raw)) {
         return res.status(400).json({ success: false, message: "Nothing to change" });
     }
 
@@ -713,6 +722,18 @@ exports.updateProfile = async (req, res) => {
     if (hasPhone && phone && !/^[0-9+()\-\s]{6,32}$/.test(phone)) {
         return res.status(400).json({
             success: false, message: "That does not look like a phone number",
+        });
+    }
+    // The personal address, on the same terms as the official one. Only an
+    // administrator reaches this endpoint — the employee cannot change either
+    // address themselves.
+    const hasPersonal = "personal_email" in raw;
+    const personalEmail = String(raw.personal_email ?? "").trim();
+    if (hasPersonal && personalEmail && (personalEmail.length > 255
+        || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail))) {
+        return res.status(400).json({
+            success: false,
+            message: "The personal email does not look like an email address",
         });
     }
 
@@ -762,7 +783,7 @@ exports.updateProfile = async (req, res) => {
 
     try {
         const before = await pool.query(
-            `SELECT username, full_name FROM employees WHERE employee_id = $1`,
+            `SELECT username, full_name, email FROM employees WHERE employee_id = $1`,
             [employee_id]);
         if (before.rows.length === 0) {
             return res.status(404).json({ success: false, message: "Employee not found" });
@@ -782,11 +803,23 @@ exports.updateProfile = async (req, res) => {
                     joining_date      = CASE WHEN $8::boolean THEN $9::date ELSE joining_date END,
                     employment_status = CASE WHEN $10::boolean THEN $11 ELSE employment_status END,
                     email             = CASE WHEN $12::boolean THEN $13 ELSE email END,
-                    phone             = CASE WHEN $14::boolean THEN $15 ELSE phone END
+                    -- A NEW ADDRESS IS AN UNPROVED ONE. This endpoint is now
+                    -- the only way an official email changes, and it never
+                    -- touched the verification: a changed address kept the
+                    -- tick that belonged to the old one, so mail would be
+                    -- sent on the strength of a proof that was never made.
+                    -- The employee's own route used to do this and no longer
+                    -- edits anything. Setting the SAME address again is not a
+                    -- change, and keeps a verification somebody already did.
+                    email_verified_at = CASE
+                        WHEN $12::boolean AND $13::text IS DISTINCT FROM email
+                        THEN NULL ELSE email_verified_at END,
+                    phone             = CASE WHEN $14::boolean THEN $15 ELSE phone END,
+                    personal_email    = CASE WHEN $16::boolean THEN $17 ELSE personal_email END
               WHERE employee_id = $1
               RETURNING employee_id, username, full_name, designation, role,
                         department, reporting_manager, joining_date,
-                        employment_status, email, phone`,
+                        employment_status, email, phone, personal_email`,
             [employee_id,
              hasName ? fullName : null,
              hasRole ? designation : null,
@@ -795,8 +828,18 @@ exports.updateProfile = async (req, res) => {
              "joining_date" in raw, raw.joining_date || null,
              "employment_status" in raw, raw.employment_status || null,
              hasEmail, email || null,
-             hasPhone, phone || null]
+             hasPhone, phone || null,
+             hasPersonal, personalEmail || null]
         );
+
+        // THE PENDING CODE GOES WITH THE OLD ADDRESS. A code sent to the
+        // previous address, entered after the change, would otherwise mark
+        // the NEW address as proved by somebody who only ever had the old
+        // one. The employee's own route did this; this is now the only route.
+        if (hasEmail && (email || null) !== (before.rows[0].email || null)) {
+            await pool.query(`DELETE FROM email_verifications WHERE employee_id = $1`,
+                             [employee_id]);
+        }
 
         // On the record. Renaming somebody changes how every report and every
         // conversation reads, so who did it has to be answerable.
@@ -983,8 +1026,8 @@ const RETENTION_LIMITS = {
     // A higher floor on purpose. This one covers the record of what
     // administrators did, and "who reset that password" is asked months
     // later or not at all — a period short enough to be convenient defeats
-    // the point of keeping it.
-    audit_log_retention_days:  { min: 180, max: 3650, label: "Admin actions" },
+    // the point of keeping it. 365 days minimum recommended for payroll audits.
+    audit_log_retention_days:  { min: 365, max: 3650, label: "Admin actions" },
 };
 
 exports.getRetention = async (req, res) => {

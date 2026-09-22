@@ -64,11 +64,15 @@ async function main() {
         const hash = await bcrypt.hash(PASSWORD, 10);
         psql(`INSERT INTO employees (employee_id, username, password, role,
                                      full_name, email, created_at)
-              VALUES ('A001','admin1','${hash}','admin','Priya Nair','p@x.test',
+              VALUES ('SA001','owner','${hash}','super_admin','The Owner',NULL,
+                      '2025-01-01'),
+                     ('A001','admin1','${hash}','admin','Priya Nair','p@x.test',
                       '2025-01-01'),
                      ('E001','rajesh','${hash}','employee','Rajesh Kumar','r@x.test',
                       '2025-01-01'),
                      ('E002','sneha','${hash}','employee','Sneha Iyer',NULL,
+                      '2025-01-01'),
+                     ('E003','meera','${hash}','employee','Meera Rao',NULL,
                       '2025-01-01')`);
         // No weekly offs and no holidays, so a 30-day month has 30 working
         // days and every figure below can be checked by hand.
@@ -119,6 +123,13 @@ async function main() {
         await api("POST", "/admin/payroll/salaries", { token: admin, body: {
             employee_id: "E001", gross_monthly: 36000, effective_from: "2026-07-01" } });
 
+        // A SALARY THAT HAS NOT STARTED YET. Priya's pay begins in August, so
+        // June is not paid on it. Meera has none at all. Both come out at
+        // zero and they are NOT the same situation: one is waiting for its
+        // month, the other is waiting for somebody to set it.
+        await api("POST", "/admin/payroll/salaries", { token: admin, body: {
+            employee_id: "A001", gross_monthly: 45000, effective_from: "2026-08-01" } });
+
         console.log("\nA month, from real attendance and leave");
         // June: Rajesh present on 20 days, 2 days approved sick (paid),
         // 3 days approved unpaid, and the remaining 5 unexplained.
@@ -137,6 +148,42 @@ async function main() {
         check("the month generates", res.status === 200, JSON.stringify(res.body).slice(0, 120));
 
         res = await api("GET", `/admin/payroll/${MONTH}`, { token: admin });
+
+        // WHO A RUN IS FOR. The owner's rule, asked and answered: "super owner
+        // payroll me ni aana chahiye baaki sab" — every employee and every
+        // admin, and not the super admin, who is the company rather than
+        // somebody it pays.
+        const on = (res.body.lines || []).map((l) => l.employee_id).sort();
+        check("every employee and every admin is on the run",
+            on.join(",") === "A001,E001,E002,E003", on.join(","));
+        check("and the super admin is not — they are the company, not staff",
+            !on.includes("SA001"), on.join(","));
+        // AND THE PAGE MUST NOT ASK FOR THEM EITHER. The table names anybody
+        // the run does not cover and tells an administrator to generate it
+        // again to pick them up. Listing the super admin there would be a
+        // banner that never goes away however many times it is pressed.
+        const missing = (res.body.missing_employees || []).map((m) => m.employee_id);
+        check("nor are they named as somebody the run is missing",
+            !missing.includes("SA001"), missing.join(",") || "(none)");
+
+        // WHICH KIND OF ZERO. Reported from a live screen: a new employee's
+        // salary was set, the month showed ₹0.00, and the Set salary page
+        // showed the figure — both correct, neither explaining the other.
+        const priya = (res.body.lines || []).find((l) => l.employee_id === "A001");
+        check("a salary that starts after the month leaves it at zero",
+            Number(priya.gross_monthly) === 0, String(priya?.gross_monthly));
+        check("and the line carries the date the pay begins",
+            String(priya.salary_starts_on).slice(0, 10) === "2026-08-01",
+            String(priya?.salary_starts_on));
+        const meera = (res.body.lines || []).find((l) => l.employee_id === "E003");
+        check("somebody with no salary at all is zero too",
+            Number(meera.gross_monthly) === 0, String(meera?.gross_monthly));
+        check("but carries no date — there is nothing to wait for",
+            meera.salary_starts_on === null, String(meera?.salary_starts_on));
+        const paid = (res.body.lines || []).find((l) => l.employee_id === "E001");
+        check("and a line that IS paid says nothing about starting dates",
+            paid.salary_starts_on === undefined, String(paid?.salary_starts_on));
+
         const line = (res.body.lines || []).find((l) => l.employee_id === "E001");
         check("thirty working days", near(line.working_days, 30), String(line?.working_days));
         check("twenty present", near(line.present_days, 20), String(line?.present_days));

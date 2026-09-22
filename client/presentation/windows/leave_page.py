@@ -220,16 +220,35 @@ class LeavePage(QWidget):
             f"letter-spacing:1px;background:transparent;border:none;")
         column.addWidget(heading)
 
-        self._table = QTableWidget(0, 6)
+        # WHAT THEY ASKED FOR, AND WHAT THEY WERE TOLD, BOTH ON THE ROW.
+        #
+        # The decision's remarks lived in the hover text of the Status chip,
+        # which nobody hovers: somebody whose leave was rejected saw a red
+        # "Rejected" and nothing about why. Reported as "employee panel me
+        # leave reject karne pe reason kahan show hoga?". Their own reason is
+        # beside it, because a remark such as "not in the release week" only
+        # makes sense next to what it answers.
+        #
+        # The last column is the Cancel button, for pending requests only. It
+        # used to be the sixth column with an empty widget in every other row,
+        # which drew as a dark blank cell after each status — the "UI me aise
+        # kyun dikh raha hai" in the same report.
+        self._table = QTableWidget(0, 8)
         self._table.setHorizontalHeaderLabels(
-            ["Type", "From", "To", "Days", "Status", ""])
+            ["Type", "From", "To", "Days", "Your reason", "Status",
+             "Remarks", ""])
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.setShowGrid(False)
         self._table.setAlternatingRowColors(False)  # zebra striping competes with the data
-        self._table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch)
+        header = self._table.horizontalHeader()
+        # The two free-text columns share the width; the short ones take what
+        # their contents need, so a date is never stretched across a third of
+        # the page while a sentence is squeezed beside it.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         # A TABLE STYLED WITH ONLY ITS SCROLLBAR KEEPS QT'S OWN PALETTE,
         # which is near-black: a hole punched through the card it sits
         # in, and the black rectangle reported on this page. table_style()
@@ -291,12 +310,28 @@ class LeavePage(QWidget):
             self._table.setItem(i, 3, cell(
                 f"{float(days):g}" if days is not None else ""))
 
-            # The remark is why a rejection is not just "no". On hover, so the
-            # table stays readable and the reason is never lost.
+            reason = str(row.get("reason") or "").strip()
+            reason_item = cell(reason or "—", muted=not reason)
+            reason_item.setToolTip(reason)
+            self._table.setItem(i, 4, reason_item)
+
             status = str(row.get("status", ""))
-            self._table.setCellWidget(i, 4, badge_cell(
-                status, status.title(),
-                str(row["remarks"]) if row.get("remarks") else None))
+            self._table.setCellWidget(i, 5, badge_cell(status, status.title()))
+
+            # WHAT THE DECISION SAID, visible without hovering. A pending
+            # request has not been decided, and says so rather than showing a
+            # dash that reads like "decided, with nothing to say".
+            remarks = str(row.get("remarks") or "").strip()
+            if remarks:
+                who = row.get("approved_by_name")
+                shown = f"{remarks}  — {who}" if who else remarks
+                remarks_item = cell(shown)
+                remarks_item.setToolTip(shown)
+            elif status == "PENDING":
+                remarks_item = cell("Awaiting a decision", muted=True)
+            else:
+                remarks_item = cell("—", muted=True)
+            self._table.setItem(i, 6, remarks_item)
 
             # CANCEL EXISTS ONLY WHILE IT CAN WORK. An approved request is the
             # employer's plan now, and a button that is always there but
@@ -307,9 +342,16 @@ class LeavePage(QWidget):
                 cancel.setCursor(Qt.CursorShape.PointingHandCursor)
                 cancel.clicked.connect(
                     lambda _checked=False, rid=row["id"]: self._cancel(rid))
-                self._table.setCellWidget(i, 5, cancel)
+                self._table.setCellWidget(i, 7, cancel)
             else:
-                self._table.setCellWidget(i, 5, QWidget())
+                # NOTHING, not an empty QWidget. A bare QWidget in a cell is
+                # painted with Qt's own near-black palette, and every decided
+                # row ended in a dark blank box — reported with the history
+                # table as "ye UI me aise kyun dikh raha hai". The table is
+                # refilled in place, so a Cancel left from when this row was
+                # still pending is removed as well.
+                self._table.removeCellWidget(i, 7)
+                self._table.setItem(i, 7, cell(""))
 
         if not rows:
             self._say("No leave asked for yet.")
