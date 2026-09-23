@@ -394,11 +394,24 @@ async function main() {
         psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
         psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
         psql(DB, `DELETE FROM active_sessions WHERE employee_id = 'E001'`);
+        // ANCHORED TO AN IST DAY, NOT TO "EIGHT HOURS AGO".
+        //
+        // It used to be NOW() - 8 hours and NOW() - 7 hours, and it failed
+        // whenever the suite ran between midnight and eight in the morning
+        // IST: the login landed on YESTERDAY, the evidence on today, and the
+        // server — rightly, see the note beside the query — will not use one
+        // day's activity to end another day's shift. The check then read "0
+        // hours recorded" against a product that was working. Both stamps now
+        // sit at a fixed hour of the same IST day, which is true at every
+        // hour the suite might run at.
+        const istYesterday = (hour) =>
+            `(((((NOW() AT TIME ZONE 'Asia/Kolkata')::date - INTERVAL '1 day')`
+            + ` + INTERVAL '${hour} hours') AT TIME ZONE 'Asia/Kolkata')`
+            + ` AT TIME ZONE 'UTC')`;
         psql(DB, `INSERT INTO attendance (employee_id, login_time)
-                  VALUES ('E001', (NOW() AT TIME ZONE 'UTC') - INTERVAL '8 hours')`);
+                  VALUES ('E001', ${istYesterday(22)})`);
         psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
-                  VALUES ('E001','KEYBOARD',
-                          (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 hours')`);
+                  VALUES ('E001','KEYBOARD', ${istYesterday(23)})`);
         const again = await login("rajesh", "rajesh-laptop");
         await api("POST", "/attendance/login", { token: again, body: {} });
         const lunch = Number(psql(DB,
@@ -406,9 +419,33 @@ async function main() {
                FROM attendance
               WHERE employee_id = 'E001' AND logout_time IS NOT NULL
               ORDER BY id DESC LIMIT 1`));
-        check("the closed shift records the hour actually worked, not the eight since",
+        check("the closed shift records the hour actually worked, not the gap since",
             lunch === 1,
-            `${lunch} hours recorded — 8 is the whole gap, which nobody worked`);
+            `${lunch} hours recorded — the whole gap is what nobody worked`);
+
+        // AND THE RULE THE ANCHORING IS THERE FOR. Evidence from the NEXT day
+        // cannot end this shift: a panel left running overnight writes idle
+        // lines until morning, and a shift opened at 18:19 was closed at
+        // 11:13 the next day with 15:56:17 on it, which would have gone to
+        // payroll as worked. With nothing from its own day, a shift closes at
+        // its login and records nothing rather than a fiction.
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E001'`);
+        psql(DB, `DELETE FROM active_sessions WHERE employee_id = 'E001'`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time)
+                  VALUES ('E001', ${istYesterday(23)})`);
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity, created_at)
+                  VALUES ('E001','KEYBOARD', ${istYesterday(26)})`);  // 02:00 today
+        const afterMidnight = await login("rajesh", "rajesh-laptop");
+        await api("POST", "/attendance/login", { token: afterMidnight, body: {} });
+        const crossed = Number(psql(DB,
+            `SELECT round(EXTRACT(EPOCH FROM total_hours)/3600)
+               FROM attendance
+              WHERE employee_id = 'E001' AND logout_time IS NOT NULL
+              ORDER BY id DESC LIMIT 1`));
+        check("and tomorrow's keystrokes cannot end yesterday's shift",
+            crossed === 0,
+            `${crossed} hours recorded from activity on the following IST day`);
 
         console.log("\nA shift nobody ever closed");
         // THE 94-HOUR SHIFT. Closing the app without signing out leaves the
