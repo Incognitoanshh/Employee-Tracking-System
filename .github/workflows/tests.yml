@@ -104,6 +104,16 @@ jobs:
           # "Employee-Tracking-System-main copy".
           bash server/tests/test_migrate_sh.sh
 
+      - name: Check the backup script, and that a broken backup is noticed
+        run: |
+          # The nightly dump failed for thirty-eight nights without anybody
+          # knowing: the password was read from an environment cron does not
+          # have, and each failure still left a 20-byte archive behind that
+          # made the directory listing look healthy. Both halves are checked
+          # here — the credentials it hands to pg_dump, and the health check
+          # that now refuses to call an empty or stale file a backup.
+          bash server/tests/test_backup_sh.sh
+
       - name: Refuse a known-vulnerable dependency
         working-directory: server
         run: npm audit --omit=dev --audit-level=high

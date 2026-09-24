@@ -3,7 +3,8 @@
 # ~/ets-health.log and only shouts when something is actually wrong.
 #
 # Checks: API responding, PM2 process online, PostgreSQL accepting
-# connections, disk headroom, and uploads/ growth.
+# connections, disk headroom, uploads/ growth, and that last night's
+# database dump is both recent and real.
 set -uo pipefail
 
 LOG="${ETS_HEALTH_LOG:-$HOME/ets-health.log}"
@@ -42,7 +43,43 @@ DISK=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9' || df / | tail -
 
 UP_SIZE=$(du -sm "$SERVER_DIR/uploads" 2>/dev/null | cut -f1 || echo 0)
 
-echo "$TS api=$CODE pm2=$PM2_STATUS pg=$PG disk=${DISK}% uploads=${UP_SIZE}MB" >> "$LOG"
+# ── IS THERE A BACKUP WORTH RESTORING FROM ─────────────────────────────
+#
+# The nightly dump failed silently for thirty-eight nights: cron ran, the
+# password was missing from its environment, pg_dump refused, and the shell
+# still created the .gz file — so the directory listing showed a fresh
+# backup every morning and every one of them was 20 bytes. Nobody reads
+# ~/ets-backup.log until they are already restoring, which is the worst
+# possible moment to learn this.
+#
+# So the newest dump is checked for AGE and for SIZE. Size is what tells
+# the two failures apart: a missing run leaves nothing, a refused
+# connection leaves an empty archive, and only one of those is visible
+# from a file listing. 36 hours of slack, so a single late or skipped run
+# during maintenance does not shout, but two do.
+BACKUP_DB_DIR="${ETS_BACKUP_DIR:-$HOME/ets-backups}/db"
+NEWEST_DUMP="$(ls -t "$BACKUP_DB_DIR"/*.sql.gz 2>/dev/null | head -1)"
+if [ -z "$NEWEST_DUMP" ]; then
+    BACKUP="none"
+    PROBLEMS+=("backup=none")
+else
+    # stat takes different flags on Linux and on a Mac, and this script is
+    # read and run by hand on both.
+    DUMP_MTIME=$(stat -c %Y "$NEWEST_DUMP" 2>/dev/null || stat -f %m "$NEWEST_DUMP")
+    DUMP_SIZE=$(stat -c %s "$NEWEST_DUMP" 2>/dev/null || stat -f %z "$NEWEST_DUMP")
+    DUMP_AGE_H=$(( ( $(date +%s) - DUMP_MTIME ) / 3600 ))
+    BACKUP="${DUMP_AGE_H}h/${DUMP_SIZE}B"
+    if [ "$DUMP_AGE_H" -gt 36 ]; then
+        PROBLEMS+=("backup-age=${DUMP_AGE_H}h")
+    elif [ "$DUMP_SIZE" -lt 1024 ]; then
+        # An empty gzip is 20 bytes. A real dump of this database is tens
+        # of kilobytes and grows; anything under a kilobyte is a failure
+        # wearing a filename.
+        PROBLEMS+=("backup-empty=${DUMP_SIZE}B")
+    fi
+fi
+
+echo "$TS api=$CODE pm2=$PM2_STATUS pg=$PG disk=${DISK}% uploads=${UP_SIZE}MB backup=$BACKUP" >> "$LOG"
 
 if [ ${#PROBLEMS[@]} -gt 0 ]; then
     echo "$TS ALERT: ${PROBLEMS[*]}" >> "$LOG"

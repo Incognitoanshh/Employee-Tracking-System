@@ -70,6 +70,21 @@ env_value() {
 
 DB_NAME="$(env_value DB_NAME "$SERVER_DIR/.env")"
 DB_USER="$(env_value DB_USER "$SERVER_DIR/.env")"
+# THE PASSWORD COMES FROM .env, NOT FROM THE ENVIRONMENT.
+#
+# These three used to be read straight off the environment, as
+# PGPASSWORD="${DB_PASSWORD:-}" at the pg_dump below — and the environment
+# under cron, which is where this script actually runs, has none of them.
+# It worked only for as long as the database accepted a connection without
+# a password. .env was given one on 17 August 2026; the 02:00 run the next
+# morning stopped at "fe_sendauth: no password supplied", and so did every
+# run after it. THIRTY-EIGHT NIGHTS with no usable dump, each one leaving a
+# 20-byte gzip behind so that `ls` showed a fresh backup every day.
+#
+# An environment that sets them still wins, the way UPLOAD_DIR already does.
+DB_PASSWORD="${DB_PASSWORD:-$(env_value DB_PASSWORD "$SERVER_DIR/.env")}"
+DB_HOST="${DB_HOST:-$(env_value DB_HOST "$SERVER_DIR/.env")}"
+DB_PORT="${DB_PORT:-$(env_value DB_PORT "$SERVER_DIR/.env")}"
 UPLOAD_DIR="${UPLOAD_DIR:-$(env_value UPLOAD_DIR "$SERVER_DIR/.env")}"
 : "${DB_NAME:?DB_NAME missing from .env}"
 : "${DB_USER:?DB_USER missing from .env}"
@@ -81,10 +96,18 @@ echo "=== ETS backup  $(date "+%Y-%m-%dT%H:%M:%S%z") ==="
 # ── 1. Database ────────────────────────────────────────────────────────
 DUMP="$BACKUP_DIR/db/ets-$STAMP.sql.gz"
 echo "[1/4] pg_dump -> $DUMP"
-PGPASSWORD="${DB_PASSWORD:-}" pg_dump \
-    -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" \
-    -U "$DB_USER" -d "$DB_NAME" \
-    | gzip -9 > "$DUMP"
+# NOTHING RATHER THAN A 20-BYTE LIE. The redirection creates the file
+# before pg_dump has said a word, so a refused connection left an empty
+# archive with today's date on it — which is what made five weeks of
+# failure look like five weeks of backups.
+if ! PGPASSWORD="$DB_PASSWORD" pg_dump \
+        -h "${DB_HOST:-localhost}" -p "${DB_PORT:-5432}" \
+        -U "$DB_USER" -d "$DB_NAME" \
+        | gzip -9 > "$DUMP"; then
+    echo "  FAILED: pg_dump did not finish — see the error above"
+    rm -f "$DUMP"
+    exit 1
+fi
 
 # ── 2. Verify the dump ─────────────────────────────────────────────────
 # A truncated dump is still a readable gzip file with plausible size, so
