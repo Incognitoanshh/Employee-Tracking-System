@@ -159,6 +159,32 @@ async function collectAlerts() {
     const idleMinutes = new Map(
         idle.rows.map((r) => [r.employee_id, Math.round(Number(r.idle_seconds || 0) / 60)]));
 
+    // ── INPUT THAT LOOKS AUTOMATED, over the last hour ────────────────
+    //
+    // The client scores each minute and marks the ones whose input was all
+    // of one kind or spaced identically — see
+    // client/application/managers/activity_score.py. What the rule needs is
+    // not the scores but the EVIDENCE: how many such minutes there were,
+    // how many minutes were reported at all, and whether a single keystroke
+    // appeared anywhere in the window. One keystroke is enough to say this
+    // was a person.
+    //
+    // AN HOUR, and only minutes that were actually reported. A laptop shut
+    // at lunch reports nothing, and counting silence as suspicion would
+    // accuse everybody who closed their machine.
+    const automationWindowMinutes = 60;
+    const automation = await pool.query(
+        `SELECT employee_id,
+                COUNT(*)::int AS window_minutes,
+                COUNT(*) FILTER (
+                    WHERE automation_suspected AND keystrokes = 0)::int
+                    AS suspicious_minutes,
+                COALESCE(SUM(keystrokes), 0)::int AS keystrokes
+           FROM activity_minutes
+          WHERE minute > (NOW() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
+          GROUP BY employee_id`, [String(automationWindowMinutes)]);
+    const automationBy = new Map(automation.rows.map((r) => [r.employee_id, r]));
+
     const days = await pool.query(
         `SELECT TO_CHAR(holiday_date, 'YYYY-MM-DD') AS day FROM holidays`);
     const holidays = new Set(days.rows.map((r) => r.day));
@@ -195,6 +221,7 @@ async function collectAlerts() {
                 ? lastSeen.get(employee.employee_id) : null,
             loggedInToday: loggedInToday.has(employee.employee_id),
             idleMinutes: idleMinutes.get(employee.employee_id) || 0,
+            automation: automationBy.get(employee.employee_id) || null,
         }));
     }
 

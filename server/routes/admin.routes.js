@@ -101,6 +101,11 @@ router.get("/holidays",                  adminCtrl.getHolidays);
 router.post("/holidays",                 adminCtrl.addHoliday);
 router.delete("/holidays/:holiday_date", adminCtrl.deleteHoliday);
 router.post("/force-logout",       adminCtrl.forceLogout);  // Force logout employee
+// A screenshot asked for by hand, rather than one the schedule took. The
+// request is written down here and collected by the employee's next config
+// sync — see adminCtrl.requestScreenshot.
+router.post("/employees/:employee_id/screenshot", adminCtrl.requestScreenshot);
+router.get("/screenshot-requests/:id",            adminCtrl.screenshotRequestStatus);
 router.post("/toggle-verbose-logging", adminCtrl.toggleVerboseLogging);  // Quick per-employee verbose toggle
 
 // ── Teams and channels ─────────────────────────────────────────────────────

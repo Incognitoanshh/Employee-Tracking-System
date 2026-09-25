@@ -296,6 +296,65 @@ class SyncManager:
                 break
 
     @staticmethod
+    def push_activity_minutes(max_rows: int = 120):
+        """Send the scored minutes the server has not been told about.
+
+        A batch rather than a row at a time: a laptop that was off the
+        network for an hour has sixty of these waiting, and sixty round
+        trips on a hotel connection is how a sync falls behind and stays
+        behind. They are marked sent only for the ids the server accepted.
+        """
+        headers = SyncManager._auth_headers()
+        if headers is None:
+            return
+
+        try:
+            connection = Database.connect()
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT id, minute, score, band, keystrokes, clicks, scrolls,
+                       mouse_moves, window_changes, automation_suspected, reasons
+                  FROM activity_minutes
+                 WHERE employee_id = ? AND uploaded = 0
+                 ORDER BY id LIMIT ?
+                """,
+                (SessionManager.employee_id, max_rows),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            connection.close()
+        except Exception:
+            return
+
+        if not rows:
+            return
+
+        try:
+            response = _http.post(
+                f"{API_BASE_URL}/logs/activity-minutes",
+                json={"minutes": [{k: v for k, v in row.items() if k != "id"}
+                                  for row in rows]},
+                headers=headers,
+                timeout=15,
+            )
+            if response.status_code != 200:
+                return
+        except Exception:
+            # Offline. They stay unsent and the next tick tries again.
+            return
+
+        try:
+            connection = Database.connect()
+            cursor = connection.cursor()
+            cursor.executemany(
+                "UPDATE activity_minutes SET uploaded = 1 WHERE id = ?",
+                [(row["id"],) for row in rows])
+            connection.commit()
+            connection.close()
+        except Exception:
+            pass
+
+    @staticmethod
     def retry_logs(max_retries: int = 20):
         headers = SyncManager._auth_headers()
         if headers is None:

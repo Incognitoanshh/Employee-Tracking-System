@@ -67,6 +67,7 @@ from client.infrastructure.database.database import Database
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.managers.idle_tracker import IdleTracker
+from client.application.managers.activity_tracker import ActivityTracker
 from client.presentation.theme import ADMIN as _THEME_ADMIN
 from client.presentation import theme as _theme
 from client.presentation.theme import Radius, Space, Type, Weight
@@ -8832,6 +8833,8 @@ class EmployeePage(QWidget):
         self._live_state = None
         self._employee_online = False
         self._token_error_shown = False
+        self._capture_request = None
+        self._update_capture_button()
 
         shown = (self._employee.get("full_name")
                  or self._employee.get("username") or "—")
@@ -8915,6 +8918,23 @@ class EmployeePage(QWidget):
         name_row.addLayout(who)
 
         name_row.addStretch()
+
+        # ── A SCREENSHOT, NOW ───────────────────────────────────────────
+        #
+        # "Agar employee online and working hai to button click and uska
+        # current screenshot aa jaye." The schedule takes pictures at moments
+        # nobody chooses; this is for the moment somebody IS asking.
+        #
+        # It can only be pressed while they are online, and it says so when
+        # it cannot: a request queued for whenever the app next opened would
+        # answer "now" with a picture from hours later, and nothing on the
+        # screen would show the difference.
+        self._shot_now = _btn("Screenshot now", variant="secondary",
+                              height=34, width=150)
+        self._shot_now.setEnabled(False)
+        self._shot_now.clicked.connect(self._request_screenshot)
+        name_row.addWidget(self._shot_now)
+
         self._role_pill = QLabel("—")
         self._role_pill.setStyleSheet(
             f"background:{C['accent_soft']}; color:{C['accent_hover']}; padding:4px 12px; "
@@ -8987,6 +9007,116 @@ class EmployeePage(QWidget):
         self._logs_table.setShowGrid(False)
         self._logs_table.verticalHeader().setVisible(False)
         root.addWidget(self._logs_table, 1)
+
+    def _update_capture_button(self):
+        """On only while there is an app running to answer it."""
+        button = getattr(self, "_shot_now", None)
+        if button is None:
+            return
+        waiting = getattr(self, "_capture_request", None) is not None
+        button.setEnabled(self._employee_online and not waiting)
+        who = str(self._employee.get("full_name")
+                  or self._employee.get("username") or "This employee") \
+            if getattr(self, "_employee", None) else "This employee"
+        if waiting:
+            button.setToolTip("Waiting for their app to answer…")
+        elif self._employee_online:
+            button.setToolTip(
+                _theme.tip(f"Ask {who}'s app for a picture of their screen as "
+                           f"it is right now. It arrives within a few seconds. "
+                           f"The request is recorded in the audit log under "
+                           f"your name."))
+        else:
+            button.setToolTip(
+                _theme.tip(f"{who} is not online. A screenshot can only be "
+                           f"taken while their app is running — asking now "
+                           f"would deliver whatever is on screen whenever "
+                           f"they next open it."))
+
+    def _request_screenshot(self):
+        """Ask, then wait for the picture rather than claiming it was taken."""
+        employee_id = str(self._employee.get("employee_id") or "")
+        if not employee_id:
+            return
+        self._shot_now.setText("Asking…")
+        worker = _PostWorker(
+            f"{API_BASE_URL}/admin/employees/{employee_id}/screenshot", {})
+        worker.result.connect(self._capture_asked)
+        worker.error.connect(self._capture_failed)
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _capture_failed(self, error):
+        self._capture_request = None
+        self._shot_now.setText("Screenshot now")
+        self._update_capture_button()
+        QMessageBox.warning(self, "No screenshot", str(error))
+
+    def _capture_asked(self, data: dict):
+        if not data.get("success"):
+            return self._capture_failed(data.get("message") or "Unknown error")
+        self._capture_request = data.get("request_id")
+        self._capture_waited = 0
+        self._shot_now.setText("Waiting…")
+        self._update_capture_button()
+        # THE CLIENT IS POLLED, SO THIS IS TOO. Their app asks the server for
+        # work every five seconds; the answer cannot arrive sooner, and a
+        # page that pretended otherwise would just be a spinner that lies.
+        timer = getattr(self, "_capture_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(2000)
+            timer.timeout.connect(self._poll_capture)
+            self._capture_timer = timer
+        timer.start()
+
+    #: How long to wait for the picture before saying it did not come. The
+    #: request itself expires on the server after five minutes; this is the
+    #: part a person is standing in front of.
+    CAPTURE_WAIT_SECONDS = 40
+
+    def _poll_capture(self):
+        if not self._capture_request:
+            self._capture_timer.stop()
+            return
+        self._capture_waited += 2
+        if self._capture_waited > self.CAPTURE_WAIT_SECONDS:
+            self._capture_timer.stop()
+            self._capture_request = None
+            self._shot_now.setText("Screenshot now")
+            self._update_capture_button()
+            QMessageBox.information(
+                self, "No answer yet",
+                "Their app has not answered. It may have been closed, or the "
+                "screen may be locked. Nothing was taken.")
+            return
+        worker = _FetchWorker(
+            f"{API_BASE_URL}/admin/screenshot-requests/{self._capture_request}")
+        worker.result.connect(self._capture_polled)
+        worker.error.connect(lambda _e: None)      # keep waiting; it retries
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _capture_polled(self, data: dict):
+        status = str((data.get("request") or {}).get("status") or "")
+        if status == "PENDING":
+            return
+        self._capture_timer.stop()
+        self._capture_request = None
+        self._shot_now.setText("Screenshot now")
+        self._update_capture_button()
+        if status == "TAKEN":
+            # The count on this page is read from the server, so refreshing
+            # is what makes the new picture real rather than announced.
+            self._load_details()
+            QMessageBox.information(
+                self, "Screenshot taken",
+                "It is in Screenshots, at the top — taken just now.")
+        else:
+            QMessageBox.information(
+                self, "No screenshot",
+                "The request expired before their app answered it. Nothing "
+                "was taken.")
 
     def _fill_profile(self, employee: dict):
         """Put what is known on screen; a dash where nothing is recorded.
@@ -9098,6 +9228,7 @@ class EmployeePage(QWidget):
         # Use backend status only.
         raw_status = str(s.get("status", "")).lower()
         self._employee_online = (raw_status == "online")
+        self._update_capture_button()
 
         # BUG FIX: online employee ka state hamesha "ACTIVE" hardcode tha, is
         # liye "Idle Time" card kabhi tick hi nahi karta tha — employee idle
@@ -12078,9 +12209,18 @@ class AdminConfigPanel(QMainWindow):
 
         self.scheduler = SchedulerService()
         self.scheduler.screenshot_triggered.connect(self.capture_screenshot)
+        # An administrator pressed "take one now" for this person. It arrives
+        # on the config sync, five seconds at worst after the click.
+        if hasattr(self.scheduler, "capture_requested"):
+            self.scheduler.capture_requested.connect(self._capture_on_request)
         if hasattr(self.scheduler, "force_logout"):
             self.scheduler.force_logout.connect(self.logout)
         self.scheduler.start()
+
+        # An admin is monitored like anybody else, so their own console
+        # scores its minutes too — see the note in the employee panel.
+        self.activity_tracker = ActivityTracker()
+        self.activity_tracker.start()
 
         self.idle_tracker = IdleTracker()
         # BUG: the tracker was started but its signal was connected to
@@ -12351,6 +12491,16 @@ class AdminConfigPanel(QMainWindow):
             if scheduler is not None:
                 scheduler.capture_postponed()
 
+    def _capture_on_request(self, request_id: int):
+        """A screenshot somebody asked this console's user for.
+
+        An admin is monitored like anybody else, so their own console answers
+        a request the same way the employee panel does.
+        """
+        result = ScreenshotManager.capture_screenshot(request_id=request_id)
+        if result is not None:
+            self._update_own_shots(ScreenshotManager.captures_today())
+
     def _open_salary_page(self):
         """Show the Salaries page, and load it."""
         self._salary_page.refresh()
@@ -12530,6 +12680,8 @@ class AdminConfigPanel(QMainWindow):
             self.scheduler.stop()
         if hasattr(self, 'idle_tracker'):
             self.idle_tracker.stop()
+        if hasattr(self, 'activity_tracker'):
+            self.activity_tracker.stop()
 
         for tab_attr in self.TAB_ATTRS:
             tab = getattr(self, tab_attr, None)

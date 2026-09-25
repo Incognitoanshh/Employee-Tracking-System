@@ -151,6 +151,31 @@ class Database:
             )
             """)
 
+            # ── WHAT KIND OF MINUTE IT WAS ──────────────────────────
+            #
+            # One row a minute: how much keyboard, how much mouse, how many
+            # changes of application, and the score those add up to. It is
+            # kept here first for the same reason screenshots are — the
+            # laptop is often on a train — and uploaded when there is a
+            # network.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activity_minutes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id TEXT NOT NULL,
+                minute      TEXT NOT NULL,
+                score       INTEGER NOT NULL,
+                band        TEXT NOT NULL,
+                keystrokes  INTEGER NOT NULL DEFAULT 0,
+                clicks      INTEGER NOT NULL DEFAULT 0,
+                scrolls     INTEGER NOT NULL DEFAULT 0,
+                mouse_moves INTEGER NOT NULL DEFAULT 0,
+                window_changes INTEGER NOT NULL DEFAULT 0,
+                automation_suspected INTEGER NOT NULL DEFAULT 0,
+                reasons     TEXT,
+                uploaded    INTEGER NOT NULL DEFAULT 0
+            )
+            """)
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS shifts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

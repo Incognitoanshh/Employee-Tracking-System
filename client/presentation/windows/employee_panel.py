@@ -52,6 +52,7 @@ from client.application.services.auth_service import AuthService
 from client.application.managers.session_log_manager import SessionLogManager
 from client.application.managers.shift_manager import ShiftManager
 from client.application.managers.idle_tracker import IdleTracker
+from client.application.managers.activity_tracker import ActivityTracker
 from client.application.managers.screenshot_manager import ScreenshotManager
 from client.application.schedulers.scheduler_service import SchedulerService
 from client.infrastructure.database.database import Database
@@ -1653,6 +1654,10 @@ class EmployeePanel(QWidget):
     def _start_services(self):
         self.scheduler = SchedulerService()
         self.scheduler.screenshot_triggered.connect(self._capture)
+        # An administrator pressed "take one now" for this person. It arrives
+        # on the config sync, five seconds at worst after the click.
+        if hasattr(self.scheduler, "capture_requested"):
+            self.scheduler.capture_requested.connect(self._capture_on_request)
         if hasattr(self.scheduler, "force_logout"):
             self.scheduler.force_logout.connect(self.logout)
         self.scheduler.start()
@@ -1660,6 +1665,14 @@ class EmployeePanel(QWidget):
         self.idle_tracker = IdleTracker()
         self.idle_tracker.status_changed.connect(self._on_idle)
         self.idle_tracker.start()
+
+        # WHAT KIND OF MINUTE IT WAS, beside how long since the last input.
+        # The idle tracker cannot tell a person from a mouse jiggler — both
+        # keep "seconds since last input" at zero — so this scores the shape
+        # of the input as well. It changes nothing about attendance or pay;
+        # it is read by the alert rules and nowhere else.
+        self.activity_tracker = ActivityTracker()
+        self.activity_tracker.start()
 
         self.tray = SystemTray(self)
         self.tray.show()
@@ -1704,6 +1717,17 @@ class EmployeePanel(QWidget):
             scheduler = getattr(self, "scheduler", None)
             if scheduler is not None:
                 scheduler.capture_postponed()
+        self._refresh_current()
+
+    def _capture_on_request(self, request_id: int):
+        """A screenshot an administrator asked for, by hand.
+
+        Not part of the day's budget and not part of the schedule — see
+        ScreenshotManager.capture_screenshot. The employee is told nothing:
+        the record of who looked, and when, is in the audit log where the
+        administrator's own actions are kept.
+        """
+        ScreenshotManager.capture_screenshot(request_id=request_id)
         self._refresh_current()
 
     def _on_idle(self, status: str):
@@ -1932,7 +1956,7 @@ class EmployeePanel(QWidget):
             except Exception:
                 pass
 
-        for attr in ("scheduler", "idle_tracker"):
+        for attr in ("scheduler", "idle_tracker", "activity_tracker"):
             obj = getattr(self, attr, None)
             if obj is not None:
                 try:

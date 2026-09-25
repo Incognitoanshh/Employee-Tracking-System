@@ -149,12 +149,44 @@ exports.syncConfig = async (req, res) => {
             console.error(`[CONFIG SYNC] calendar lookup failed for ${employee_id}:`, e.message);
         }
 
+        // ── A SCREENSHOT SOMEBODY ASKED FOR ────────────────────────────
+        //
+        // The client cannot be called; it polls this endpoint every five
+        // seconds. So an administrator's "take one now" is left here to be
+        // collected, exactly as force_logout already is, and the capture
+        // that follows names the request it answers.
+        //
+        // NOT MARKED AS DONE HERE. Handed over is not taken: the app may be
+        // closing, the screen may refuse. The request is closed by the
+        // upload that answers it, and otherwise expires on its own.
+        let captureNow = null;
+        try {
+            const pending = await pool.query(
+                `SELECT id FROM screenshot_requests
+                  WHERE employee_id = $1 AND status = 'PENDING'
+                    AND requested_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '5 minutes'
+                  ORDER BY id DESC LIMIT 1`, [employee_id]);
+            if (pending.rows.length > 0) {
+                captureNow = pending.rows[0].id;
+                await pool.query(
+                    `UPDATE screenshot_requests
+                        SET delivered_at = COALESCE(delivered_at, NOW() AT TIME ZONE 'UTC')
+                      WHERE id = $1`, [captureNow]);
+            }
+        } catch (e) {
+            // A sync that cannot answer this question must still deliver the
+            // configuration; monitoring stopping because a button feature
+            // broke would be the worse fault by far.
+            console.error(`[CONFIG SYNC] screenshot request lookup failed for ${employee_id}:`, e.message);
+        }
+
         return res.status(200).json({
             success: true,
             config: {
                 ...config,
                 ...calendar,
                 ...(shift ? { shift } : {}),
+                ...(captureNow ? { capture_now: captureNow } : {}),
             }
         });
 

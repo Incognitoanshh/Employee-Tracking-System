@@ -22,7 +22,7 @@ exports.uploadScreenshot = async (req, res) => {
 
     try {
 
-        await pool.query(
+        const stored = await pool.query(
             `
             INSERT INTO screenshots
             (
@@ -34,6 +34,7 @@ exports.uploadScreenshot = async (req, res) => {
                 $1,
                 $2
             )
+            RETURNING id
             `,
             [
                 employee_id,
@@ -41,9 +42,37 @@ exports.uploadScreenshot = async (req, res) => {
             ]
         );
 
+        // ── IS THIS THE ONE SOMEBODY ASKED FOR ─────────────────────────
+        //
+        // An administrator's "take one now" is left in screenshot_requests
+        // and collected by the client's next config sync; the client sends
+        // the id back with the picture. Closing the request HERE, rather
+        // than when it was handed over, is what makes the button honest:
+        // it goes from waiting to done only when a picture actually exists.
+        //
+        // The id is taken from the body, so it arrives as a string.
+        // Anything that is not a number for this employee's own pending
+        // request is ignored — a stored picture is never worth failing an
+        // upload over.
+        const requestId = Number(req.body?.request_id);
+        if (Number.isInteger(requestId) && requestId > 0) {
+            try {
+                await pool.query(
+                    `UPDATE screenshot_requests
+                        SET status = 'TAKEN',
+                            taken_at = NOW() AT TIME ZONE 'UTC',
+                            screenshot_id = $1
+                      WHERE id = $2 AND employee_id = $3 AND status = 'PENDING'`,
+                    [stored.rows[0].id, requestId, employee_id]);
+            } catch (e) {
+                console.error("[SCREENSHOT] could not close request", requestId, e.message);
+            }
+        }
+
         return res.json({
             success: true,
-            file: req.file.filename
+            file: req.file.filename,
+            id: stored.rows[0].id
         });
 
     } catch (error) {

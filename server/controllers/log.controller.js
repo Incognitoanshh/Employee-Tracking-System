@@ -81,6 +81,89 @@ exports.createLog = async (req, res) => {
  * whichever posts second would otherwise overwrite the larger figure with
  * its own smaller one.
  */
+// ── THE MINUTES A CLIENT SCORED ────────────────────────────────────────
+//
+// One row a minute, in batches: a laptop that was off the network for an
+// hour has sixty waiting, and sixty round trips on a hotel connection is how
+// a sync falls behind and stays behind.
+//
+// ALWAYS FOR THE CALLER. The employee id comes from the token and nothing
+// else; there is no field here that could be pointed at somebody else.
+const ACTIVITY_BATCH_LIMIT = 500;
+
+exports.recordActivityMinutes = async (req, res) => {
+    const employeeId = req.employee?.employee_id;
+    if (!employeeId) {
+        return res.status(401).json({ success: false, message: "Not authenticated" });
+    }
+    const minutes = Array.isArray(req.body?.minutes) ? req.body.minutes : null;
+    if (!minutes || minutes.length === 0) {
+        return res.status(400).json({ success: false, message: "minutes must be a non-empty array" });
+    }
+    if (minutes.length > ACTIVITY_BATCH_LIMIT) {
+        return res.status(400).json({
+            success: false,
+            message: `At most ${ACTIVITY_BATCH_LIMIT} minutes in one batch`,
+        });
+    }
+
+    const rows = [];
+    for (const entry of minutes) {
+        const minute = String(entry?.minute || "");
+        if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(minute)) {
+            return res.status(400).json({
+                success: false,
+                message: "each minute must be YYYY-MM-DD HH:MM",
+            });
+        }
+        const score = Number(entry?.score);
+        if (!Number.isFinite(score) || score < 0 || score > 100) {
+            return res.status(400).json({ success: false, message: "score must be 0-100" });
+        }
+        const whole = (value) => {
+            const number = Number(value);
+            return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+        };
+        rows.push([
+            employeeId, minute, Math.round(score),
+            ["ACTIVE", "LOW", "IDLE"].includes(String(entry?.band))
+                ? String(entry.band) : "IDLE",
+            whole(entry?.keystrokes), whole(entry?.clicks), whole(entry?.scrolls),
+            whole(entry?.mouse_moves), whole(entry?.window_changes),
+            entry?.automation_suspected === true || entry?.automation_suspected === 1,
+            String(entry?.reasons || "").slice(0, 300),
+        ]);
+    }
+
+    try {
+        // ONE STATEMENT, NOT ONE PER ROW. And the same minute sent twice —
+        // a batch that was accepted and then retried after a dropped
+        // connection — updates rather than doubling the day.
+        const values = rows.map((_row, i) => {
+            const at = i * 11;
+            return `($${at + 1}, $${at + 2}::timestamp, $${at + 3}, $${at + 4}, $${at + 5}, `
+                 + `$${at + 6}, $${at + 7}, $${at + 8}, $${at + 9}, $${at + 10}, $${at + 11})`;
+        }).join(", ");
+        await pool.query(
+            `INSERT INTO activity_minutes
+                 (employee_id, minute, score, band, keystrokes, clicks, scrolls,
+                  mouse_moves, window_changes, automation_suspected, reasons)
+             VALUES ${values}
+             ON CONFLICT (employee_id, minute) DO UPDATE
+                 SET score = EXCLUDED.score, band = EXCLUDED.band,
+                     keystrokes = EXCLUDED.keystrokes, clicks = EXCLUDED.clicks,
+                     scrolls = EXCLUDED.scrolls, mouse_moves = EXCLUDED.mouse_moves,
+                     window_changes = EXCLUDED.window_changes,
+                     automation_suspected = EXCLUDED.automation_suspected,
+                     reasons = EXCLUDED.reasons`,
+            rows.flat());
+        return res.json({ success: true, stored: rows.length });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.recordIdleDaily = async (req, res) => {
     const { day, idle_seconds } = req.body || {};
     const employeeId = req.employee?.employee_id;

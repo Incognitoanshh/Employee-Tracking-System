@@ -52,6 +52,18 @@ const DEFAULTS = {
     alert_late_login_minutes: 30,
     // Idle minutes in one day before it is worth a look.
     alert_idle_minutes: 180,
+    // ── INPUT THAT LOOKS AUTOMATED ──────────────────────────────────────
+    //
+    // "Aisa na ho ki koi word open krke auto button click ya mouse movement
+    // laga ke chala de." The client scores each minute (see
+    // client/application/managers/activity_score.py) and marks the ones
+    // where the input was all of one kind, or spaced identically to the
+    // millisecond — the signature of a jiggler, not of a person.
+    //
+    // HALF AN HOUR, not five minutes. Somebody reading a long document
+    // produces minutes that look like this, and the difference between
+    // reading and faking is how long it goes on for.
+    alert_automation_minutes: 30,
 };
 
 function setting(settings, key) {
@@ -159,6 +171,47 @@ function tooMuchIdle({ employee, idleMinutes, isoDate, holidays, settings }) {
     };
 }
 
+/**
+ * Input that looks like a machine, for long enough that it is not a habit.
+ *
+ * WHAT IS ASKED, and what is deliberately NOT. It is not "was the score
+ * low" — an hour of reading scores low and that is not something to accuse
+ * anybody of. It is the evidence: minutes with NO keystroke at all, where
+ * the movements were either the only thing happening or spaced identically.
+ * Those two together are what a jiggler leaves behind and what a person at
+ * a keyboard, reading or not, does not.
+ *
+ * AND IT SAYS WHAT IT SAW. An alert reading "activity score 12" gives an
+ * administrator nothing to act on; "no keystrokes in 34 of the last 40
+ * minutes, movements at identical intervals" is a sentence they can put to
+ * somebody — and it is also what would show the alert to be wrong, which
+ * matters more, because this is a guess about a person's working day.
+ */
+function automatedInput({ employee, automation, settings }) {
+    const limit = setting(settings, "alert_automation_minutes");
+    if (!automation || !limit) return null;
+    const suspicious = Number(automation.suspicious_minutes) || 0;
+    if (suspicious < limit) return null;
+    // One keystroke anywhere in the window is enough to stop this: a machine
+    // moving a mouse produces none at all, and the cost of being wrong here
+    // is an accusation.
+    if (Number(automation.keystrokes) > 0) return null;
+
+    const window = Number(automation.window_minutes) || suspicious;
+    return {
+        type: "AUTOMATED_INPUT",
+        severity: SEVERITY.MEDIUM,
+        employee_id: employee.employee_id,
+        employee_name: employee.full_name || employee.username,
+        title: `Input looks automated for ${describeGap(suspicious)}`,
+        detail: `${suspicious} of the last ${window} minutes had no keystroke `
+              + `at all, with movement either alone or spaced identically. `
+              + `That is what a mouse jiggler leaves behind. It is not proof — `
+              + `check the screenshots for the same period before acting on it.`,
+        minutes: suspicious,
+    };
+}
+
 /** "3 hr 20 min", "45 min", "2 days". Short enough to sit in a row. */
 function describeGap(minutes) {
     const total = Math.max(0, Math.round(Number(minutes) || 0));
@@ -190,6 +243,7 @@ function forEmployee(facts) {
         notReporting(facts),
         noLoginAfterShiftStart(facts),
         tooMuchIdle(facts),
+        automatedInput(facts),
     ].filter(Boolean);
 
     // Somebody whose app has been silent for two days has not "failed to log
@@ -204,5 +258,5 @@ function forEmployee(facts) {
 module.exports = {
     DEFAULTS, SEVERITY,
     setting, forEmployee, describeGap,
-    notReporting, noLoginAfterShiftStart, tooMuchIdle,
+    notReporting, noLoginAfterShiftStart, tooMuchIdle, automatedInput,
 };

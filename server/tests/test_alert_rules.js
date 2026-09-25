@@ -148,6 +148,52 @@ out = rules.forEmployee(facts({ idleMinutes: 200, settings: { alert_idle_minutes
 check("the idle limit is a setting as well",
     out.length === 0, JSON.stringify(out.map((a) => a.type)));
 
+console.log("\nInput that looks automated");
+
+// The facts the client sends up: how many of the last N minutes had NO
+// keystroke and looked like a machine, and whether a single key was pressed
+// anywhere in the window.
+const automated = (extra = {}) => facts({
+    automation: { window_minutes: 60, suspicious_minutes: 45, keystrokes: 0, ...extra },
+});
+
+out = rules.forEmployee(automated({ suspicious_minutes: 12 }));
+check("a few odd minutes say nothing — people read, and people think",
+    out.length === 0, JSON.stringify(out.map((a) => a.type)));
+
+out = rules.forEmployee(automated());
+check("three quarters of an hour of it is worth saying",
+    out.length === 1 && out[0].type === "AUTOMATED_INPUT",
+    JSON.stringify(out.map((a) => a.type)));
+check("and it carries the evidence, not a score",
+    /no keystroke/.test(out[0].detail) && /45 of the last 60/.test(out[0].detail),
+    out[0].detail);
+// AN ACCUSATION IS NOT AN EMERGENCY. It is worth a look and a conversation,
+// and it is a guess — so it sits below "the app has stopped reporting".
+check("it is reported as worth a look, not as an outage",
+    out[0].severity === "MEDIUM", out[0].severity);
+check("and it says out loud that it is not proof",
+    /not proof/.test(out[0].detail), out[0].detail);
+
+// ONE KEYSTROKE ENDS IT. A jiggler produces none at all, ever, and the cost
+// of being wrong here is an accusation against a person.
+out = rules.forEmployee(automated({ keystrokes: 1 }));
+check("a single keystroke anywhere in the hour stops it",
+    out.length === 0, JSON.stringify(out.map((a) => a.type)));
+
+out = rules.forEmployee(automated({ suspicious_minutes: 45 }),
+    );
+check("the threshold is a setting like every other",
+    rules.forEmployee(facts({
+        automation: { window_minutes: 60, suspicious_minutes: 45, keystrokes: 0 },
+        settings: { alert_automation_minutes: 90 },
+    })).length === 0,
+    "45 suspicious minutes alerted against a 90 minute setting");
+
+out = rules.forEmployee(facts({ automation: null }));
+check("a client that reports nothing is not accused of anything",
+    out.length === 0, JSON.stringify(out.map((a) => a.type)));
+
 console.log("\nWho is exempt, and the master switch");
 
 out = rules.forEmployee(facts({

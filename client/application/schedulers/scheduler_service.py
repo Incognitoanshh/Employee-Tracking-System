@@ -20,6 +20,9 @@ from client.services.logger_service import LoggerService
 class SchedulerService(QObject):
 
     screenshot_triggered  = Signal()   # screenshot lene ka waqt aa gaya
+    # An administrator asked for one, by hand, for this person — carrying the
+    # id of the request so the capture can say which one it answers.
+    capture_requested     = Signal(int)
     # Carries the reason so the panel can say WHY it is signing out. An
     # unexplained logout is indistinguishable from a crash.
     force_logout          = Signal(str)
@@ -332,6 +335,7 @@ class SchedulerService(QObject):
                 SyncManager.retry_uploads()
                 SyncManager.retry_logs()
                 SyncManager.push_idle_totals()
+                SyncManager.push_activity_minutes()
                 # Success - reset to base interval (60s)
                 self._sync_failures = 0
                 self._sync_interval = 60
@@ -386,6 +390,7 @@ class SchedulerService(QObject):
             auth_token      = SessionManager.auth_token,
             on_new_config   = self._apply_new_config,
             on_force_logout = self._handle_force_logout,
+            on_capture_now  = self._handle_capture_now,
             sync_interval   = 5,
         )
         self._config_sync.start()
@@ -458,6 +463,21 @@ class SchedulerService(QObject):
     @Slot()
     def _do_reschedule(self):
         self.reschedule()
+
+    def _handle_capture_now(self, request_id: int):
+        """Hop to the main thread, where a screenshot may be taken.
+
+        ConfigSyncManager polls on a thread of its own, and a capture reaches
+        Qt (the screen, the panel's counters) — so this crosses over the same
+        way a forced logout does rather than doing the work where it lands.
+        """
+        self._capture_request_id = int(request_id)
+        QMetaObject.invokeMethod(self, "_emit_capture_requested",
+                                 Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def _emit_capture_requested(self):
+        self.capture_requested.emit(getattr(self, "_capture_request_id", 0))
 
     def _handle_force_logout(self, reason: str = ""):
         self._logout_reason = reason

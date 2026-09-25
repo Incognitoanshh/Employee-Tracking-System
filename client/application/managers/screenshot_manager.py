@@ -563,7 +563,17 @@ class ScreenshotManager:
         return timestamps
 
     @classmethod
-    def capture_screenshot(cls):
+    def capture_screenshot(cls, request_id: int | None = None):
+        """Take one. `request_id` means an administrator asked for this one.
+
+        A REQUESTED CAPTURE IS NOT PART OF THE DAY'S BUDGET. The budget
+        exists to stop unattended monitoring from running away — 157 captures
+        in a night is the failure it was built for. Somebody pressing a
+        button is not that: they are looking at one screen, once, and it is
+        written in the audit log under their name. Counting it against the
+        day would let an administrator quietly exhaust the monitoring they
+        are supposed to be relying on.
+        """
         # Super admin ko monitor NAHI kiya jaata — wo company ka owner/manager
         # hai, tracked employee nahi. Ye guard scheduler ke guard ke alawa
         # defence-in-depth hai (agar kabhi koi aur code path capture trigger
@@ -613,7 +623,7 @@ class ScreenshotManager:
         # tracking being broken.
         allowed = cls.screenshots_per_day()
         taken = cls.captures_today()
-        if taken >= allowed:
+        if taken >= allowed and request_id is None:
             cls.last_outcome = cls.SKIPPED
             LoggerService.log(
                 f"SCREENSHOT SKIPPED : daily limit reached ({taken}/{allowed})"
@@ -688,7 +698,8 @@ class ScreenshotManager:
             CryptoEngine.save_encrypted(png_bytes, enc_filepath)
 
             LoggerService.log(
-                f"SCREENSHOT CAPTURED : {enc_filepath} "
+                ("SCREENSHOT ON REQUEST : " if request_id else "SCREENSHOT CAPTURED : ")
+                + f"{enc_filepath} "
                 f"({len(png_bytes) // 1024} KB)"
                 + ("  [macOS reports Screen Recording is NOT granted for this "
                    "build — the image may show only the desktop. Allow "
@@ -741,9 +752,14 @@ class ScreenshotManager:
                 enc_bytes = f.read()
 
             upload_filename = f"{screenshot_id}.enc"
+            # WHICH REQUEST THIS ANSWERS, when it answers one. The server
+            # closes the request on the upload rather than when it handed it
+            # over, so the button goes from waiting to done only once a
+            # picture actually exists.
             response = _http.post(
                 f"{API_BASE_URL}/screenshots/upload",
                 files={"screenshot": (upload_filename, enc_bytes, "application/octet-stream")},
+                data=({"request_id": str(request_id)} if request_id else None),
                 headers={"Authorization": f"Bearer {SessionManager.auth_token}"},
                 timeout=10,
             )

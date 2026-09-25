@@ -23,6 +23,10 @@ const AUDIT_PREFIXES = [
     "PASSWORD CHANGED",
     "PASSWORD RESET",
     "SCREENSHOTS DELETED",
+    // An administrator asking for somebody's screen on demand. Kept with the
+    // other administrative acts: "who looked at my screen, and when" is a
+    // question asked long after the noise has been purged.
+    "SCREENSHOT REQUESTED",
     "RETENTION CHANGED",
     "ROLE CHANGED",
     "EMPLOYEE CREATED",

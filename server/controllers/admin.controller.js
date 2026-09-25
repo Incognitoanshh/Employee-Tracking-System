@@ -1695,6 +1695,125 @@ exports.toggleVerboseLogging = async (req, res) => {
     }
 };
 
+// ── A SCREENSHOT AN ADMINISTRATOR ASKS FOR ─────────────────────────────
+//
+// "Agar employee online and working hai to button click and uska current
+// screenshot aa jaye." The schedule takes pictures at moments nobody
+// chooses; this is the other half — somebody is on a call about what is on
+// that screen right now.
+//
+// THE CLIENT CANNOT BE CALLED. It polls: /api/config/sync every five
+// seconds. So the request is written down, the next sync carries it, and
+// the upload that follows names the request it answers. From the click to
+// the picture is one poll, not one round trip.
+//
+// ONLY WHILE THEY ARE ONLINE. Queuing it for later would hand an
+// administrator a picture from whenever the app next opened, under a button
+// that says "now" — hours of difference, invisible on the screen. Offline
+// is answered as offline.
+const SCREENSHOT_REQUEST_EXPIRY_MINUTES = 5;
+
+exports.requestScreenshot = async (req, res) => {
+    const employee_id = req.params.employee_id;
+    if (!employee_id) {
+        return res.status(400).json({ success: false, message: "Which employee?" });
+    }
+    try {
+        const target = await pool.query(
+            `SELECT e.employee_id, e.role, COALESCE(e.full_name, e.username) AS name,
+                    ${isOnlineSql("e")} AS is_online
+               FROM employees e WHERE e.employee_id = $1`, [employee_id]);
+        if (target.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Employee not found" });
+        }
+        const person = target.rows[0];
+        // The owner is not a monitored employee — the same rule the capture
+        // itself follows, stated here so the button never even asks.
+        if (person.role === ROLE_SUPER_ADMIN) {
+            return res.status(403).json({
+                success: false,
+                message: "A super admin is not monitored, so there is no screen to ask for.",
+            });
+        }
+        if (!person.is_online) {
+            return res.status(409).json({
+                success: false,
+                message: `${person.name} is not online — a screenshot can only be taken while their app is running.`,
+            });
+        }
+
+        // Anything older than the expiry was never answered: the app closed
+        // between the click and the poll. Clear those first so a stale row
+        // cannot be mistaken for the request just made.
+        await pool.query(
+            `UPDATE screenshot_requests SET status = 'EXPIRED'
+              WHERE status = 'PENDING'
+                AND requested_at < (NOW() AT TIME ZONE 'UTC')
+                                   - ($1 || ' minutes')::interval`,
+            [String(SCREENSHOT_REQUEST_EXPIRY_MINUTES)]);
+
+        // ONE AT A TIME. Two clicks on a slow network must not take two
+        // pictures a second apart and leave the second request pending
+        // forever; the second click joins the first.
+        const pending = await pool.query(
+            `SELECT id FROM screenshot_requests
+              WHERE employee_id = $1 AND status = 'PENDING'
+              ORDER BY id DESC LIMIT 1`, [employee_id]);
+        if (pending.rows.length > 0) {
+            return res.json({ success: true, request_id: pending.rows[0].id,
+                              already_waiting: true });
+        }
+
+        const row = await pool.query(
+            `INSERT INTO screenshot_requests (employee_id, requested_by)
+             VALUES ($1, $2) RETURNING id`,
+            [employee_id, req.employee?.employee_id || "an admin"]);
+
+        // ON THE RECORD. Looking at somebody's screen on demand is an act an
+        // administrator may have to answer for later, so it is written where
+        // administrative acts are kept — and it is kept for as long as they
+        // are (see utils/audit_events).
+        await pool.query(
+            `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
+            [employee_id,
+             `SCREENSHOT REQUESTED : by ${req.employee?.employee_id || "an admin"}`]);
+
+        return res.json({ success: true, request_id: row.rows[0].id });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+// What came of it — the page asks this while it waits, and stops asking when
+// the answer is no longer PENDING.
+exports.screenshotRequestStatus = async (req, res) => {
+    try {
+        const row = await pool.query(
+            `SELECT id, employee_id, status, screenshot_id,
+                    requested_at, taken_at,
+                    EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'UTC') - requested_at))::int AS waited_seconds
+               FROM screenshot_requests WHERE id = $1`, [idOf(req.params.id)]);
+        if (row.rows.length === 0) {
+            return res.status(404).json({ success: false, message: "No such request" });
+        }
+        const request = row.rows[0];
+        // Time it out on the way past rather than waiting for the next
+        // click: a page that polls a dead request would poll for ever.
+        if (request.status === "PENDING"
+            && request.waited_seconds > SCREENSHOT_REQUEST_EXPIRY_MINUTES * 60) {
+            await pool.query(
+                `UPDATE screenshot_requests SET status = 'EXPIRED' WHERE id = $1`,
+                [request.id]);
+            request.status = "EXPIRED";
+        }
+        return res.json({ success: true, request });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
 exports.forceLogout = async (req, res) => {
     const { employee_id } = req.body || {};
 

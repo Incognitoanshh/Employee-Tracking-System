@@ -24,6 +24,10 @@ class ConfigSyncManager:
         auth_token:       str,
         on_new_config:    Optional[Callable[[dict], None]] = None,
         on_force_logout:  Optional[Callable[[], None]]     = None,
+        # An administrator pressed "take a screenshot now". Nothing can call
+        # this client, so the request rides back on this poll — the same way
+        # force_logout already does.
+        on_capture_now:   Optional[Callable[[int], None]]  = None,
         sync_interval:    int = DEFAULT_SYNC_INTERVAL_SECONDS,
     ) -> None:
         self._employee_id     = employee_id
@@ -31,6 +35,7 @@ class ConfigSyncManager:
         self._auth_token      = auth_token
         self._on_new_config   = on_new_config
         self._on_force_logout = on_force_logout
+        self._on_capture_now  = on_capture_now
         self._sync_interval   = sync_interval
         self._stop_event      = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -152,6 +157,21 @@ class ConfigSyncManager:
                 # Iska matlab tha ki force_logout ke baad bhi normal flow chal raha tha —
                 # _persist_config() call hota tha aur on_new_config bhi, jo wrong tha.
                 return config
+
+            # A SCREENSHOT SOMEBODY ASKED FOR, collected on the way past.
+            #
+            # Before the config is applied, because it has nothing to do with
+            # configuration and must not wait for a reschedule. Failures
+            # belong to the capture, not to the sync: a picture that cannot
+            # be taken must not stop the settings from arriving.
+            requested = config.get("capture_now")
+            if requested and self._on_capture_now:
+                try:
+                    self._on_capture_now(int(requested))
+                except Exception as error:      # noqa: BLE001
+                    LoggerService.log(
+                        f"ConfigSyncManager: capture request {requested} could "
+                        f"not be started — {error}")
 
             # Normal flow.
             #

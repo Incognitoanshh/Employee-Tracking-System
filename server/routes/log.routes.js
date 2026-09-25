@@ -18,5 +18,11 @@ router.post(
     "/idle-daily",
     logController.recordIdleDaily
 );
+// What kind of minutes those idle seconds were made of — see
+// utils/alert_rules.js, which is the only thing that reads them.
+router.post(
+    "/activity-minutes",
+    logController.recordActivityMinutes
+);
 
 module.exports = router;
