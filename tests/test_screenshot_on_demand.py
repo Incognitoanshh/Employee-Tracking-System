@@ -179,8 +179,16 @@ try:
     taken = ScreenshotManager.capture_screenshot(request_id=77)
     check("but one that was asked for is taken anyway",
           taken is not None, str(lines)[:160])
-    check("and is recorded as asked for, not as a scheduled one",
-          any("ON REQUEST" in m for m in lines), str(lines)[:160])
+    # AND IT LOOKS EXACTLY LIKE ANY OTHER CAPTURE. These lines are uploaded
+    # and shown in the employee's own Recent Activity, so "SCREENSHOT ON
+    # REQUEST" told them, on their own screen, the moment somebody chose to
+    # look at it — "employee ko pata nahi chalna chahiye ki request kiya
+    # hai". What answered which request lives on the server instead.
+    check("and nothing in what the employee can see says it was asked for",
+          not any("REQUEST" in m.upper() for m in lines), str(lines)[:200])
+    scheduled_wording = [m for m in lines if "SCREENSHOT CAPTURED" in m]
+    check("it is worded exactly like a scheduled capture",
+          len(scheduled_wording) == 1, str(lines)[:200])
     check("it is stored like any other", rows_now() == before + 1,
           f"{before} -> {rows_now()}")
     # WITHOUT THIS THE BUTTON WAITS FOR EVER. The server closes the request
@@ -208,82 +216,43 @@ finally:
 
 print("\nThe button an administrator presses")
 
+# IT IS NOT ON THE PERSON'S PAGE, and that is deliberate. It was put beside
+# their NAME, which is an identity and not a place for an action — said
+# plainly: "screenshot wala naam ke andar kyu diya". It lives on the Tracker
+# board now, where somebody is already deciding whose screen to look at, and
+# tests/test_tracker_tab.py is where the button itself is checked.
 from client.presentation.windows import admin_config_panel as panel          # noqa: E402
-
-posts = []
-
-
-class _CaptureFetch:
-    def __init__(self, url, params=None, *a, **k):
-        posts.append(("GET", url))
-
-    def __getattr__(self, _name):
-        return type("_Sig", (), {"connect": lambda *_a, **_k: None})()
-
-    def start(self):
-        pass
-
-
-class _CapturePost:
-    def __init__(self, url, body=None, *a, **k):
-        posts.append(("POST", url))
-
-    def __getattr__(self, _name):
-        return type("_Sig", (), {"connect": lambda *_a, **_k: None})()
-
-    def start(self):
-        pass
-
 
 real_fetch, real_post_worker, real_track = (
     panel._FetchWorker, panel._PostWorker, panel._track_worker)
+
+
+class _Dead:
+    def __init__(self, *a, **k):
+        pass
+
+    def __getattr__(self, _name):
+        return type("_Sig", (), {"connect": lambda *_a, **_k: None})()
+
+    def start(self):
+        pass
+
+
 try:
-    panel._FetchWorker = _CaptureFetch
-    panel._PostWorker = _CapturePost
+    panel._FetchWorker = _Dead
+    panel._PostWorker = _Dead
     panel._track_worker = lambda *a, **k: None
 
     page = panel.EmployeePage()
     page.load({"employee_id": "E001", "username": "rajesh",
                "full_name": "Rajesh Kumar", "role": "employee"})
-    check("the button is off until we know they are online",
-          not page._shot_now.isEnabled())
-    check("and says that is why, rather than just being grey",
-          "not online" in page._shot_now.toolTip(), page._shot_now.toolTip())
-
-    page._employee_online = True
-    page._update_capture_button()
-    check("online, it can be pressed", page._shot_now.isEnabled())
-    check("and says what pressing it does, and that it is recorded",
-          "right now" in page._shot_now.toolTip()
-          and "audit" in page._shot_now.toolTip(), page._shot_now.toolTip())
-
-    posts.clear()
-    page._request_screenshot()
-    check("pressing it asks the server for this employee",
-          posts and posts[-1] == ("POST", f"{panel.API_BASE_URL}/admin/employees/E001/screenshot"),
-          str(posts[-1] if posts else "nothing"))
-
-    page._capture_asked({"success": True, "request_id": 5})
-    check("then it waits rather than claiming a picture exists",
-          not page._shot_now.isEnabled() and "Wait" in page._shot_now.text(),
-          page._shot_now.text())
-    check("and the page polls for the answer",
-          page._capture_timer.isActive())
-
-    page._capture_polled({"request": {"status": "PENDING"}})
-    check("a request still pending keeps it waiting",
-          page._capture_timer.isActive() and not page._shot_now.isEnabled())
-
-    real_info = panel.QMessageBox.information
-    panel.QMessageBox.information = staticmethod(lambda *a, **k: None)
-    try:
-        page._capture_polled({"request": {"status": "TAKEN", "screenshot_id": 9}})
-    finally:
-        panel.QMessageBox.information = real_info
-    check("a picture ends the wait and frees the button",
-          page._shot_now.isEnabled() and not page._capture_timer.isActive()
-          and page._shot_now.text() == "Screenshot now", page._shot_now.text())
-
+    check("the person's own page carries no capture button beside their name",
+          not hasattr(page, "_shot_now"))
+    check("and none of its machinery is left behind either",
+          not hasattr(page, "_request_screenshot"))
+    check("while the board that does have it is a page of its own",
+          any(entry.get("key") == "tracker" for entry in panel.PAGES),
+          str([entry.get("key") for entry in panel.PAGES]))
     page.deleteLater()
     app.processEvents()
 finally:

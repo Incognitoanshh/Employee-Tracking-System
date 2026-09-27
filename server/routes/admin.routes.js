@@ -100,6 +100,8 @@ router.get("/reports/audit", superAdminOnly, reportCtrl.getAuditReport);
 router.get("/holidays",                  adminCtrl.getHolidays);
 router.post("/holidays",                 adminCtrl.addHoliday);
 router.delete("/holidays/:holiday_date", adminCtrl.deleteHoliday);
+// Everybody's live state in one answer — see adminCtrl.tracker.
+router.get("/tracker", adminCtrl.tracker);
 router.post("/force-logout",       adminCtrl.forceLogout);  // Force logout employee
 // A screenshot asked for by hand, rather than one the schedule took. The
 // request is written down here and collected by the employee's next config

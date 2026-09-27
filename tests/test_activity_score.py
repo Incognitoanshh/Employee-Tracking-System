@@ -219,6 +219,55 @@ try:
     tracker.sample()
     check("a change of application is noticed",
           tracker._minute.window_changes == 1, str(tracker._minute.window_changes))
+
+    # ── THE SAME MINUTE, STORED TWICE ─────────────────────────────────────
+    #
+    # A clock that steps backwards — an NTP correction after the laptop wakes
+    # is the everyday one — makes the next minute land on a stamp already
+    # written. Two rows with one stamp is a batch the server cannot accept,
+    # and the client keeps retrying that batch: from then on NOTHING about
+    # this employee's activity ever uploads again, and nothing says so.
+    import client.core.time_ist as time_ist_mod
+    from datetime import datetime
+
+    frozen = datetime(2026, 9, 27, 11, 30, 40)
+    real_now = tracker_mod.now_ist
+    try:
+        tracker_mod.now_ist = lambda: frozen
+        with Database.get_connection() as conn:
+            before = conn.execute(
+                "SELECT COUNT(*) AS n FROM activity_minutes").fetchone()["n"]
+        tracker._store({"score": 20, "band": "LOW", "keystrokes": 1, "clicks": 0,
+                        "scrolls": 0, "mouse_moves": 4, "window_changes": 0,
+                        "automation_suspected": False, "reasons": ["first"]})
+        # Reported rather than raised: without the upsert this is a UNIQUE
+        # violation, and a crash here says less than a named failure does.
+        stored_again = True
+        try:
+            tracker._store({"score": 55, "band": "LOW", "keystrokes": 9, "clicks": 2,
+                            "scrolls": 0, "mouse_moves": 7, "window_changes": 1,
+                            "automation_suspected": False,
+                            "reasons": ["keyboard", "corrected"]})
+        except Exception as error:                                  # noqa: BLE001
+            stored_again = False
+            check("the same minute can be stored again at all", False, str(error))
+        with Database.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT score, reasons, uploaded FROM activity_minutes "
+                "WHERE minute = ?", ("2026-09-27 11:30:00",)).fetchall()
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM activity_minutes").fetchone()["n"]
+        check("a minute stored twice is one row, not two",
+              stored_again and len(rows) == 1, str([dict(r) for r in rows]))
+        check("and it is the corrected copy that is kept",
+              len(rows) == 1 and rows[0]["score"] == 55
+              and rows[0]["reasons"] == "keyboard, corrected", str([dict(r) for r in rows]))
+        check("still waiting to be sent, so the correction travels",
+              len(rows) == 1 and rows[0]["uploaded"] == 0, str([dict(r) for r in rows]))
+        check("and nothing else in the table was disturbed", total == before + 1,
+              f"{before} -> {total}")
+    finally:
+        tracker_mod.now_ist = real_now
 finally:
     (tracker_mod.read_counters, tracker_mod.last_input_ms,
      tracker_mod.foreground_window) = real

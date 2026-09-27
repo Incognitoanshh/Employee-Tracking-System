@@ -181,7 +181,19 @@ async function collectAlerts() {
                     AS suspicious_minutes,
                 COALESCE(SUM(keystrokes), 0)::int AS keystrokes
            FROM activity_minutes
-          WHERE minute > (NOW() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
+          -- THE CLIENT'S CLOCK, NOT UTC.
+          --
+          -- BUG this fixes: this read "(NOW() AT TIME ZONE 'UTC')". The
+          -- minute column carries the employee's own wall clock (IST, the
+          -- same convention as idle_daily.day), which is five and a half
+          -- hours ahead of UTC — so "the last 60 minutes" actually reached
+          -- back six and a half hours. An afternoon's worth of minutes was
+          -- gathered into a sentence that said "30 of the last 60", and the
+          -- keystrokes drawn in from hours earlier could equally silence a
+          -- jiggler running right now. Found by driving the tracker rather
+          -- than by reading it.
+          WHERE minute > (NOW() AT TIME ZONE 'Asia/Kolkata')
+                         - ($1 || ' minutes')::interval
           GROUP BY employee_id`, [String(automationWindowMinutes)]);
     const automationBy = new Map(automation.rows.map((r) => [r.employee_id, r]));
 

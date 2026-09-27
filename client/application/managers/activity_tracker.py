@@ -260,6 +260,19 @@ class ActivityTracker(QObject):
                      scrolls, mouse_moves, window_changes, automation_suspected,
                      reasons, uploaded)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                -- THE SAME MINUTE AGAIN CORRECTS IT. A clock that steps
+                -- backwards (an NTP correction after sleep is the common
+                -- one) makes the next minute land on a stamp already
+                -- written; two rows with one stamp are a batch Postgres
+                -- refuses, and then nothing from this employee uploads
+                -- again. Marked unsent, so the corrected copy is sent.
+                ON CONFLICT (employee_id, minute) DO UPDATE SET
+                    score = excluded.score, band = excluded.band,
+                    keystrokes = excluded.keystrokes, clicks = excluded.clicks,
+                    scrolls = excluded.scrolls, mouse_moves = excluded.mouse_moves,
+                    window_changes = excluded.window_changes,
+                    automation_suspected = excluded.automation_suspected,
+                    reasons = excluded.reasons, uploaded = 0
                 """,
                 (SessionManager.employee_id,
                  now_ist().strftime("%Y-%m-%d %H:%M:00"),

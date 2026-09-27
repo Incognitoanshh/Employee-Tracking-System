@@ -1,7 +1,8 @@
 const pool = require("../config/db");
 const { pageOf, limitOf, idOf, textOf } = require("../utils/request_params");
 const { endSession, markLoggedIn } = require("../utils/session");
-const { isOnlineSql } = require("../utils/presence");
+const { isOnlineSql, MAX_SHIFT_HOURS } = require("../utils/presence");
+const live = require("../utils/live_activity");
 const { closeShiftFor } = require("../utils/attendance_cleanup");
 const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 const {
@@ -1769,14 +1770,23 @@ exports.requestScreenshot = async (req, res) => {
              VALUES ($1, $2) RETURNING id`,
             [employee_id, req.employee?.employee_id || "an admin"]);
 
-        // ON THE RECORD. Looking at somebody's screen on demand is an act an
-        // administrator may have to answer for later, so it is written where
-        // administrative acts are kept — and it is kept for as long as they
-        // are (see utils/audit_events).
+        // ON THE RECORD — UNDER THE ADMINISTRATOR, NOT THE EMPLOYEE.
+        //
+        // It was written against the employee, and activity_logs is what
+        // their own Recent Activity feed shows: "SCREENSHOT REQUESTED : by
+        // SA001" appeared on the screen of the person being watched, which
+        // is the opposite of what was asked for — "employee ko pata nahi
+        // chalna chahiye ki request kiya hai".
+        //
+        // Filed under the administrator it belongs to, it is still a
+        // permanent record of who looked at whose screen and when — kept as
+        // long as the other administrative acts (see utils/audit_events) —
+        // and it is in the feed of the person who did it rather than the
+        // person it was done to.
         await pool.query(
             `INSERT INTO activity_logs (employee_id, activity) VALUES ($1, $2)`,
-            [employee_id,
-             `SCREENSHOT REQUESTED : by ${req.employee?.employee_id || "an admin"}`]);
+            [req.employee?.employee_id || "an admin",
+             `SCREENSHOT REQUESTED : ${person.name} (${employee_id})`]);
 
         return res.json({ success: true, request_id: row.rows[0].id });
     } catch (error) {
@@ -2121,54 +2131,14 @@ exports.getEmployeeDetails = async (req, res) => {
             [employee_id]
         );
 
-        let activeMs = 0;
-        let idleMs   = 0;
-
-        const normalizeState = (activity) => {
-            const a = (activity || "").toUpperCase();
-            if (a.includes("USER IDLE"))   return "IDLE";
-            if (a.includes("USER ACTIVE")) return "ACTIVE";
-            return null;
-        };
-
-        // created_at raw string aati hai (db.js identity type-parser).
-        // `new Date(str)` process ki ambient TZ use karta — explicitly UTC.
-        const parseUtc = (s) => new Date(String(s).replace(" ", "T") + "Z").getTime();
-
-        const evts = events.rows
-            .map(r => ({ t: parseUtc(r.created_at), s: normalizeState(r.activity) }))
-            .filter(e => e.s && Number.isFinite(e.t));
-
-        for (const row of sessions.rows) {
-            const sStart = parseUtc(row.login_time);
-            const sEnd   = parseUtc(row.end_time);
-            if (!Number.isFinite(sStart) || !Number.isFinite(sEnd) || sEnd <= sStart) continue;
-
-            // Is session ke andar ke events
-            const inSession = evts.filter(e => e.t >= sStart && e.t <= sEnd);
-
-            // Session start se pehle event tak — employee abhi abhi login
-            // hua hai, use ACTIVE maano.
-            let cursor = sStart;
-            let state  = "ACTIVE";
-
-            for (const e of inSession) {
-                const dt = e.t - cursor;
-                if (dt > 0) {
-                    if (state === "ACTIVE") activeMs += dt;
-                    else                    idleMs   += dt;
-                }
-                state  = e.s;
-                cursor = e.t;
-            }
-
-            // Aakhri event se session end tak
-            const tail = sEnd - cursor;
-            if (tail > 0) {
-                if (state === "ACTIVE") activeMs += tail;
-                else                    idleMs   += tail;
-            }
-        }
+        // THE SAME ARITHMETIC THE TRACKER BOARD USES — see
+        // utils/live_activity. It was written out here and would have been
+        // written out a second time for the board; two copies of "how much
+        // of today was worked" disagree the first time one is fixed, and
+        // then neither number can be shown to be wrong.
+        const summary = live.summarise(sessions.rows, events.rows, Date.now());
+        const activeMs = summary.activeMs;
+        const idleMs = summary.idleMs;
 
         const formatDur = (ms) => {
             const totalSec = Math.floor(ms / 1000);
@@ -2196,6 +2166,119 @@ exports.getEmployeeDetails = async (req, res) => {
 
     } catch (err) {
         console.error("[500]", req.method, req.originalUrl, err.message);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+// ── THE TRACKER BOARD ──────────────────────────────────────────────────
+//
+// Everybody at once: who is working, who is idle and for how long, who has
+// been at it without a break for an hour, and the last picture of each
+// screen. It exists because the answer to "what is the team doing right
+// now" was eight clicks through eight pages, one person at a time.
+//
+// ONE QUERY PER FACT, NOT PER PERSON. Four questions asked of the whole
+// company and joined in memory, rather than four per employee — which at a
+// hundred people is four hundred round trips and a page that never
+// finishes. The same rule the alerts controller already follows.
+//
+// AND THE SAME ARITHMETIC AS THE PERSON'S OWN PAGE. Active and idle come
+// from utils/live_activity, which both screens now use, because two
+// implementations of "how much of today was worked" disagree the first time
+// one of them is fixed.
+exports.tracker = async (req, res) => {
+    // Admin-ness is the router's job here — /api/admin/* is behind
+    // adminOnly, like every other route in this file. A second check in
+    // this one function would be the only one of its kind and would read as
+    // though the others had been forgotten.
+    try {
+        const people = await pool.query(
+            `SELECT e.employee_id, e.username, e.full_name, e.designation,
+                    e.department, e.role, e.photo, e.suspended,
+                    ${isOnlineSql("e")} AS is_online
+               FROM employees e
+              WHERE e.role <> 'super_admin' AND COALESCE(e.suspended, FALSE) = FALSE
+              ORDER BY COALESCE(e.full_name, e.username)`);
+
+        // THE SHIFT THAT IS RUNNING, not the calendar day.
+        //
+        // This asked for today's rows in IST, and at half past midnight that
+        // is a board with nobody on it: somebody who started at eleven and
+        // is still working belongs to yesterday's date. A night shift would
+        // have read as an empty office every night — caught by the suite
+        // happening to run at 00:30. So: any shift still open (bounded, as
+        // everywhere else, by the longest a shift may be) plus the ones that
+        // started today.
+        const sessions = await pool.query(
+            `SELECT employee_id, login_time,
+                    COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) AS end_time
+               FROM attendance
+              WHERE (logout_time IS NULL
+                     AND login_time > (NOW() AT TIME ZONE 'UTC')
+                                      - INTERVAL '${MAX_SHIFT_HOURS} hours')
+                 OR ${istDate("login_time")} = ${istToday()}`);
+
+        // A day of events, for the same reason. summarise() only counts the
+        // ones that fall inside a session, so a wider window costs nothing
+        // and a narrower one loses the night.
+        const events = await pool.query(
+            `SELECT employee_id, created_at, activity
+               FROM activity_logs
+              WHERE created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
+                AND (UPPER(activity) LIKE '%USER ACTIVE%'
+                     OR UPPER(activity) LIKE '%USER IDLE%')
+              ORDER BY created_at`);
+
+        const shots = await pool.query(
+            `SELECT DISTINCT ON (employee_id)
+                    employee_id, id, created_at
+               FROM screenshots
+              ORDER BY employee_id, created_at DESC`);
+
+        const byEmployee = (rows) => {
+            const map = new Map();
+            for (const row of rows) {
+                if (!map.has(row.employee_id)) map.set(row.employee_id, []);
+                map.get(row.employee_id).push(row);
+            }
+            return map;
+        };
+        const sessionsBy = byEmployee(sessions.rows);
+        const eventsBy = byEmployee(events.rows);
+        const shotBy = new Map(shots.rows.map((r) => [r.employee_id, r]));
+        const now = Date.now();
+
+        const board = people.rows.map((person) => {
+            const summary = live.summarise(
+                sessionsBy.get(person.employee_id) || [],
+                eventsBy.get(person.employee_id) || [],
+                now);
+            const shot = shotBy.get(person.employee_id) || null;
+            // OFFLINE IS ITS OWN STATE, not a kind of idle. Somebody whose
+            // app is closed is not sitting at a desk doing nothing, and
+            // colouring them the same amber says they are.
+            const state = !person.is_online ? "OFFLINE" : (summary.state || "ACTIVE");
+            return {
+                employee_id: person.employee_id,
+                name: person.full_name || person.username,
+                designation: person.designation || "",
+                department: person.department || "",
+                role: person.role,
+                has_photo: Boolean(person.photo),
+                state,
+                idle_seconds: Math.round(summary.idleForMs / 1000),
+                working_seconds: state === "ACTIVE"
+                    ? Math.round(summary.workingStreakMs / 1000) : 0,
+                active_today: live.formatDuration(summary.activeMs),
+                idle_today: live.formatDuration(summary.idleMs),
+                last_screenshot_id: shot ? shot.id : null,
+                last_screenshot_at: shot ? shot.created_at : null,
+            };
+        });
+
+        return res.json({ success: true, data: board, at: new Date().toISOString() });
+    } catch (error) {
+        console.error("[500]", req.method, req.originalUrl, error.message);
         return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };

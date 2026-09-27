@@ -9,6 +9,9 @@
 CREATE TABLE IF NOT EXISTS activity_minutes (
     id                   BIGSERIAL PRIMARY KEY,
     employee_id          VARCHAR(50) NOT NULL,
+    -- The employee's own wall clock (IST), the minute the sample covers —
+    -- not UTC. Same convention as idle_daily.day. Anything comparing it
+    -- against NOW() must convert first (see alerts.controller.js).
     minute               TIMESTAMP   NOT NULL,
     score                SMALLINT    NOT NULL,
     band                 VARCHAR(10) NOT NULL,

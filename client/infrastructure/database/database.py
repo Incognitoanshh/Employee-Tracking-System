@@ -176,6 +176,29 @@ class Database:
             )
             """)
 
+            # ONE ROW PER MINUTE, and the server's table says the same.
+            #
+            # Without this a minute stored twice — a clock that stepped
+            # backwards is enough — leaves two rows with the same stamp, and
+            # the batch carrying both is refused by Postgres for ever: that
+            # employee's minutes never upload again, silently. Existing
+            # duplicates are folded first, keeping the newest of each, or the
+            # index could not be created on a database that already has them.
+            try:
+                cursor.execute("""
+                DELETE FROM activity_minutes
+                 WHERE id NOT IN (SELECT MAX(id) FROM activity_minutes
+                                   GROUP BY employee_id, minute)
+                """)
+                cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_minutes_unique
+                    ON activity_minutes (employee_id, minute)
+                """)
+            except Exception:
+                # An older database that cannot be folded is left as it is;
+                # the server handles duplicates too, so nothing is lost.
+                pass
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS shifts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

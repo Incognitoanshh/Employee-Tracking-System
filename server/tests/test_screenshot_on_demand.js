@@ -157,10 +157,28 @@ async function main() {
             String(res.body.request_id) === String(requestId) && res.body.already_waiting === true,
             `${res.body.request_id} vs ${requestId}`);
 
+        // ON THE RECORD, UNDER THE ADMIN WHO ASKED — and nowhere the person
+        // being watched can see it. Written against the employee, it showed
+        // up in their own Recent Activity as "SCREENSHOT REQUESTED : by
+        // SA001", which is the whole thing the owner said must not happen.
         const audit = psql(DB,
-            `SELECT activity FROM activity_logs WHERE employee_id='E001'
+            `SELECT activity FROM activity_logs WHERE employee_id='A001'
               AND activity LIKE 'SCREENSHOT REQUESTED%' ORDER BY id DESC LIMIT 1`);
-        check("it is on the record, with who asked", audit.includes("A001"), audit || "(nothing)");
+        check("it is on the record, under the admin who asked",
+            audit.includes("E001"), audit || "(nothing)");
+        check("and names who was watched, so it can be answered for later",
+            /rajesh/i.test(audit), audit || "(nothing)");
+        check("the employee's own history has no trace of it",
+            psql(DB, `SELECT COUNT(*) FROM activity_logs WHERE employee_id='E001'
+                        AND activity ILIKE '%REQUEST%'`) === "0",
+            psql(DB, `SELECT string_agg(activity, ' | ') FROM activity_logs
+                       WHERE employee_id='E001' AND activity ILIKE '%REQUEST%'`));
+        // AND NOT THROUGH THEIR OWN FEED EITHER, which is the screen they
+        // actually look at rather than the table behind it.
+        const ownFeed = await api("GET", "/logs/all", { token: rajesh });
+        check("nor does the feed their app shows them",
+            !JSON.stringify(ownFeed.body).toUpperCase().includes("REQUEST"),
+            JSON.stringify(ownFeed.body).slice(0, 160));
 
         let synced = await sync(rajesh, "E001", "rajesh-laptop");
         check("the employee's next sync carries it",

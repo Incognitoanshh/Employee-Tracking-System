@@ -135,11 +135,28 @@ exports.recordActivityMinutes = async (req, res) => {
         ]);
     }
 
+    // THE SAME MINUTE TWICE IN ONE BATCH IS NOT AN ERROR.
+    //
+    // BUG this fixes: a batch carrying one minute twice — which a client
+    // produces if its clock steps backwards, and which this file's own test
+    // produced within seconds — made Postgres refuse the whole statement
+    // ("ON CONFLICT DO UPDATE cannot affect row a second time"), so the
+    // employee got a 500. The client then leaves those minutes unsent and
+    // retries the same batch on every tick, for ever: from that moment on,
+    // NOTHING about that person's activity ever reaches the server again,
+    // and the automation rule quietly has nothing to read. Silent and
+    // permanent, which is the worst shape a monitoring bug can take.
+    //
+    // Later wins, the same as the upsert below: it is the corrected copy.
+    const byMinute = new Map();
+    for (const row of rows) byMinute.set(`${row[0]}|${row[1]}`, row);
+    const unique = [...byMinute.values()];
+
     try {
         // ONE STATEMENT, NOT ONE PER ROW. And the same minute sent twice —
         // a batch that was accepted and then retried after a dropped
         // connection — updates rather than doubling the day.
-        const values = rows.map((_row, i) => {
+        const values = unique.map((_row, i) => {
             const at = i * 11;
             return `($${at + 1}, $${at + 2}::timestamp, $${at + 3}, $${at + 4}, $${at + 5}, `
                  + `$${at + 6}, $${at + 7}, $${at + 8}, $${at + 9}, $${at + 10}, $${at + 11})`;
@@ -156,8 +173,8 @@ exports.recordActivityMinutes = async (req, res) => {
                      window_changes = EXCLUDED.window_changes,
                      automation_suspected = EXCLUDED.automation_suspected,
                      reasons = EXCLUDED.reasons`,
-            rows.flat());
-        return res.json({ success: true, stored: rows.length });
+            unique.flat());
+        return res.json({ success: true, stored: unique.length });
     } catch (error) {
         console.error("[500]", req.method, req.originalUrl, error.message);
         return res.status(500).json({ success: false, message: "Internal server error" });

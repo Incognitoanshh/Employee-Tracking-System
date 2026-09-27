@@ -163,10 +163,36 @@ try:
                           f"{cell.sizeHint().width()}")
     check("the person column never shrinks below what it has to draw",
           not narrow, "; ".join(narrow))
-    check("and the email column is the one that gives way",
-          tab._table.horizontalHeader().sectionResizeMode(1)
-          == panel.QHeaderView.ResizeMode.Stretch,
-          str(tab._table.horizontalHeader().sectionResizeMode(1)))
+    # AND THE WHOLE TABLE FITS THE WINDOW. It did not: at the size the
+    # console opens at, the columns needed 1050px in the 962 they had, so
+    # the Actions column was cut off the right-hand edge and a horizontal
+    # scrollbar sat under the rows — over the two buttons somebody had come
+    # to press. Reported in those words: "har jagah UI me chod kiye hue ho".
+    #
+    # The address is what gives way, because a clipped address is still
+    # recognisable; the buttons and the name are not allowed to.
+    spills = []
+    widths = {}
+    for width in (1600, 1250, 1080, 900):
+        tab.resize(width, 420)
+        tab.show()
+        for _ in range(3):
+            app.processEvents()
+        need = sum(tab._table.columnWidth(c)
+                   for c in range(tab._table.columnCount())
+                   if not tab._table.isColumnHidden(c))
+        have = tab._table.viewport().width()
+        if need > have:
+            spills.append(f"{width}px window -> {need} in {have}")
+        widths[width] = (tab._table.columnWidth(1), tab._table.columnWidth(5))
+    check("nothing ever spills off the right-hand edge", not spills,
+          "; ".join(spills))
+    check("the address is what gives way as the window narrows",
+          widths[900][0] < widths[1600][0],
+          f"{widths[900][0]} at 900px vs {widths[1600][0]} at 1600px")
+    check("and the buttons keep their width at every size",
+          widths[900][1] == widths[1600][1],
+          f"{widths[900][1]} vs {widths[1600][1]}")
 
     # ── clicking the name ───────────────────────────────────────────────
     opened: list = []

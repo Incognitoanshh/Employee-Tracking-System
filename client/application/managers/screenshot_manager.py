@@ -697,9 +697,15 @@ class ScreenshotManager:
             enc_filepath = os.path.join(cls.STORAGE_PATH, enc_filename)
             CryptoEngine.save_encrypted(png_bytes, enc_filepath)
 
+            # THE SAME LINE FOR BOTH, deliberately. A capture somebody asked
+            # for used to log "SCREENSHOT ON REQUEST", and these lines are
+            # uploaded and shown in the employee's own activity feed — so
+            # the wording alone told them they were being watched at that
+            # moment. Which request a picture answered is on the server, in
+            # screenshot_requests, where an administrator can be held to it
+            # and the employee cannot be tipped off by it.
             LoggerService.log(
-                ("SCREENSHOT ON REQUEST : " if request_id else "SCREENSHOT CAPTURED : ")
-                + f"{enc_filepath} "
+                f"SCREENSHOT CAPTURED : {enc_filepath} "
                 f"({len(png_bytes) // 1024} KB)"
                 + ("  [macOS reports Screen Recording is NOT granted for this "
                    "build — the image may show only the desktop. Allow "

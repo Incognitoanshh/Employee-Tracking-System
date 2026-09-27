@@ -59,9 +59,18 @@ const login = async (u, device = "d1") =>
     (await api("POST", "/auth/login",
         { body: { username: u, password: PASSWORD, device_id: device } })).body.token;
 
-/** A minute as the client reports it. */
+/**
+ * A minute as the client reports it — ON THE EMPLOYEE'S OWN CLOCK.
+ *
+ * The client stamps these with now_ist(), not UTC (see the migration). This
+ * built them in UTC, which is five and a half hours away from what a real
+ * client sends — so every check here was about minutes no client ever
+ * writes, and the window they fall in could not be wrong.
+ */
+const IST_MINUS_UTC_MS = (5 * 60 + 30) * 60_000;
+
 function minute(offsetMinutes, extra = {}) {
-    const when = new Date(Date.now() - offsetMinutes * 60_000);
+    const when = new Date(Date.now() + IST_MINUS_UTC_MS - offsetMinutes * 60_000);
     const stamp = when.toISOString().slice(0, 16).replace("T", " ");
     return {
         minute: stamp, score: 12, band: "IDLE",
@@ -108,8 +117,12 @@ async function main() {
 
         console.log(`\nStoring what a client scored (${DB})\n`);
 
+        // BUILT ONCE, SENT TWICE. Built twice, a minute boundary can fall
+        // between the two calls and the "same" batch is a different one —
+        // which is a flaky test rather than a broken upsert.
+        const first = [minute(3), minute(2), minute(1)];
         let res = await api("POST", "/logs/activity-minutes",
-            { token: rajesh, body: { minutes: [minute(3), minute(2), minute(1)] } });
+            { token: rajesh, body: { minutes: first } });
         check("a batch is accepted", res.status === 200 && res.body.stored === 3,
             `HTTP ${res.status} ${JSON.stringify(res.body)}`);
         check("and stored under the employee who sent it",
@@ -122,7 +135,7 @@ async function main() {
 
         // THE RETRY THAT MUST NOT DOUBLE THE DAY.
         res = await api("POST", "/logs/activity-minutes",
-            { token: rajesh, body: { minutes: [minute(3), minute(2), minute(1)] } });
+            { token: rajesh, body: { minutes: first } });
         check("the same minutes sent again do not become six",
             psql(DB, `SELECT COUNT(*) FROM activity_minutes WHERE employee_id='E001'`) === "3",
             psql(DB, `SELECT COUNT(*) FROM activity_minutes WHERE employee_id='E001'`));
@@ -141,6 +154,29 @@ async function main() {
         res = await api("POST", "/logs/activity-minutes", { body: { minutes: [minute(1)] } });
         check("and without a token, nothing is stored at all",
             res.status === 401, `HTTP ${res.status}`);
+
+        // ── ONE MINUTE TWICE IN ONE BATCH ─────────────────────────────────
+        //
+        // A client whose clock steps backwards writes the same stamp twice.
+        // This used to make Postgres refuse the whole statement, so the
+        // employee got a 500, kept the batch, and retried it on every tick —
+        // from then on nothing about that person's activity ever arrived
+        // again, with nothing to show that anything had stopped.
+        const twice = minute(9, { score: 30, reasons: "first" });
+        res = await api("POST", "/logs/activity-minutes", {
+            token: rajesh,
+            body: { minutes: [twice, { ...twice, score: 44, reasons: "corrected" }] },
+        });
+        check("the same minute twice in one batch is accepted, not refused",
+            res.status === 200, `HTTP ${res.status}`);
+        check("and the later copy is the one kept",
+            psql(DB, `SELECT score || '|' || reasons FROM activity_minutes
+                       WHERE employee_id='E001' AND minute='${twice.minute}'`) === "44|corrected",
+            psql(DB, `SELECT score || '|' || reasons FROM activity_minutes
+                       WHERE employee_id='E001' AND minute='${twice.minute}'`));
+        check("one row, not two",
+            psql(DB, `SELECT COUNT(*) FROM activity_minutes
+                       WHERE employee_id='E001' AND minute='${twice.minute}'`) === "1");
 
         console.log("\nThe alert it can add up to");
 
@@ -175,6 +211,42 @@ async function main() {
         check("and it was never about anybody else",
             automated(res.body.alerts).every((a) => a.employee_id !== "E002"),
             JSON.stringify(automated(res.body.alerts)));
+
+        // ── AN AFTERNOON IS NOT "THE LAST HOUR" ───────────────────────────
+        //
+        // The rule's own sentence is "30 of the last 60 minutes", and the
+        // window was measured in UTC against minutes written in IST: five
+        // and a half hours of slack, in which a jiggler that ran before
+        // lunch was still being reported as running now. Sneha's minutes are
+        // three hours old and must count for nothing.
+        console.log("\nAnd the hour it is about is really an hour");
+
+        const sneha = await login("sneha", "sneha-laptop");
+        const longAgo = [];
+        for (let i = 0; i <= 44; i += 1) longAgo.push(minute(180 + i));
+        res = await api("POST", "/logs/activity-minutes",
+            { token: sneha, body: { minutes: longAgo } });
+        check("minutes from three hours ago are stored", res.status === 200,
+            `HTTP ${res.status}`);
+
+        res = await api("GET", "/admin/alerts", { token: admin });
+        check("but they are not what somebody is doing now",
+            automated(res.body.alerts).every((a) => a.employee_id !== "E002"),
+            JSON.stringify(automated(res.body.alerts)));
+
+        // WHILE THE SAME EVIDENCE INSIDE THE HOUR DOES SPEAK. Otherwise the
+        // check above would pass just as well on a rule that never fires.
+        const justNow = [];
+        for (let i = 1; i <= 45; i += 1) justNow.push(minute(i));
+        await api("POST", "/logs/activity-minutes",
+            { token: sneha, body: { minutes: justNow } });
+        res = await api("GET", "/admin/alerts", { token: admin });
+        const hers = automated(res.body.alerts).filter((a) => a.employee_id === "E002");
+        check("the same evidence inside the hour does", hers.length === 1,
+            JSON.stringify(automated(res.body.alerts)));
+        check("and it is described as the hour it actually covers",
+            hers.length === 1 && /of the last (4[5-9]|5\d|60) minutes/.test(hers[0].detail),
+            (hers[0] || {}).detail);
     } finally {
         if (server) server.close();
         try { require(path.join(root, "server", "config", "db")).end(); } catch (_) {}

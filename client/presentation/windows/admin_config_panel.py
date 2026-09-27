@@ -127,7 +127,7 @@ NAV_SECTIONS = [
     ("OVERVIEW",     ["dashboard", "alerts"]),
     ("PEOPLE",       ["employees", "teams", "mychat"]),
     ("TIME & PAY",   ["attendance", "leave", "payroll", "reports"]),
-    ("MONITORING",   ["screenshots", "logs"]),
+    ("MONITORING",   ["tracker", "screenshots", "logs"]),
     ("YOU",          ["myleave", "mypayroll", "profile"]),
     ("SYSTEM",       ["config"]),
 ]
@@ -161,6 +161,8 @@ PAGES = [
      "subtitle": "Manage accounts, roles and live status."},
     {"key": "attendance","icon": "", "title": "Attendance",
      "subtitle": "Track login, logout times and shift hours."},
+    {"key": "tracker","icon": "", "title": "Tracker",
+     "subtitle": "Who is working, who is idle and for how long, and who has not taken a break in an hour."},
     {"key": "screenshots", "icon": "", "title": "Screenshots",
      "subtitle": "Browse captured screenshots by employee and date."},
     {"key": "teams","icon": "", "title": "Teams & Chat",
@@ -2809,6 +2811,382 @@ class _ThumbCell(QLabel):
     def show_nothing(self, why: str = "no preview") -> None:
         self.setPixmap(QPixmap())
         self.setText(why)
+
+
+class _TrackerTab(QWidget):
+    """Everybody's state on one board, updating while it is open.
+
+    WHY IT EXISTS. Asked for in these words: "ek tracker window bnao... sare
+    employee listed hongay aur tracking chalega — working green, non working
+    idle, aur count hoga kitne der idle tha, red signal continuously working
+    for 1 hr". Before this, the answer to "what is the team doing right now"
+    was eight clicks through eight pages, one person at a time, and by the
+    time you reached the eighth the first had changed.
+
+    THREE STATES, NOT TWO. Offline is its own colour: somebody whose app is
+    closed is not sitting at a desk doing nothing, and painting them the same
+    amber as an idle person says that they are.
+
+    AND EVERY STATE CARRIES ITS CLOCK. "Idle" is worth little on its own;
+    "idle 23 min" is what somebody acts on. The same for work: an unbroken
+    stretch is measured from where it began, so an hour without a break shows
+    as an hour and turns red — which is the thing that was asked for, and is
+    as much a welfare signal as a monitoring one.
+
+    ONE REQUEST FOR THE WHOLE BOARD. /admin/tracker answers for everybody at
+    once; a page that asked per person would be a hundred round trips every
+    ten seconds.
+    """
+
+    #: An unbroken stretch this long turns red.
+    LONG_STRETCH_SECONDS = 60 * 60
+    #: How often the board re-reads itself while somebody is looking at it.
+    REFRESH_MS = 10_000
+
+    COLUMNS = ["Employee", "State", "For", "Active today", "Idle today",
+               "Last screenshot", ""]
+
+    def __init__(self):
+        super().__init__()
+        self._workers: list = []
+        self._rows: list = []
+        self._capture_request = None
+        self._capture_for = None
+        self._capture_waited = 0
+        self._build_ui()
+
+    # ── the page ────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
+
+        # The four numbers somebody wants before they read any row.
+        summary = _card()
+        srow = QHBoxLayout(summary)
+        srow.setContentsMargins(18, 14, 18, 14)
+        srow.setSpacing(28)
+        self._counts = {}
+        for key, label, colour in (
+                ("ACTIVE", "Working", C["success"]),
+                ("IDLE", "Idle", C["warning"]),
+                ("OFFLINE", "Offline", C["text_muted"]),
+                ("LONG", "Over an hour without a break", C["danger"])):
+            box = QVBoxLayout()
+            box.setSpacing(2)
+            value = QLabel("—")
+            value.setStyleSheet(
+                f"color:{colour};font-size:{_theme.Type.TITLE}px;font-weight:800;"
+                f"background:transparent;border:none;")
+            caption = _muted_label(label)
+            box.addWidget(value)
+            box.addWidget(caption)
+            self._counts[key] = value
+            srow.addLayout(box)
+        srow.addStretch()
+        self._as_of = _muted_label("")
+        srow.addWidget(self._as_of)
+        root.addWidget(summary)
+
+        self._table = _tune_table(QTableWidget(0, len(self.COLUMNS)))
+        self._table.setHorizontalHeaderLabels(self.COLUMNS)
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(64)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setShowGrid(False)
+        self._table.setIconSize(QSize(32, 32))
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in range(len(self.COLUMNS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+        root.addWidget(self._table, 1)
+
+        self._empty = _muted_label("")
+        self._empty.setVisible(False)
+        root.addWidget(self._empty)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.REFRESH_MS)
+        self._timer.timeout.connect(self.refresh)
+
+    # NOTHING POLLS A PAGE NOBODY IS LOOKING AT. The console keeps every tab
+    # alive for the session; a board that refreshed regardless would ask the
+    # server for the whole company every ten seconds, all day, for nothing.
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._layout_columns()
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_columns()
+
+    def stop(self):
+        self._timer.stop()
+
+    def _layout_columns(self):
+        """Fit to the window — the identity and the button never give way."""
+        table = getattr(self, "_table", None)
+        if table is None:
+            return
+        available = table.viewport().width()
+        if available <= 0:
+            return
+        # WHAT NEVER GIVES WAY: who it is, what state they are in, how long
+        # they have been in it, and the button. Everything else is a
+        # convenience, and a convenience that pushes the button off the edge
+        # of the screen is worse than one that is not there — that is the
+        # page this replaced, with a horizontal scrollbar over the column
+        # somebody came to press.
+        must = {0: 236, 1: 130, 2: 150, 6: 186}
+        # Dropped in this order as the window narrows: the age of the last
+        # picture first (it is a nicety), then the idle total, then the
+        # active total. All three are on the person's own page.
+        optional = [(5, 150), (4, 110), (3, 110)]
+
+        shown = list(optional)
+        while shown and sum(must.values()) + sum(w for _c, w in shown) > available:
+            shown.pop(0)
+
+        for column, width in must.items():
+            table.setColumnWidth(column, width)
+        chosen = dict(shown)
+        for column, width in optional:
+            hidden = column not in chosen
+            table.setColumnHidden(column, hidden)
+            if not hidden:
+                table.setColumnWidth(column, width)
+        # Whatever is left goes to the widest thing still on screen, so the
+        # board fills the window rather than ending in a band of nothing.
+        spare = available - sum(must.values()) - sum(chosen.values())
+        if spare > 0:
+            grow = 5 if 5 in chosen else 0
+            table.setColumnWidth(grow, table.columnWidth(grow) + spare)
+
+    # ── reading ─────────────────────────────────────────────────────────
+
+    def refresh(self):
+        worker = _FetchWorker(f"{API_BASE_URL}/admin/tracker", {})
+        worker.result.connect(self._fill)
+        worker.error.connect(lambda error: self._empty.setText(
+            f"Could not read the board — {error}") or self._empty.setVisible(True))
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    @staticmethod
+    def _spell(seconds: int) -> str:
+        """"23 min", "1 hr 04 min" — a length somebody reads at a glance."""
+        total = max(0, int(seconds or 0))
+        if total < 60:
+            return f"{total} sec"
+        minutes = total // 60
+        if minutes < 60:
+            return f"{minutes} min"
+        return f"{minutes // 60} hr {minutes % 60:02d} min"
+
+    @staticmethod
+    def _ago(stamp) -> str:
+        if not stamp:
+            return "—"
+        try:
+            from datetime import datetime, timezone
+            when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            seconds = (datetime.now(timezone.utc) - when).total_seconds()
+        except Exception:
+            return "—"
+        if seconds < 90:
+            return "just now"
+        # PAST TWO DAYS, HOURS STOP MEANING ANYTHING. A screenshot from
+        # August read "606 hr 08 min ago", which is a number nobody converts
+        # in their head.
+        if seconds >= 48 * 3600:
+            days = int(seconds // 86400)
+            return f"{days} days ago"
+        return _TrackerTab._spell(seconds) + " ago"
+
+    def _fill(self, data: dict):
+        rows = (data or {}).get("data") or []
+        self._rows = rows
+        counts = {"ACTIVE": 0, "IDLE": 0, "OFFLINE": 0, "LONG": 0}
+        for row in rows:
+            counts[row.get("state", "OFFLINE")] = counts.get(row.get("state", "OFFLINE"), 0) + 1
+            if int(row.get("working_seconds") or 0) >= self.LONG_STRETCH_SECONDS:
+                counts["LONG"] += 1
+        for key, label in self._counts.items():
+            label.setText(str(counts.get(key, 0)))
+        self._as_of.setText("updating every 10 seconds")
+
+        self._empty.setVisible(not rows)
+        if not rows:
+            self._empty.setText(
+                "Nobody is being tracked yet. Employees appear here as soon "
+                "as they have an account — working, idle or offline.")
+
+        self._table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            face = Avatar(32)
+            face.show_person(row.get("employee_id"), str(row.get("name") or "?"))
+            person = _cell(f"{row.get('name', '')}\n{row.get('employee_id', '')}"
+                           + (f"  ·  {row.get('designation')}" if row.get("designation") else ""))
+            person.setIcon(_round_avatar(face, 32))
+            self._table.setItem(i, 0, person)
+
+            state = str(row.get("state") or "OFFLINE")
+            chip = badge_label(
+                {"ACTIVE": "active", "IDLE": "pending"}.get(state, "neutral"),
+                {"ACTIVE": "Working", "IDLE": "Idle"}.get(state, "Offline"))
+            holder = QWidget()
+            _clear_bg(holder)
+            hold = QHBoxLayout(holder)
+            hold.setContentsMargins(6, 0, 6, 0)
+            hold.addWidget(chip)
+            hold.addStretch()
+            self._table.setCellWidget(i, 1, holder)
+            self._table.setItem(i, 1, _cell(""))
+
+            # HOW LONG THEY HAVE BEEN IN IT — and red once an unbroken
+            # stretch passes an hour, which is what was asked for.
+            working = int(row.get("working_seconds") or 0)
+            idle = int(row.get("idle_seconds") or 0)
+            if state == "ACTIVE":
+                text = self._spell(working)
+                long_stretch = working >= self.LONG_STRETCH_SECONDS
+                cell = _cell(("●  " if long_stretch else "") + text)
+                if long_stretch:
+                    cell.setForeground(QColor(C["danger"]))
+                    cell.setToolTip(_theme.tip(
+                        f"{row.get('name')} has been working without a break "
+                        f"for {text}. Worth a word — and if it goes on all "
+                        f"day with no keyboard, the Alerts page will say so."))
+            elif state == "IDLE":
+                cell = _cell(self._spell(idle))
+                cell.setForeground(QColor(C["warning"]))
+            else:
+                cell = _cell("—")
+            self._table.setItem(i, 2, cell)
+
+            self._table.setItem(i, 3, _cell(str(row.get("active_today") or "—")))
+            self._table.setItem(i, 4, _cell(str(row.get("idle_today") or "—")))
+            self._table.setItem(i, 5, _cell(self._ago(row.get("last_screenshot_at"))))
+
+            # ── the button that was in the wrong place ──────────────────
+            #
+            # It sat beside the person's NAME on their own page, which is
+            # where a name belongs and not where an action does. It belongs
+            # here, on the board where somebody is already deciding who to
+            # look at.
+            button = _btn("Screenshot", variant="secondary", height=30, width=150)
+            online = state != "OFFLINE"
+            waiting = self._capture_for == row.get("employee_id")
+            button.setEnabled(online and not waiting)
+            if waiting:
+                button.setText("Waiting…")
+            elif not online:
+                button.setToolTip(_theme.tip(
+                    f"{row.get('name')} is not online. A screenshot can only "
+                    f"be taken while their app is running."))
+            else:
+                button.setToolTip(_theme.tip(
+                    "Ask for a picture of their screen as it is right now. "
+                    "It arrives within a few seconds, and the request is "
+                    "recorded in the audit log under your name."))
+            button.clicked.connect(
+                lambda _=False, who=row.get("employee_id"): self._ask(who))
+            wrap = QWidget()
+            _clear_bg(wrap)
+            wrap_row = QHBoxLayout(wrap)
+            wrap_row.setContentsMargins(6, 4, 6, 4)
+            wrap_row.addWidget(button)
+            self._table.setCellWidget(i, 6, wrap)
+            self._table.setItem(i, 6, _cell(""))
+
+        self._layout_columns()
+
+    # ── a screenshot, now ───────────────────────────────────────────────
+
+    def _ask(self, employee_id: str):
+        if not employee_id or self._capture_request:
+            return
+        self._capture_for = employee_id
+        self._capture_waited = 0
+        worker = _PostWorker(
+            f"{API_BASE_URL}/admin/employees/{employee_id}/screenshot", {})
+        worker.result.connect(self._asked)
+        worker.error.connect(self._ask_failed)
+        _track_worker(self._workers, worker)
+        worker.start()
+        self._fill({"data": self._rows})          # the row says "Waiting…"
+
+    def _ask_failed(self, error):
+        self._capture_request = None
+        self._capture_for = None
+        self._fill({"data": self._rows})
+        QMessageBox.warning(self, "No screenshot", str(error))
+
+    def _asked(self, data: dict):
+        if not (data or {}).get("success"):
+            return self._ask_failed((data or {}).get("message") or "Unknown error")
+        self._capture_request = data.get("request_id")
+        poll = getattr(self, "_capture_timer", None)
+        if poll is None:
+            poll = QTimer(self)
+            poll.setInterval(2000)
+            poll.timeout.connect(self._poll)
+            self._capture_timer = poll
+        poll.start()
+
+    #: How long somebody stands in front of this before it says no.
+    CAPTURE_WAIT_SECONDS = 40
+
+    def _poll(self):
+        if not self._capture_request:
+            self._capture_timer.stop()
+            return
+        self._capture_waited += 2
+        if self._capture_waited > self.CAPTURE_WAIT_SECONDS:
+            self._capture_timer.stop()
+            self._capture_request = None
+            self._capture_for = None
+            self._fill({"data": self._rows})
+            QMessageBox.information(
+                self, "No answer yet",
+                "Their app has not answered. It may have been closed, or the "
+                "screen may be locked. Nothing was taken.")
+            return
+        worker = _FetchWorker(
+            f"{API_BASE_URL}/admin/screenshot-requests/{self._capture_request}", {})
+        worker.result.connect(self._polled)
+        worker.error.connect(lambda _e: None)
+        _track_worker(self._workers, worker)
+        worker.start()
+
+    def _polled(self, data: dict):
+        status = str(((data or {}).get("request") or {}).get("status") or "")
+        if status == "PENDING":
+            return
+        self._capture_timer.stop()
+        self._capture_request = None
+        self._capture_for = None
+        if status == "TAKEN":
+            self.refresh()
+            QMessageBox.information(
+                self, "Screenshot taken",
+                "It is in Screenshots, at the top — taken just now.")
+        else:
+            self._fill({"data": self._rows})
+            QMessageBox.information(
+                self, "No screenshot",
+                "The request expired before their app answered it. Nothing "
+                "was taken.")
 
 
 class _ScreenshotsTab(QWidget):
@@ -8833,8 +9211,6 @@ class EmployeePage(QWidget):
         self._live_state = None
         self._employee_online = False
         self._token_error_shown = False
-        self._capture_request = None
-        self._update_capture_button()
 
         shown = (self._employee.get("full_name")
                  or self._employee.get("username") or "—")
@@ -8919,22 +9295,11 @@ class EmployeePage(QWidget):
 
         name_row.addStretch()
 
-        # ── A SCREENSHOT, NOW ───────────────────────────────────────────
-        #
-        # "Agar employee online and working hai to button click and uska
-        # current screenshot aa jaye." The schedule takes pictures at moments
-        # nobody chooses; this is for the moment somebody IS asking.
-        #
-        # It can only be pressed while they are online, and it says so when
-        # it cannot: a request queued for whenever the app next opened would
-        # answer "now" with a picture from hours later, and nothing on the
-        # screen would show the difference.
-        self._shot_now = _btn("Screenshot now", variant="secondary",
-                              height=34, width=150)
-        self._shot_now.setEnabled(False)
-        self._shot_now.clicked.connect(self._request_screenshot)
-        name_row.addWidget(self._shot_now)
-
+        # The "Screenshot now" button used to sit here, beside the
+        # person's name. A name is an identity and not a place for an
+        # action, and it was said plainly: "screenshot wala naam ke andar
+        # kyu diya". It lives on the Tracker board now, where somebody is
+        # already deciding whose screen to look at.
         self._role_pill = QLabel("—")
         self._role_pill.setStyleSheet(
             f"background:{C['accent_soft']}; color:{C['accent_hover']}; padding:4px 12px; "
@@ -8986,8 +9351,14 @@ class EmployeePage(QWidget):
 
         stats_grid = QGridLayout()
         stats_grid.setSpacing(14)
-        self._active_time = StatCard("Active Time",   ACCENTS["green"],  "⏱")
-        self._idle_time   = StatCard("Idle Time",      ACCENTS["amber"], "")
+        # THE PERIOD IS PART OF THE NUMBER. These two are ninety days of
+        # attendance sessions (see getEmployeeDetails), not today — so this
+        # card read "268:09:17" beside a tracker board saying "03:01:00
+        # today" for the same person, with nothing on either screen to say
+        # they were answering different questions. Two unlabelled numbers
+        # that disagree is the argument nobody can settle.
+        self._active_time = StatCard("Active Time · 90 days", ACCENTS["green"],  "⏱")
+        self._idle_time   = StatCard("Idle Time · 90 days",   ACCENTS["amber"], "")
         self._shot_count  = StatCard("Screenshots",    ACCENTS["violet"], "")
         self._log_count   = StatCard("Activity Logs",  ACCENTS["cyan"],"")
         for i, c in enumerate([self._active_time, self._idle_time, self._shot_count, self._log_count]):
@@ -9007,116 +9378,6 @@ class EmployeePage(QWidget):
         self._logs_table.setShowGrid(False)
         self._logs_table.verticalHeader().setVisible(False)
         root.addWidget(self._logs_table, 1)
-
-    def _update_capture_button(self):
-        """On only while there is an app running to answer it."""
-        button = getattr(self, "_shot_now", None)
-        if button is None:
-            return
-        waiting = getattr(self, "_capture_request", None) is not None
-        button.setEnabled(self._employee_online and not waiting)
-        who = str(self._employee.get("full_name")
-                  or self._employee.get("username") or "This employee") \
-            if getattr(self, "_employee", None) else "This employee"
-        if waiting:
-            button.setToolTip("Waiting for their app to answer…")
-        elif self._employee_online:
-            button.setToolTip(
-                _theme.tip(f"Ask {who}'s app for a picture of their screen as "
-                           f"it is right now. It arrives within a few seconds. "
-                           f"The request is recorded in the audit log under "
-                           f"your name."))
-        else:
-            button.setToolTip(
-                _theme.tip(f"{who} is not online. A screenshot can only be "
-                           f"taken while their app is running — asking now "
-                           f"would deliver whatever is on screen whenever "
-                           f"they next open it."))
-
-    def _request_screenshot(self):
-        """Ask, then wait for the picture rather than claiming it was taken."""
-        employee_id = str(self._employee.get("employee_id") or "")
-        if not employee_id:
-            return
-        self._shot_now.setText("Asking…")
-        worker = _PostWorker(
-            f"{API_BASE_URL}/admin/employees/{employee_id}/screenshot", {})
-        worker.result.connect(self._capture_asked)
-        worker.error.connect(self._capture_failed)
-        _track_worker(self._workers, worker)
-        worker.start()
-
-    def _capture_failed(self, error):
-        self._capture_request = None
-        self._shot_now.setText("Screenshot now")
-        self._update_capture_button()
-        QMessageBox.warning(self, "No screenshot", str(error))
-
-    def _capture_asked(self, data: dict):
-        if not data.get("success"):
-            return self._capture_failed(data.get("message") or "Unknown error")
-        self._capture_request = data.get("request_id")
-        self._capture_waited = 0
-        self._shot_now.setText("Waiting…")
-        self._update_capture_button()
-        # THE CLIENT IS POLLED, SO THIS IS TOO. Their app asks the server for
-        # work every five seconds; the answer cannot arrive sooner, and a
-        # page that pretended otherwise would just be a spinner that lies.
-        timer = getattr(self, "_capture_timer", None)
-        if timer is None:
-            timer = QTimer(self)
-            timer.setInterval(2000)
-            timer.timeout.connect(self._poll_capture)
-            self._capture_timer = timer
-        timer.start()
-
-    #: How long to wait for the picture before saying it did not come. The
-    #: request itself expires on the server after five minutes; this is the
-    #: part a person is standing in front of.
-    CAPTURE_WAIT_SECONDS = 40
-
-    def _poll_capture(self):
-        if not self._capture_request:
-            self._capture_timer.stop()
-            return
-        self._capture_waited += 2
-        if self._capture_waited > self.CAPTURE_WAIT_SECONDS:
-            self._capture_timer.stop()
-            self._capture_request = None
-            self._shot_now.setText("Screenshot now")
-            self._update_capture_button()
-            QMessageBox.information(
-                self, "No answer yet",
-                "Their app has not answered. It may have been closed, or the "
-                "screen may be locked. Nothing was taken.")
-            return
-        worker = _FetchWorker(
-            f"{API_BASE_URL}/admin/screenshot-requests/{self._capture_request}")
-        worker.result.connect(self._capture_polled)
-        worker.error.connect(lambda _e: None)      # keep waiting; it retries
-        _track_worker(self._workers, worker)
-        worker.start()
-
-    def _capture_polled(self, data: dict):
-        status = str((data.get("request") or {}).get("status") or "")
-        if status == "PENDING":
-            return
-        self._capture_timer.stop()
-        self._capture_request = None
-        self._shot_now.setText("Screenshot now")
-        self._update_capture_button()
-        if status == "TAKEN":
-            # The count on this page is read from the server, so refreshing
-            # is what makes the new picture real rather than announced.
-            self._load_details()
-            QMessageBox.information(
-                self, "Screenshot taken",
-                "It is in Screenshots, at the top — taken just now.")
-        else:
-            QMessageBox.information(
-                self, "No screenshot",
-                "The request expired before their app answered it. Nothing "
-                "was taken.")
 
     def _fill_profile(self, employee: dict):
         """Put what is known on screen; a dash where nothing is recorded.
@@ -9228,7 +9489,6 @@ class EmployeePage(QWidget):
         # Use backend status only.
         raw_status = str(s.get("status", "")).lower()
         self._employee_online = (raw_status == "online")
-        self._update_capture_button()
 
         # BUG FIX: online employee ka state hamesha "ACTIVE" hardcode tha, is
         # liye "Idle Time" card kabhi tick hi nahi karta tha — employee idle
@@ -9535,12 +9795,17 @@ class _EmployeesTab(QWidget):
         # 5 IS 250: it holds an 88px View, a 126px Manage and the spacing and
         # margins between them, which came to more than the 220 it had — so
         # "Manage" was drawn clipped down its left edge.
-        hdr.setMinimumSectionSize(110)
-        widths = {0: 300, 2: 150, 3: 120, 4: 120, 5: 250}
-        for col, w in widths.items():
+        #
+        # AND THE WHOLE THING IS FITTED TO THE WINDOW, not to a number typed
+        # here. With these as fixed widths the table needed 1050px in the
+        # 962px the window's own default size gives it: the buttons were cut
+        # off the right-hand edge, a horizontal scrollbar appeared under the
+        # rows, and the address column sat on its 110px floor showing
+        # "adi@ama…". Measured, on the size the app opens at. See
+        # _layout_columns.
+        hdr.setMinimumSectionSize(80)
+        for col in range(self._table.columnCount()):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
-            self._table.setColumnWidth(col, w)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._table.setHorizontalScrollMode(
             QTableWidget.ScrollMode.ScrollPerPixel)
 
@@ -9705,6 +9970,10 @@ class _EmployeesTab(QWidget):
         self._next_btn.setEnabled(self._page * size < self._total)
         self._display_employees(self._rows)
 
+        # The rows may have brought a vertical scrollbar with them, which
+        # takes its width out of the viewport the columns were fitted to.
+        self._layout_columns()
+
     def _page_size(self) -> int:
         box = getattr(self, "_per_page", None)
         return int(box.currentData()) if box is not None else 50
@@ -9715,6 +9984,71 @@ class _EmployeesTab(QWidget):
     def _on_search_changed(self, text: str):
         self._search_text = text.strip()
         self._search_timer.start()
+
+    #: What cannot give way, and why.
+    #:
+    #:   ACTIONS   holds an 88px View and a 126px Manage; below this the
+    #:             second button is drawn clipped down its left edge.
+    #:   EMPLOYEE  a 32px face, the name, and "id · designation" under it.
+    #:   STATUS    the chip, which is a fixed shape.
+    #:
+    #: Everything else bends, and the address bends first because a clipped
+    #: address is still recognisable while a clipped name is not.
+    COL_ACTIONS = 244
+    COL_EMPLOYEE = 232
+    COL_STATUS = 92
+    #: 112, because "Super Admin" is 108 and a role that reads "Super Admi…"
+    #: is a worse thing to show than a narrower department.
+    COL_ROLE = 112
+    COL_DEPARTMENT = 120
+    COL_EMAIL_MIN = 140
+
+    def _layout_columns(self):
+        """Fit the columns to the window, and never cut the buttons off.
+
+        The order things give way in is the order they matter in: the
+        address shrinks, then the department disappears, then the role. A
+        column that is not on screen is still on the person's own page, and
+        that is a better answer than a horizontal scrollbar hiding the
+        buttons — which is what this replaced.
+        """
+        table = getattr(self, "_table", None)
+        if table is None:
+            return
+        available = table.viewport().width()
+        if available <= 0:
+            return
+
+        fixed = self.COL_EMPLOYEE + self.COL_STATUS + self.COL_ACTIONS
+        show_department = True
+        show_role = True
+        spare = available - fixed - self.COL_ROLE - self.COL_DEPARTMENT
+        if spare < self.COL_EMAIL_MIN:
+            show_department = False
+            spare = available - fixed - self.COL_ROLE
+        if spare < self.COL_EMAIL_MIN:
+            show_role = False
+            spare = available - fixed
+
+        table.setColumnHidden(2, not show_department)
+        table.setColumnHidden(3, not show_role)
+
+        table.setColumnWidth(0, self.COL_EMPLOYEE)
+        table.setColumnWidth(1, max(self.COL_EMAIL_MIN, spare))
+        if show_department:
+            table.setColumnWidth(2, self.COL_DEPARTMENT)
+        if show_role:
+            table.setColumnWidth(3, self.COL_ROLE)
+        table.setColumnWidth(4, self.COL_STATUS)
+        table.setColumnWidth(5, self.COL_ACTIONS)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_columns()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._layout_columns()
 
     def _apply_filter(self):
         # Search ab server-side hota hai — yahan sirf current page dikhana hai.
@@ -11830,7 +12164,8 @@ class AdminConfigPanel(QMainWindow):
     # are already about. One list, so the next tab cannot be forgotten.
     TAB_ATTRS = (
         "_dashboard_tab", "_alerts_tab", "_config_tab", "_employees_tab",
-        "_attendance_tab", "_screenshots_tab", "_teams_tab", "_mychat_tab",
+        "_attendance_tab", "_tracker_tab", "_screenshots_tab", "_teams_tab",
+        "_mychat_tab",
         "_payroll_tab", "_leave_tab", "_reports_tab", "_logs_tab",
         "_myleave_tab", "_mypayroll_tab", "_profile_tab",
         # NOT A SIDEBAR PAGE, BUT STILL A PAGE. This list is what drains
@@ -11963,6 +12298,7 @@ class AdminConfigPanel(QMainWindow):
         from client.presentation.windows.leave_page import LeavePage
         self._myleave_tab     = LeavePage(self)
         from client.presentation.windows.payroll_page import PayrollPage
+        self._tracker_tab     = _TrackerTab()
         self._mypayroll_tab   = PayrollPage(self)
         from client.presentation.windows.profile_page import ProfilePage
         self._profile_tab     = ProfilePage(self)
@@ -11981,6 +12317,7 @@ class AdminConfigPanel(QMainWindow):
             self._config_tab,
             self._employees_tab,
             self._attendance_tab,
+            self._tracker_tab,
             self._screenshots_tab,
             self._teams_tab,
             self._mychat_tab,
