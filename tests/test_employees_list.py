@@ -39,6 +39,7 @@ def check(label, ok, detail=""):
           + ("" if ok or not detail else f"  — {detail}"))
 
 
+from PySide6.QtGui import QFont                                              # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog, QLabel                 # noqa: E402
 
 app = QApplication.instance() or QApplication([])
@@ -163,6 +164,70 @@ try:
                           f"{cell.sizeHint().width()}")
     check("the person column never shrinks below what it has to draw",
           not narrow, "; ".join(narrow))
+
+    # ── AND NOT ONLY FOR THE NAMES ON THIS MACHINE ───────────────────────
+    #
+    # The width was a constant, measured once on one laptop: 232px. The same
+    # page on another system needed 235 for the same three lines — a different
+    # font, and every name shredded again on every machine that was not the
+    # one the number came from. CI caught that; this file had measured the
+    # same font as the code it was checking.
+    #
+    # A long name is the same fault with nothing platform-specific about it,
+    # and this company's names are long: "Meenakshi Sundareswaran
+    # Balasubramanian, Senior Quality Assurance Engineer" needs half again
+    # what the constant allowed.
+    LONG = [dict(PEOPLE[0],
+                 employee_id="26AMZEM0012345",
+                 full_name="Meenakshi Sundareswaran Balasubramanian",
+                 designation="Senior Quality Assurance Engineer")]
+    tab._on_employees_loaded({**PAYLOAD, "data": LONG, "total": 1})
+    tab.resize(1600, 420)
+    tab.show()
+    for _ in range(3):
+        app.processEvents()
+    long_cell = tab._table.cellWidget(0, 0)
+    check("a long name is given the room it needs, not a number from one laptop",
+          tab._table.columnWidth(0) >= long_cell.sizeHint().width(),
+          f"column {tab._table.columnWidth(0)} < needed {long_cell.sizeHint().width()}")
+
+    # AND NOT AT THE COST OF THE REST OF THE ROW. Room for the name has to
+    # come from somewhere, and if it came out of the buttons this would be
+    # the original complaint again with a different cause.
+    over = []
+    for width in (1600, 1250, 1080, 900):
+        tab.resize(width, 420)
+        tab.show()
+        for _ in range(3):
+            app.processEvents()
+        need = sum(tab._table.columnWidth(c)
+                   for c in range(tab._table.columnCount())
+                   if not tab._table.isColumnHidden(c))
+        if need > tab._table.viewport().width():
+            over.append(f"{width}px -> {need} > {tab._table.viewport().width()}")
+    check("and a window too narrow for it still fits, buttons and all",
+          not over, "; ".join(over))
+
+    # WHAT A NAME TOO LONG FOR ITS COLUMN LOOKS LIKE. Cut, a QLabel ends
+    # mid-letter; this ends in an ellipsis and keeps the whole name in the
+    # tooltip, so it can still be read.
+    name_label = [l for l in long_cell.findChildren(QLabel)
+                  if l.text().startswith("Meenakshi")]
+    check("a name that cannot fit ends in an ellipsis rather than mid-letter",
+          bool(name_label) and isinstance(name_label[0], panel._Eliding),
+          str([type(l).__name__ for l in long_cell.findChildren(QLabel)]))
+    check("and the whole of it is still readable in the tooltip",
+          bool(name_label)
+          and name_label[0].toolTip() == "Meenakshi Sundareswaran Balasubramanian",
+          name_label[0].toolTip() if name_label else "(no name label)")
+
+    # Back to the three people the rest of this file is about — and to a
+    # live cell, because refilling the table deletes the widgets in it.
+    tab._on_employees_loaded(PAYLOAD)
+    tab.resize(1600, 420)
+    app.processEvents()
+    cell = tab._table.cellWidget(0, 0)
+
     # AND THE WHOLE TABLE FITS THE WINDOW. It did not: at the size the
     # console opens at, the columns needed 1050px in the 962 they had, so
     # the Actions column was cut off the right-hand edge and a horizontal

@@ -9554,7 +9554,50 @@ class EmployeePage(QWidget):
             w.wait(1000)
 
 
-class _NameLink(QLabel):
+class _Eliding(QLabel):
+    """A label that ends in "…" when it is given less room than it needs.
+
+    A QLabel given too little width does not elide — it draws what fits and
+    the last letter is cut down the middle, which is what "the names came out
+    shredded" was. The full text goes in the tooltip, because an elided name
+    is still a name somebody has to be able to read.
+    """
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self._full = text
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        if text:
+            self.setToolTip(text)
+
+    def setText(self, text: str):                       # noqa: N802 (Qt)
+        self._full = text
+        self.setToolTip(text)
+        super().setText(text)
+
+    def minimumSizeHint(self):
+        # WITHOUT THIS THE CELL CANNOT NARROW. A label's own minimum is the
+        # width of its text, and a layout will not shrink below its children
+        # — so the widest name on the page would set the floor for the column
+        # for everybody, however narrow the window was.
+        hint = super().minimumSizeHint()
+        hint.setWidth(min(hint.width(), 40))
+        return hint
+
+    def paintEvent(self, event):
+        metrics = self.fontMetrics()
+        if metrics.horizontalAdvance(self._full) <= self.width():
+            return super().paintEvent(event)
+        from PySide6.QtGui import QPainter
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.setFont(self.font())
+        painter.drawText(self.rect(), int(self.alignment()),
+                         metrics.elidedText(self._full, Qt.TextElideMode.ElideRight,
+                                            self.width()))
+
+
+class _NameLink(_Eliding):
     """Somebody's name, which opens their page when it is clicked.
 
     A LABEL RATHER THAN A BUTTON. A button in every row of a list draws a
@@ -9627,8 +9670,7 @@ def _person_cell(employee: dict, on_click) -> QWidget:
     parts = [str(employee.get("employee_id") or "—")]
     if employee.get("designation"):
         parts.append(str(employee["designation"]))
-    under = QLabel("  ·  ".join(parts))
-    under.setTextFormat(Qt.TextFormat.PlainText)
+    under = _Eliding("  ·  ".join(parts))
     under.setStyleSheet(
         f"color:{C['text_muted']};font-size:{Type.MICRO}px;"
         f"background:transparent;border:none;")
@@ -9995,13 +10037,50 @@ class _EmployeesTab(QWidget):
     #: Everything else bends, and the address bends first because a clipped
     #: address is still recognisable while a clipped name is not.
     COL_ACTIONS = 244
-    COL_EMPLOYEE = 232
+    #: A FLOOR, NOT THE ANSWER. 232 is what a face, a name and
+    #: "id · designation" came to when measured on one machine — and this
+    #: number WAS the answer, until the same page on another system needed
+    #: 235 and shredded the names it was there to protect. A different font,
+    #: a larger system text size, or a longer name all move it. The column is
+    #: measured from the cells that have to fit in it; this is only the width
+    #: below which it will not go.
+    COL_EMPLOYEE_MIN = 232
     COL_STATUS = 92
     #: 112, because "Super Admin" is 108 and a role that reads "Super Admi…"
     #: is a worse thing to show than a narrower department.
     COL_ROLE = 112
     COL_DEPARTMENT = 120
     COL_EMAIL_MIN = 140
+
+    def _employee_column(self, cap: int | None = None) -> int:
+        """How wide the identity column has to be on THIS machine.
+
+        Asked of the cells rather than assumed: they hold the avatar, the name
+        and the line under it, and their own sizeHint is the only thing that
+        knows what those come to in the font actually installed and with the
+        names actually on the page. Cached, because this is asked on every
+        resize event and a window being dragged produces a great many of them;
+        the cache is dropped when the rows are rebuilt.
+        """
+        cached = getattr(self, "_employee_col_cache", None)
+        if cached is None:
+            table = getattr(self, "_table", None)
+            cached = self.COL_EMPLOYEE_MIN
+            if table is not None:
+                for row in range(table.rowCount()):
+                    cell = table.cellWidget(row, 0)
+                    if cell is not None:
+                        cached = max(cached, cell.sizeHint().width())
+            self._employee_col_cache = cached
+        # BUT NOT AT THE COST OF THE REST OF THE TABLE. One long name asking
+        # for 500px in a 900px window would push the address below its
+        # minimum and bring the horizontal scrollbar back over the buttons —
+        # the thing this layout exists to prevent. Past the cap the name
+        # elides and keeps its tooltip, which is still a readable name; a
+        # scrollbar over the Actions column is not.
+        if cap is not None:
+            return max(self.COL_EMPLOYEE_MIN, min(cached, cap))
+        return cached
 
     def _layout_columns(self):
         """Fit the columns to the window, and never cut the buttons off.
@@ -10019,21 +10098,28 @@ class _EmployeesTab(QWidget):
         if available <= 0:
             return
 
-        fixed = self.COL_EMPLOYEE + self.COL_STATUS + self.COL_ACTIONS
+        # Which columns can be afforded is decided against the floor, so one
+        # long name does not silently hide the department for everybody.
+        fixed = self.COL_EMPLOYEE_MIN + self.COL_STATUS + self.COL_ACTIONS
         show_department = True
         show_role = True
-        spare = available - fixed - self.COL_ROLE - self.COL_DEPARTMENT
-        if spare < self.COL_EMAIL_MIN:
+        others = self.COL_ROLE + self.COL_DEPARTMENT
+        if available - fixed - others < self.COL_EMAIL_MIN:
             show_department = False
-            spare = available - fixed - self.COL_ROLE
-        if spare < self.COL_EMAIL_MIN:
+            others = self.COL_ROLE
+        if available - fixed - others < self.COL_EMAIL_MIN:
             show_role = False
-            spare = available - fixed
+            others = 0
 
         table.setColumnHidden(2, not show_department)
         table.setColumnHidden(3, not show_role)
 
-        table.setColumnWidth(0, self.COL_EMPLOYEE)
+        employee = self._employee_column(
+            cap=available - self.COL_STATUS - self.COL_ACTIONS - others
+                - self.COL_EMAIL_MIN)
+        spare = available - employee - self.COL_STATUS - self.COL_ACTIONS - others
+
+        table.setColumnWidth(0, employee)
         table.setColumnWidth(1, max(self.COL_EMAIL_MIN, spare))
         if show_department:
             table.setColumnWidth(2, self.COL_DEPARTMENT)
@@ -10102,6 +10188,8 @@ class _EmployeesTab(QWidget):
             QMessageBox.warning(self, "Export", "Failed to export CSV.")
 
     def _display_employees(self, employees: list[dict]):
+        # A new page of people has a new widest name in it.
+        self._employee_col_cache = None
         self._table.setRowCount(0)
         for i, emp in enumerate(employees):
             self._table.insertRow(i)
