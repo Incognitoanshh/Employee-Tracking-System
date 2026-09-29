@@ -9351,14 +9351,17 @@ class EmployeePage(QWidget):
 
         stats_grid = QGridLayout()
         stats_grid.setSpacing(14)
-        # THE PERIOD IS PART OF THE NUMBER. These two are ninety days of
-        # attendance sessions (see getEmployeeDetails), not today — so this
-        # card read "268:09:17" beside a tracker board saying "03:01:00
-        # today" for the same person, with nothing on either screen to say
-        # they were answering different questions. Two unlabelled numbers
-        # that disagree is the argument nobody can settle.
-        self._active_time = StatCard("Active Time · 90 days", ACCENTS["green"],  "⏱")
-        self._idle_time   = StatCard("Idle Time · 90 days",   ACCENTS["amber"], "")
+        # TODAY LEADS, AND THE PERIOD IS PART OF THE NUMBER.
+        #
+        # These cards showed ninety days of attendance with nothing to say
+        # so: "268:09:17" here beside "03:01:00" on the tracker board, for
+        # the same person at the same moment. Two unlabelled numbers that
+        # disagree is the argument nobody can settle. Somebody opening a
+        # person's page is asking about today — and it is today that ticks
+        # while they watch — so today is the number, and the long total is
+        # underneath it where it is context rather than a contradiction.
+        self._active_time = StatCard("Active Time · Today", ACCENTS["green"],  "⏱")
+        self._idle_time   = StatCard("Idle Time · Today",   ACCENTS["amber"], "")
         self._shot_count  = StatCard("Screenshots",    ACCENTS["violet"], "")
         self._log_count   = StatCard("Activity Logs",  ACCENTS["cyan"],"")
         for i, c in enumerate([self._active_time, self._idle_time, self._shot_count, self._log_count]):
@@ -9400,8 +9403,18 @@ class EmployeePage(QWidget):
 
     def _set_stats(self, details: dict):
         s = details.get('data', details)
-        self._active_time.set_value(s.get('active_time', '—'))
-        self._idle_time.set_value(s.get('idle_time', '—'))
+        # DASHES, NOT ZEROES, when the server did not say. "00:00:00" is a
+        # statement that somebody has done nothing today; a dash says nobody
+        # knows, which is the truth when the field is missing.
+        self._active_time.set_value(s.get('active_today') or '—')
+        self._idle_time.set_value(s.get('idle_today') or '—')
+        days = s.get('active_window_days')
+        if s.get('active_time'):
+            self._active_time.set_subtitle(
+                f"{s['active_time']} in {days} days" if days else s['active_time'])
+        if s.get('idle_time'):
+            self._idle_time.set_subtitle(
+                f"{s['idle_time']} in {days} days" if days else s['idle_time'])
         self._shot_count.set_value(s.get('screenshot_count', '—'))
         self._log_count.set_value(s.get('activity_log_count', '—'))
 
@@ -9478,12 +9491,14 @@ class EmployeePage(QWidget):
 
         s = data.get("data", data)
 
+        # TODAY'S, because that is what is on the card. Ticking a ninety-day
+        # total by the second is arithmetic nobody asked for.
         self._live_active_seconds = self._hhmmss_to_seconds(
-            s.get("active_time", "00:00:00")
+            s.get("active_today") or s.get("active_time", "00:00:00")
         )
 
         self._live_idle_seconds = self._hhmmss_to_seconds(
-            s.get("idle_time", "00:00:00")
+            s.get("idle_today") or s.get("idle_time", "00:00:00")
         )
 
         # Use backend status only.
@@ -9495,6 +9510,14 @@ class EmployeePage(QWidget):
         # hone par bhi Active Time badhta rehta tha (galat reporting).
         # Ab asli latest state recent_activity se nikalte hain.
         if self._employee_online:
+            # WHAT THE SERVER ALREADY WORKED OUT, if it said. Reading the
+            # state back out of the activity feed guesses at what
+            # live_activity has already decided from the sessions, and the
+            # two disagree whenever a line falls outside a shift.
+            reported = str(s.get("state_today") or "").upper()
+            if reported in ("ACTIVE", "IDLE"):
+                self._live_state = reported
+                return
             self._live_state = "ACTIVE"
             for row in (s.get("recent_activity") or []):
                 act = str(row.get("activity", "")).upper() if isinstance(row, dict) else ""

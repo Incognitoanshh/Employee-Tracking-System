@@ -108,17 +108,24 @@ check("and is not marked as automation",
 
 # A minute of steady typing and nothing else — no mouse, no switching.
 #
-# THIS SCORES 55, WHICH IS "LOW ACTIVITY", and that is the table as it was
-# given: input 10 + keyboard 15 + meaningful 30, with application
-# interaction (20) reserved for clicks and scrolls and the window bonus (10)
-# for changing application. Somebody writing for an hour in one document
-# never earns either. It is recorded here rather than quietly rounded up,
-# because the number is the owner's to change and this is where anybody
-# changing it will look.
+# THIS USED TO SCORE 55, WHICH IS "LOW ACTIVITY". Application interaction
+# (20) was reserved for clicks and scrolls, so somebody writing for an hour
+# in one document — code, an email, a report — never earned it, and read as
+# less busy than somebody clicking idly around a browser. Typing into an
+# application is using an application, held to the same bar as "meaningful"
+# so that one key pressed to keep a screen awake still earns nothing.
 typing = score_minute(Minute(keystrokes=140, gaps_ms=[90, 150, 70, 300, 110, 80]))
-check("somebody who only types earns the keyboard and meaningful points",
-      typing["score"] == 55 and typing["band"] == "LOW",
+check("somebody who only types is at work, not 'low activity'",
+      typing["score"] == 75 and typing["band"] == "ACTIVE",
       f"{typing['score']} {typing['band']} — {typing['reasons']}")
+check("because typing counts as using the application it goes into",
+      "application" in typing["reasons"], str(typing["reasons"]))
+# AND NOT FOR ONE KEYSTROKE. A key pressed to stop the screen locking is the
+# oldest trick there is, and it must not buy the same points as writing.
+awake = score_minute(Minute(keystrokes=1, mouse_moves=2, gaps_ms=[1200]))
+check("while one key to keep the screen awake still earns nothing for it",
+      "application" not in awake["reasons"] and awake["band"] == "IDLE",
+      f"{awake['score']} {awake['band']} — {awake['reasons']}")
 # AND THE PART THAT MATTERS: low is not an accusation. Nothing acts on the
 # band; the alert asks for evidence of a machine, and a writer produces none.
 check("and is never suspected of automation, which is what alerts act on",

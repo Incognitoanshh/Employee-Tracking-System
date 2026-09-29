@@ -30,6 +30,20 @@ function check(label, ok, detail = "") {
     console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : `  — ${detail}`}`);
 }
 
+/**
+ * "01:00" today in IST, as the naive UTC these columns actually hold.
+ *
+ * WITHOUT THE OUTER CONVERSION THIS IS SILENTLY WRONG. psql's own session is
+ * IST on this machine, so a timestamptz written into a naive UTC column lands
+ * as IST wall clock — five and a half hours from what the column means, and
+ * every check built on it passes for the wrong reason. Before half past five
+ * in the morning IST these values belong to today in IST and to YESTERDAY in
+ * UTC, which is exactly what tells an IST comparison apart from a UTC one.
+ */
+const istTodayAtUtc = (time) =>
+    `((((NOW() AT TIME ZONE 'Asia/Kolkata')::date + TIME '${time}')`
+    + ` AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'UTC')`;
+
 function psql(db, sql) {
     return execFileSync("psql", ["-d", db, "-v", "ON_ERROR_STOP=1", "-tAc", sql],
         { encoding: "utf8" }).trim();
@@ -194,6 +208,70 @@ async function main() {
             check("and quietly — idle is a reason to look, not to act",
                 idle.severity === "LOW", idle && idle.severity);
         }
+
+        // ── MONITORING THAT HAS QUIETLY STOPPED ──────────────────────────
+        //
+        // The rule itself is checked in test_alert_rules; what is checked
+        // here is the SQL behind it — the shift hours counted in IST, the
+        // screenshots counted for the same day, and the per-person config
+        // falling back to the global row. Those are the parts a unit test
+        // with hand-made facts cannot see, and they are where the last three
+        // date bugs in this file lived.
+        console.log("\nScreenshots that stopped arriving");
+
+        // A SHIFT OF FIXED LENGTH, AND AN IST ONE. Eight hours from one in
+        // the morning: fixed, so the numbers do not depend on what time the
+        // suite happens to run, and before half past five in the morning IST,
+        // so it belongs to today in IST and to YESTERDAY in UTC. Counted
+        // against the UTC date this shift disappears and the alert with it —
+        // which is the bug this file has already caught twice in other rules,
+        // and a night shift is a shape this product supports on purpose.
+        psql(DB, `UPDATE employee_configs SET screenshots_per_day = 10
+                   WHERE employee_id IS NULL`);
+        psql(DB, `INSERT INTO attendance (employee_id, login_time, logout_time)
+            VALUES ('E003', ${istTodayAtUtc("01:00")}, ${istTodayAtUtc("09:00")})`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        let blind = find(res.body.alerts, "E003", "SCREENSHOTS_NOT_ARRIVING");
+        check("a whole shift with no screenshot at all is reported",
+            Boolean(blind), JSON.stringify(res.body.alerts.map((a) => a.type)));
+        check("and it says how long they were signed in — eight hours, to the hour",
+            blind && /8 hr/.test(blind.title), blind && blind.title);
+
+        // AND THE MACHINE'S OWN WORDS, when it said them. The client writes
+        // this line when macOS refuses Screen Recording; it is the difference
+        // between "something is wrong" and a fix somebody can carry out.
+        psql(DB, `INSERT INTO activity_logs (employee_id, activity) VALUES
+            ('E003', 'SCREEN RECORDING : permission not granted — captures will be blank')`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        blind = find(res.body.alerts, "E003", "SCREENSHOTS_NOT_ARRIVING");
+        check("when the machine said why, that is what the row says",
+            blind && blind.severity === "HIGH" && /not allowed/i.test(blind.title),
+            JSON.stringify(blind || {}));
+
+        // ONE PICTURE ENDS IT — and the same IST boundary applies to it. Half
+        // past one in the morning is today in IST and yesterday in UTC, so a
+        // count written against the wrong day would report this person as
+        // unmonitored while their screenshots were arriving.
+        psql(DB, `INSERT INTO screenshots (employee_id, file_name, created_at)
+            VALUES ('E003', 'x.enc', ${istTodayAtUtc("01:30")})`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        check("one picture today is enough to say the capture works",
+            !find(res.body.alerts, "E003", "SCREENSHOTS_NOT_ARRIVING"),
+            JSON.stringify(find(res.body.alerts, "E003", "SCREENSHOTS_NOT_ARRIVING")));
+
+        // AND SWITCHED OFF IS A DECISION. Somebody who is not screenshotted
+        // must not appear here every day for not being screenshotted.
+        psql(DB, `DELETE FROM screenshots WHERE employee_id = 'E003'`);
+        psql(DB, `UPDATE employee_configs SET screenshots_per_day = 0
+                   WHERE employee_id IS NULL`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        check("with screenshots switched off, nobody is reported for having none",
+            !res.body.alerts.some((a) => a.type === "SCREENSHOTS_NOT_ARRIVING"),
+            JSON.stringify(res.body.alerts.map((a) => `${a.employee_id}:${a.type}`)));
+        psql(DB, `UPDATE employee_configs SET screenshots_per_day = 10
+                   WHERE employee_id IS NULL`);
+        psql(DB, `DELETE FROM attendance WHERE employee_id = 'E003'`);
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E003'`);
 
         console.log("\nThresholds live in settings");
         res = await api("GET", "/admin/alerts/settings", { token: admin });

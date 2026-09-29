@@ -213,6 +213,63 @@ out = rules.forEmployee(facts({
 check("the worst thing is first",
     out[0].severity === "HIGH", JSON.stringify(out.map((a) => a.severity)));
 
+console.log("\nMonitoring that has quietly stopped");
+
+// AN EMPTY SCREENSHOTS PAGE LOOKS EXACTLY LIKE A QUIET DAY. macOS grants
+// Screen Recording per binary and an unsigned build loses it on every new
+// version, so "no pictures at all" is a state this product will be in
+// repeatedly — and until it is reported, nobody doubts it.
+const shots = (extra = {}) => ({
+    per_day: 10, minutes_today: 300, shots_today: 0,
+    permission_denied: false, ...extra });
+const kindOf = (list, type) => (list || []).filter((a) => a.type === type);
+
+out = rules.forEmployee(facts({ capture: shots() }));
+check("five hours signed in with no screenshot at all is reported",
+    kindOf(out, "SCREENSHOTS_NOT_ARRIVING").length === 1,
+    JSON.stringify(out.map((a) => a.type)));
+check("and the row says how long, and what it is set to",
+    /5 hr/.test(kindOf(out, "SCREENSHOTS_NOT_ARRIVING")[0].title)
+    && /10 a day/.test(kindOf(out, "SCREENSHOTS_NOT_ARRIVING")[0].detail),
+    JSON.stringify(kindOf(out, "SCREENSHOTS_NOT_ARRIVING")[0]));
+
+out = rules.forEmployee(facts({ capture: shots({ shots_today: 1 }) }));
+check("one picture is enough to say the capture works",
+    kindOf(out, "SCREENSHOTS_NOT_ARRIVING").length === 0,
+    JSON.stringify(out.map((a) => a.type)));
+
+// AN HOUR IS NOT EVIDENCE. A morning of meetings with the laptop shut
+// produces exactly this, and chasing it is how a list stops being read.
+out = rules.forEmployee(facts({ capture: shots({ minutes_today: 60 }) }));
+check("an hour of it is not yet worth saying",
+    kindOf(out, "SCREENSHOTS_NOT_ARRIVING").length === 0,
+    JSON.stringify(out.map((a) => a.type)));
+
+// SWITCHED OFF IS A DECISION, not a fault to report every day.
+out = rules.forEmployee(facts({ capture: shots({ per_day: 0 }) }));
+check("somebody whose screenshots are switched off is not a fault",
+    kindOf(out, "SCREENSHOTS_NOT_ARRIVING").length === 0,
+    JSON.stringify(out.map((a) => a.type)));
+
+// AND WHEN THE MACHINE HAS SAID WHY, say that instead — it is a fix somebody
+// can carry out in a minute, and it outranks knowing somebody was idle.
+out = rules.forEmployee(facts({ capture: shots({ permission_denied: true }) }));
+const denied = kindOf(out, "SCREENSHOTS_NOT_ARRIVING")[0];
+check("a machine that refused Screen Recording is named as the cause",
+    denied && /not allowed/i.test(denied.title) && denied.severity === "HIGH",
+    JSON.stringify(denied || {}));
+check("with the fix in the words, not just the fault",
+    denied && /System Settings/.test(denied.detail) && /restart/i.test(denied.detail),
+    (denied || {}).detail);
+
+// ONE SILENCE, ONE ROW. An app that has not reported for a day has not
+// "sent no screenshots" as well; that is the same fact said twice.
+out = rules.forEmployee(facts({ lastSeenMinutes: 60 * 30, capture: shots() }));
+check("an app that has gone quiet is not also reported for sending no pictures",
+    kindOf(out, "SCREENSHOTS_NOT_ARRIVING").length === 0
+    && kindOf(out, "NOT_REPORTING").length === 1,
+    JSON.stringify(out.map((a) => a.type)));
+
 check("45 minutes reads as minutes", rules.describeGap(45) === "45 min", rules.describeGap(45));
 check("200 minutes reads as hours", rules.describeGap(200) === "3 hr 20 min", rules.describeGap(200));
 check("two days reads as days", rules.describeGap(60 * 50) === "2 d 2 hr", rules.describeGap(60 * 50));

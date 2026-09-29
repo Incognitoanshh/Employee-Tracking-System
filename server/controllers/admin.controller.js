@@ -2140,6 +2140,22 @@ exports.getEmployeeDetails = async (req, res) => {
         const activeMs = summary.activeMs;
         const idleMs = summary.idleMs;
 
+        // AND TODAY, WHICH IS THE QUESTION SOMEBODY OPENING THIS PAGE ASKS.
+        //
+        // The two numbers above are ninety days of attendance, which is a
+        // real thing to know and a useless thing to lead with: the card read
+        // "268:09:17" while the tracker board said "03:01:00" for the same
+        // person at the same moment, with nothing on either screen to say
+        // they were answering different questions. Today leads now and the
+        // ninety-day total sits under it as context — and today comes from
+        // the same query and the same arithmetic the board uses, so the two
+        // screens cannot drift apart.
+        const todaySessions = await pool.query(
+            runningShiftSessionsSql("AND employee_id = $1"), [employee_id]);
+        const todayEvents = await pool.query(
+            recentStateEventsSql("AND employee_id = $1"), [employee_id]);
+        const today = live.summarise(todaySessions.rows, todayEvents.rows, Date.now());
+
         const formatDur = (ms) => {
             const totalSec = Math.floor(ms / 1000);
             const h = String(Math.floor(totalSec / 3600)).padStart(2, "0");
@@ -2153,8 +2169,15 @@ exports.getEmployeeDetails = async (req, res) => {
             data: {
                 employee_id,
                 status:             isOnline ? "online" : "offline",
+                // KEPT, AND KEPT MEANING WHAT THEY MEANT. Anything already
+                // reading these fields goes on getting the ninety-day
+                // totals; the day's own figures are new fields beside them.
                 active_time:        formatDur(activeMs),
                 idle_time:          formatDur(idleMs),
+                active_window_days: WINDOW_DAYS,
+                active_today:       live.formatDuration(today.activeMs),
+                idle_today:         live.formatDuration(today.idleMs),
+                state_today:        isOnline ? (today.state || "ACTIVE") : "OFFLINE",
                 screenshot_count:   Number(screenshots.rows[0].count || 0),
                 activity_log_count: Number(logsCount.rows[0].count || 0),
                 recent_activity:    recent.rows.map(r => ({
@@ -2186,6 +2209,37 @@ exports.getEmployeeDetails = async (req, res) => {
 // from utils/live_activity, which both screens now use, because two
 // implementations of "how much of today was worked" disagree the first time
 // one of them is fixed.
+/**
+ * The sessions a live screen counts: any shift still open (bounded by the
+ * longest a shift may be) plus the ones that started today in IST.
+ *
+ * ONE DEFINITION, TWO SCREENS. The board asks it for everybody and the
+ * person's own page asks it for one of them, and if they were written twice
+ * the two would disagree about the same morning the first time one was
+ * touched — which is the argument nobody can settle, because neither number
+ * can be shown to be wrong. Filtered by the calendar day alone, a night
+ * shift disappears at midnight while the person is still working.
+ */
+const runningShiftSessionsSql = (extra = "") => `
+    SELECT employee_id, login_time,
+           COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) AS end_time
+      FROM attendance
+     WHERE ((logout_time IS NULL
+             AND login_time > (NOW() AT TIME ZONE 'UTC')
+                              - INTERVAL '${MAX_SHIFT_HOURS} hours')
+            OR ${istDate("login_time")} = ${istToday()})
+           ${extra}`;
+
+/** The events that can fall inside those sessions. A day of them. */
+const recentStateEventsSql = (extra = "") => `
+    SELECT employee_id, created_at, activity
+      FROM activity_logs
+     WHERE created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
+       AND (UPPER(activity) LIKE '%USER ACTIVE%'
+            OR UPPER(activity) LIKE '%USER IDLE%')
+           ${extra}
+     ORDER BY created_at`;
+
 exports.tracker = async (req, res) => {
     // Admin-ness is the router's job here — /api/admin/* is behind
     // adminOnly, like every other route in this file. A second check in
@@ -2209,25 +2263,12 @@ exports.tracker = async (req, res) => {
         // happening to run at 00:30. So: any shift still open (bounded, as
         // everywhere else, by the longest a shift may be) plus the ones that
         // started today.
-        const sessions = await pool.query(
-            `SELECT employee_id, login_time,
-                    COALESCE(logout_time, (NOW() AT TIME ZONE 'UTC')) AS end_time
-               FROM attendance
-              WHERE (logout_time IS NULL
-                     AND login_time > (NOW() AT TIME ZONE 'UTC')
-                                      - INTERVAL '${MAX_SHIFT_HOURS} hours')
-                 OR ${istDate("login_time")} = ${istToday()}`);
+        const sessions = await pool.query(runningShiftSessionsSql());
 
         // A day of events, for the same reason. summarise() only counts the
         // ones that fall inside a session, so a wider window costs nothing
         // and a narrower one loses the night.
-        const events = await pool.query(
-            `SELECT employee_id, created_at, activity
-               FROM activity_logs
-              WHERE created_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '24 hours'
-                AND (UPPER(activity) LIKE '%USER ACTIVE%'
-                     OR UPPER(activity) LIKE '%USER IDLE%')
-              ORDER BY created_at`);
+        const events = await pool.query(recentStateEventsSql());
 
         const shots = await pool.query(
             `SELECT DISTINCT ON (employee_id)

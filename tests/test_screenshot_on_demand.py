@@ -253,6 +253,60 @@ try:
     check("while the board that does have it is a page of its own",
           any(entry.get("key") == "tracker" for entry in panel.PAGES),
           str([entry.get("key") for entry in panel.PAGES]))
+
+    # ── THE NUMBER ON THE CARD IS TODAY'S ────────────────────────────────
+    #
+    # These cards showed ninety days of attendance with nothing to say so:
+    # "268:09:17" here, "03:01:00" on the tracker board, same person, same
+    # moment, neither screen admitting they answered different questions.
+    # Somebody opening a person's page is asking about today — and it is
+    # today that ticks while they watch.
+    page._set_stats({"data": {
+        "employee_id": "E001", "status": "online",
+        "active_time": "268:09:17", "idle_time": "41:52:00",
+        "active_window_days": 90,
+        "active_today": "03:01:00", "idle_today": "00:19:00",
+        "state_today": "IDLE",
+        "screenshot_count": 12, "activity_log_count": 300,
+        "recent_activity": [],
+    }})
+    check("the card leads with today, not with ninety days of it",
+          page._active_time._value_label.text() == "03:01:00",
+          page._active_time._value_label.text())
+    check("and the long total is kept underneath, with its period said",
+          "268:09:17" in page._active_time._sub_label.text()
+          and "90 days" in page._active_time._sub_label.text(),
+          page._active_time._sub_label.text())
+    check("idle reads the same way", page._idle_time._value_label.text() == "00:19:00",
+          page._idle_time._value_label.text())
+
+    # AND THE CLOCK THAT TICKS IS TODAY'S. Ticking a ninety-day total by the
+    # second is arithmetic nobody asked for.
+    page._on_details({"success": True, "data": {
+        "employee_id": "E001", "status": "online",
+        "active_time": "268:09:17", "idle_time": "41:52:00",
+        "active_window_days": 90,
+        "active_today": "03:01:00", "idle_today": "00:19:00",
+        "state_today": "IDLE", "recent_activity": [],
+    }})
+    check("the live clock starts from today's figure",
+          page._live_active_seconds == 3 * 3600 + 60, str(page._live_active_seconds))
+    # AND FROM THE STATE THE SERVER WORKED OUT, rather than guessed at by
+    # reading the activity feed back — which disagrees whenever a line falls
+    # outside a shift.
+    check("and it advances the state the server reported",
+          page._live_state == "IDLE", str(page._live_state))
+    before = page._live_idle_seconds
+    page._tick_live_times()
+    check("so a second of somebody idle is counted as idle",
+          page._live_idle_seconds == before + 1,
+          f"{before} -> {page._live_idle_seconds}")
+
+    # A SERVER THAT SAID NOTHING GETS A DASH, not a zero. "00:00:00" is a
+    # statement that somebody has done nothing today.
+    page._set_stats({"data": {"employee_id": "E001", "status": "offline"}})
+    check("and a missing figure shows as a dash rather than a made-up zero",
+          page._active_time._value_label.text() == "—", page._active_time._value_label.text())
     page.deleteLater()
     app.processEvents()
 finally:

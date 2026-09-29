@@ -141,7 +141,19 @@ def score_minute(minute: Minute) -> dict:
     if minute.keystrokes > 0:
         score += POINTS["keyboard"]
         reasons.append("keyboard")
-    if minute.clicks > 0 or minute.scrolls > 0:
+    # TYPING INTO AN APPLICATION IS USING AN APPLICATION.
+    #
+    # This asked for a click or a scroll, so somebody writing steadily for a
+    # minute — code, an email, a report, the work this company is paid for —
+    # scored 55 and was filed as "Low", while somebody clicking idly around a
+    # browser scored higher. The most reliable evidence of real work was the
+    # one thing that did not count as interacting with an application.
+    #
+    # Held to the same bar as "meaningful": ten keystrokes is somebody writing
+    # something, not somebody pressing a key to keep the screen awake — and a
+    # jiggler, which produces no keystrokes at all, is unaffected by this.
+    if (minute.clicks > 0 or minute.scrolls > 0
+            or minute.keystrokes >= MEANINGFUL_KEYSTROKES):
         score += POINTS["application"]
         reasons.append("application")
     if minute.window_changes > 0:

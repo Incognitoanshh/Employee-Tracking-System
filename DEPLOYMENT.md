@@ -604,3 +604,55 @@ worker receives the configured number before midnight and again after. That
 is per specification.
 
 Storage at 1000 employees, 10/day, ~200 KB each: **~2 GB/day**.
+
+## macOS Screen Recording, and why it keeps being asked for
+
+**What happens now.** The Mac build is signed ad-hoc (`codesign --sign -` in
+`.github/workflows/build.yml`). macOS grants Screen Recording *per binary*, and
+an ad-hoc signature is a different identity in every build — so each new
+version arrives with no permission, asks once, and until somebody allows it in
+System Settings every screenshot is a picture of an empty desktop. Quitting and
+reopening is required after allowing it; macOS does not hand the permission to
+an already-running process.
+
+Two consequences worth stating plainly:
+
+* **A new version silently stops screenshots** for everybody who has not
+  clicked Allow again. This is not a bug in the app.
+* **Any of it can also be revoked** by the person being monitored, which is
+  their right on their own machine, and looks identical from the server.
+
+**What was done about it** (September 2026). The server no longer waits to be
+asked. `SCREENSHOTS_NOT_ARRIVING` is raised on the Alerts page when somebody
+has been signed in for two hours with screenshots switched on and none have
+arrived — and when their own app reported that macOS refused it, the alert says
+so and carries the fix. Threshold: `alert_no_screenshot_minutes`, in
+Configuration. Before this, an empty screenshots page looked exactly like a
+quiet day, which is how the nightly backup managed to fail for thirty-eight
+nights without anybody noticing.
+
+**What a proper signature needs** — this cannot be done from the repository,
+because it needs the company's own Apple identity:
+
+1. Apple Developer Program membership (≈ $99/year), on the company's Apple ID.
+2. A **Developer ID Application** certificate from that account, exported as a
+   `.p12` with a password.
+3. Both, plus an app-specific password for notarisation, added as GitHub
+   secrets — never committed.
+4. The build step changed from ad-hoc to that identity, with the hardened
+   runtime, and then notarised and stapled:
+
+   ```
+   codesign --force --deep --options runtime --timestamp \
+            --sign "Developer ID Application: <COMPANY> (<TEAMID>)" \
+            "dist/Amaze Connect.app"
+   xcrun notarytool submit "dmg_out/Amaze-Connect.dmg" \
+            --apple-id <APPLE_ID> --team-id <TEAMID> \
+            --password <APP_SPECIFIC_PASSWORD> --wait
+   xcrun stapler staple "dmg_out/Amaze-Connect.dmg"
+   ```
+
+With that in place the identity stops changing between versions, so Screen
+Recording is granted once and stays granted, and the Gatekeeper warning on
+first open goes away as well. Until then the alert above is the safety net, and
+it is worth checking after every release.

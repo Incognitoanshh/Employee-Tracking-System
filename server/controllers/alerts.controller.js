@@ -197,6 +197,49 @@ async function collectAlerts() {
           GROUP BY employee_id`, [String(automationWindowMinutes)]);
     const automationBy = new Map(automation.rows.map((r) => [r.employee_id, r]));
 
+    // ── MONITORING THAT HAS QUIETLY STOPPED ───────────────────────────
+    //
+    // How long each person has been signed in today, how many screenshots
+    // arrived, how many were meant to, and whether their own app said macOS
+    // had refused it. An empty screenshots page reads as a quiet day, so the
+    // absence has to be looked for on purpose — the same lesson as the
+    // backup that failed silently for thirty-eight nights.
+    //
+    // COALESCE on the config: a person with no row of their own is on the
+    // global one, which is the row with a NULL employee_id.
+    const capture = await pool.query(
+        `SELECT e.employee_id,
+                COALESCE(own.screenshots_per_day, global.screenshots_per_day, 0)
+                    AS per_day,
+                COALESCE((SELECT ROUND(SUM(EXTRACT(EPOCH FROM (
+                             COALESCE(a.logout_time, (NOW() AT TIME ZONE 'UTC'))
+                             - a.login_time))) / 60)
+                            FROM attendance a
+                           WHERE a.employee_id = e.employee_id
+                             AND ${istDate("a.login_time")} = ${istToday()}), 0)
+                    AS minutes_today,
+                COALESCE((SELECT COUNT(*) FROM screenshots sh
+                           WHERE sh.employee_id = e.employee_id
+                             AND ${istDate("sh.created_at")} = ${istToday()}), 0)
+                    AS shots_today,
+                EXISTS (SELECT 1 FROM activity_logs l
+                         WHERE l.employee_id = e.employee_id
+                           AND ${istDate("l.created_at")} = ${istToday()}
+                           AND UPPER(l.activity) LIKE '%SCREEN RECORDING%NOT GRANTED%')
+                    AS permission_denied
+           FROM employees e
+           LEFT JOIN employee_configs own
+                  ON own.employee_id = e.employee_id
+           LEFT JOIN employee_configs global
+                  ON global.employee_id IS NULL
+          WHERE e.role = 'employee'`);
+    const captureBy = new Map(capture.rows.map((r) => [r.employee_id, {
+        per_day: Number(r.per_day) || 0,
+        minutes_today: Number(r.minutes_today) || 0,
+        shots_today: Number(r.shots_today) || 0,
+        permission_denied: r.permission_denied === true,
+    }]));
+
     const days = await pool.query(
         `SELECT TO_CHAR(holiday_date, 'YYYY-MM-DD') AS day FROM holidays`);
     const holidays = new Set(days.rows.map((r) => r.day));
@@ -234,6 +277,7 @@ async function collectAlerts() {
             loggedInToday: loggedInToday.has(employee.employee_id),
             idleMinutes: idleMinutes.get(employee.employee_id) || 0,
             automation: automationBy.get(employee.employee_id) || null,
+            capture: captureBy.get(employee.employee_id) || null,
         }));
     }
 

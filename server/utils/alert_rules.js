@@ -64,6 +64,20 @@ const DEFAULTS = {
     // produces minutes that look like this, and the difference between
     // reading and faking is how long it goes on for.
     alert_automation_minutes: 30,
+    // ── MONITORING THAT HAS QUIETLY STOPPED ─────────────────────────────
+    //
+    // Minutes somebody can be signed in, with screenshots switched on, and
+    // nothing arriving, before it is reported. macOS grants Screen Recording
+    // per binary and an unsigned build loses it on every new version; a
+    // locked screen, a remote session and a revoked permission all look the
+    // same from here — an empty screenshots page that nobody thinks to
+    // doubt. The nightly backup failed silently for thirty-eight nights for
+    // exactly this reason: nothing watches for an absence unless it is told
+    // to.
+    //
+    // TWO HOURS, so a morning of meetings with the laptop shut is not an
+    // incident.
+    alert_no_screenshot_minutes: 120,
 };
 
 function setting(settings, key) {
@@ -212,6 +226,53 @@ function automatedInput({ employee, automation, settings }) {
     };
 }
 
+/**
+ * Screenshots are switched on, the person has been signed in for hours, and
+ * not one picture has arrived.
+ *
+ * WHY THIS IS AN ALERT AND NOT A LOG LINE. Everything else here is about
+ * what an employee is doing; this is about the monitoring itself having
+ * stopped, which is the failure nobody notices — an empty screenshots page
+ * looks exactly like a quiet day, and the longer it lasts the more it is
+ * taken as normal. The client says so in its own log when macOS has refused
+ * it; when that line is there it is quoted, because "allow it in System
+ * Settings and restart" is a fix somebody can act on in a minute.
+ */
+function screenshotsNotArriving({ employee, capture, settings }) {
+    const limit = setting(settings, "alert_no_screenshot_minutes");
+    if (!capture || !limit) return null;
+    // Switched off for this person is a decision, not a fault.
+    if (Number(capture.per_day) <= 0) return null;
+    const signedIn = Number(capture.minutes_today) || 0;
+    if (signedIn < limit) return null;
+    if (Number(capture.shots_today) > 0) return null;
+
+    const denied = capture.permission_denied === true;
+    return {
+        type: "SCREENSHOTS_NOT_ARRIVING",
+        // Being blind to somebody for a whole day outranks knowing they were
+        // idle for one.
+        severity: denied ? SEVERITY.HIGH : SEVERITY.MEDIUM,
+        employee_id: employee.employee_id,
+        employee_name: employee.full_name || employee.username,
+        title: denied
+            ? "Screen recording is not allowed on their machine"
+            : `No screenshots in ${describeGap(signedIn)} signed in`,
+        detail: denied
+            ? `Their app reported today that macOS has not granted Screen `
+              + `Recording, so captures would be blank. It has to be allowed `
+              + `in System Settings and the app restarted — until then there `
+              + `is nothing to look at for this person, however long they are `
+              + `signed in.`
+            : `Signed in for ${describeGap(signedIn)} today with screenshots `
+              + `set to ${capture.per_day} a day, and none have arrived. The `
+              + `screen may be refusing the capture (a locked screen or a `
+              + `remote session does), or the app may not have permission — `
+              + `their activity log says which.`,
+        minutes: signedIn,
+    };
+}
+
 /** "3 hr 20 min", "45 min", "2 days". Short enough to sit in a row. */
 function describeGap(minutes) {
     const total = Math.max(0, Math.round(Number(minutes) || 0));
@@ -244,13 +305,18 @@ function forEmployee(facts) {
         noLoginAfterShiftStart(facts),
         tooMuchIdle(facts),
         automatedInput(facts),
+        screenshotsNotArriving(facts),
     ].filter(Boolean);
 
     // Somebody whose app has been silent for two days has not "failed to log
     // in" as well — the second alert is the first one restated, and two rows
     // for one cause is how a list stops being read.
     const silent = found.some((a) => a.type === "NOT_REPORTING" || a.type === "NEVER_REPORTED");
-    const kept = silent ? found.filter((a) => a.type !== "NO_LOGIN") : found;
+    let kept = silent ? found.filter((a) => a.type !== "NO_LOGIN") : found;
+    // An app that has not reported for a day has not "sent no screenshots"
+    // as well — that is the same silence said twice, and two rows for one
+    // cause is how a list stops being read.
+    if (silent) kept = kept.filter((a) => a.type !== "SCREENSHOTS_NOT_ARRIVING");
 
     return kept.sort((a, b) => RANK[a.severity] - RANK[b.severity]);
 }
@@ -259,4 +325,5 @@ module.exports = {
     DEFAULTS, SEVERITY,
     setting, forEmployee, describeGap,
     notReporting, noLoginAfterShiftStart, tooMuchIdle, automatedInput,
+    screenshotsNotArriving,
 };
