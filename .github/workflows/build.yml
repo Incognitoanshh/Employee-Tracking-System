@@ -149,11 +149,20 @@ jobs:
           # while the app's own login screen said v1.0.2. Two answers to
           # "which build is this?" is the thing that caused an argument over
           # a build once already.
-          VERSION="${GITHUB_REF_NAME#v}"
-          case "$VERSION" in v*|"")
-            VERSION="$(grep -oE 'APP_VERSION = "[^"]+"' client/core/config/__init__.py | cut -d'"' -f2)";;
-          esac
-          case "$VERSION" in "") VERSION="0.0.0";; esac
+          # A TAG NAMES A RELEASE; ANYTHING ELSE TAKES THE APP'S OWN VERSION.
+          #
+          # This asked whether GITHUB_REF_NAME started with "v" — and on an
+          # ordinary push to main it is the BRANCH name, which is neither
+          # empty nor v-prefixed, so the installer called itself
+          # "Amaze Connect main". GITHUB_REF_TYPE is the thing that actually
+          # says whether this is a tag. Caught by reading the build log
+          # rather than by trusting the change.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep -oE 'APP_VERSION = "[^"]+"' client/core/config/__init__.py | cut -d'"' -f2)"
+          fi
+          case "$VERSION" in ""|*[!0-9.]*) VERSION="0.0.0";; esac
           echo "installer version: $VERSION"
           cat > installer.iss <<EOF
           [Setup]
