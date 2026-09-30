@@ -142,8 +142,19 @@ jobs:
           # installs to Program Files, adds a Start Menu entry, and
           # uninstalls cleanly: what somebody handing this to a company is
           # expected to provide, rather than a loose executable to copy.
+          # THE VERSION THE APP REPORTS ABOUT ITSELF, the same constant the
+          # Mac bundle's Info.plist is given. A tag still wins, because a
+          # release is named by its tag — but without one this said 0.0.0,
+          # so Windows listed "Amaze Connect 0.0.0" in Programs and Features
+          # while the app's own login screen said v1.0.2. Two answers to
+          # "which build is this?" is the thing that caused an argument over
+          # a build once already.
           VERSION="${GITHUB_REF_NAME#v}"
-          case "$VERSION" in v*|"") VERSION="0.0.0";; esac
+          case "$VERSION" in v*|"")
+            VERSION="$(grep -oE 'APP_VERSION = "[^"]+"' client/core/config/__init__.py | cut -d'"' -f2)";;
+          esac
+          case "$VERSION" in "") VERSION="0.0.0";; esac
+          echo "installer version: $VERSION"
           cat > installer.iss <<EOF
           [Setup]
           AppName=Amaze Connect
