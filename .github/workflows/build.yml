@@ -1,12 +1,16 @@
 name: Build Cross-Platform Desktop Apps
 
-# Shown against each run in the Actions list. "test 7" — the client is
-# byte-identical to test 6; everything fixed since then was server-side
-# (logout matching on the token, the migration script, the HTTPS setup) and
-# is already deployed. This build exists to carry the label into the final
-# round of testing. Still no tag, so the release job below does not run and
-# nothing is published.
-run-name: v1.0.1
+# Shown against each run in the Actions list, and it must match the version
+# the app reports about itself (client/core/config APP_VERSION) — otherwise
+# "which build is this?" has two answers.
+#
+# 1.0.2 carries the tracker board, the on-demand screenshot, per-minute
+# activity scoring, and the Employees list that no longer cuts its own buttons
+# off. THE SERVER MUST BE DEPLOYED FIRST: the tracker, the screenshot request
+# and the activity minutes are all new routes, and against an older server
+# they simply are not there. Still no tag, so the release job below does not
+# run and nothing is published.
+run-name: v1.0.2
 # THE ARTIFACT NAMES NO LONGER CARRY A LABEL, deliberately.
 #
 # They used to ("test-5-Windows-Installer"), and twice a run was renamed
