@@ -244,25 +244,37 @@ exports.getRecentActivity = async (req, res) => {
 // Charts data - last 7 days
 exports.getChartsData = async (req, res) => {
     try {
+        // ── THE DAY THESE BARS ARE DRAWN AGAINST ──────────────────────────
+        //
+        // BUG this fixes: DATE(created_at) on a naive UTC column is the UTC
+        // date, so everything between midnight and half past five in the
+        // morning IST was drawn on YESTERDAY's bar. Two screenshots taken on
+        // one working day — one at 01:30, one at 10:00 — came back as two
+        // days with one each, and a night shift's whole night landed on the
+        // day before. Every other day-based figure in this product is an IST
+        // day: attendance, idle_daily, the activity minutes, the log page's
+        // own date filter, and getMySummary right below this. This was the
+        // one screen that disagreed, and it is the first screen anybody
+        // opens.
         const screenshots = await pool.query(`
-            SELECT DATE(created_at) as date, COUNT(*) as count
+            SELECT ${istDate("created_at")} as date, COUNT(*) as count
             FROM screenshots
             WHERE created_at >= NOW() - INTERVAL '7 days'
-            GROUP BY DATE(created_at)
+            GROUP BY ${istDate("created_at")}
             ORDER BY date ASC
         `);
 
         const attendance = await pool.query(`
-            SELECT DATE(login_time) as date, COUNT(DISTINCT employee_id) as count
+            SELECT ${istDate("login_time")} as date, COUNT(DISTINCT employee_id) as count
             FROM attendance
             WHERE login_time >= NOW() - INTERVAL '7 days'
             AND employee_id IN (SELECT employee_id FROM employees WHERE role = 'employee')
-            GROUP BY DATE(login_time)
+            GROUP BY ${istDate("login_time")}
             ORDER BY date ASC
         `);
 
         const activity = await pool.query(`
-            SELECT DATE(created_at) as date, COUNT(*) as count
+            SELECT ${istDate("created_at")} as date, COUNT(*) as count
             FROM activity_logs
             WHERE created_at >= NOW() - INTERVAL '7 days'
             AND activity NOT LIKE 'ConfigSyncManager: started%'
@@ -279,7 +291,7 @@ exports.getChartsData = async (req, res) => {
             AND activity NOT LIKE 'SchedulerService: screenshot scheduled%'
             AND activity NOT LIKE 'SchedulerService: config updated%'
             AND activity NOT LIKE 'SchedulerService: rescheduled%'
-            GROUP BY DATE(created_at)
+            GROUP BY ${istDate("created_at")}
             ORDER BY date ASC
         `);
 
