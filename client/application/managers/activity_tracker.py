@@ -176,10 +176,43 @@ def foreground_window() -> str:
             return str(app.localizedName()) if app else ""
         if system == "Windows":
             import ctypes
+            from ctypes import wintypes
+
             user32 = ctypes.windll.user32
             handle = user32.GetForegroundWindow()
             pid = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
+
+            # THE PROGRAM'S NAME, as macOS already gives. This returned the
+            # process id and nothing else — a real Windows run reported the
+            # front window as "9312". Changes were still counted, because a
+            # different program has a different id, so nothing looked broken;
+            # but the docstring above promises a name, an id means nothing to
+            # anybody reading the evidence later, and the same program
+            # restarted read as a change of application.
+            #
+            # The executable's base name only — "chrome", "excel". Not the
+            # window title, for the reason in the docstring.
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            process = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+            if process:
+                try:
+                    buffer = ctypes.create_unicode_buffer(512)
+                    size = wintypes.DWORD(len(buffer))
+                    if kernel32.QueryFullProcessImageNameW(
+                            process, 0, buffer, ctypes.byref(size)):
+                        name = buffer.value.rsplit("\\", 1)[-1]
+                        if name.lower().endswith(".exe"):
+                            name = name[:-4]
+                        if name:
+                            return name
+                finally:
+                    kernel32.CloseHandle(process)
+            # Some processes refuse to be asked (a system window, another
+            # user's). The id still answers "did this change", which is all
+            # the scoring needs.
             return str(pid.value)
     except Exception:
         return ""

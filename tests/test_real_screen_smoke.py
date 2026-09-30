@@ -223,6 +223,13 @@ check("the last input has a timestamp in milliseconds, or none",
 window = at.foreground_window()
 check("and the front window has a name, or an empty string",
       isinstance(window, str), repr(window))
+# A NAME, NOT A NUMBER. Windows returned the process id and only the process
+# id — "9312" — which counts changes correctly and means nothing to anybody
+# reading the evidence afterwards. A bare number is still accepted for the
+# processes that refuse to be asked, but not as the ordinary answer.
+if SYSTEM in ("Windows", "Darwin") and window:
+    check("and it is the program's name rather than a bare process id",
+          not window.isdigit(), repr(window))
 print(f"      counters={'yes' if counters else 'unavailable'},"
       f" last input={'yes' if stamp else 'unavailable'},"
       f" front window={window[:40]!r}")
