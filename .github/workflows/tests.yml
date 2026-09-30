@@ -214,3 +214,49 @@ jobs:
           echo "─────────────────────────────"
           echo "$total checks passed, $failed suite(s) failed"
           test "$failed" -eq 0
+
+  # ── THE CALLS THAT ONLY EXIST ON THE MACHINES THIS SHIPS TO ─────────────
+  #
+  # Every other client suite runs on Linux with the platform calls replaced by
+  # stand-ins, which is right for testing the logic around them and blind to
+  # the call itself. That blindness cost something real: the macOS lock check
+  # named a module-level `Quartz` the file does not have, so on every Mac it
+  # raised NameError, the caller swallowed it, the check silently never fired —
+  # and its six stubbed tests passed throughout.
+  #
+  # So the same file runs here on a real Windows and a real Mac, with nothing
+  # replaced: the screen counted, the desktop state asked for, a capture
+  # actually attempted, the idle clock read, the input counters read. A runner
+  # has nobody sitting at its screen, so a refused capture is expected and is
+  # checked for being CLASSIFIED rather than for producing a picture.
+  platforms:
+    name: Real ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, macos-latest ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install what the client needs
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # pyobjc is macOS only and its absence is what makes Quartz absent,
+          # which is one of the things this job is here to notice.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            grep -v -i pyobjc requirements.txt > req.txt || cp requirements.txt req.txt
+            pip install -r req.txt
+          else
+            pip install -r requirements.txt
+          fi
+
+      - name: Run it against the operating system itself
+        shell: bash
+        run: python -u tests/test_real_screen_smoke.py
