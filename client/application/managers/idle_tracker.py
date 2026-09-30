@@ -11,6 +11,7 @@ from client.infrastructure.database.database import Database
 from client.application.managers.session_manager import SessionManager
 from client.core.config.settings import Settings
 from client.core.time_ist import ist_day_str, now_ist
+from client.core.win_ticks import ticks_ago_ms
 
 try:
     import Quartz
@@ -79,7 +80,13 @@ class IdleTracker(QObject):
                 lii = _LASTINPUTINFO()
                 lii.cbSize = ctypes.sizeof(_LASTINPUTINFO)
                 ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
-                millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
+                # THE WRAP, not a subtraction — see core/win_ticks. Taken
+                # plainly this goes negative once the counter rolls over
+                # (every 49.7 days of uptime) while the last input is still
+                # on the far side of it, and a negative idle figure is below
+                # every threshold: the machine stops reporting anybody idle.
+                millis = ticks_ago_ms(
+                    ctypes.windll.kernel32.GetTickCount(), lii.dwTime)
                 return millis / 1000.0
             except Exception as e:
                 LoggerService.log(f"[IdleTracker] Windows idle detection failed: {e}")

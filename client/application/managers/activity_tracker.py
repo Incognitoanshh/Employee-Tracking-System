@@ -41,6 +41,7 @@ from client.application.managers.session_manager import SessionManager
 from client.infrastructure.database.database import Database
 from client.services.logger_service import LoggerService
 from client.core.time_ist import now_ist
+from client.core.win_ticks import ticks_ago_ms
 
 try:
     import Quartz
@@ -142,7 +143,18 @@ def last_input_ms() -> int | None:
             info = _LastInput()
             info.cbSize = ctypes.sizeof(_LastInput)
             ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info))
-            return int(info.dwTime)
+            # THE SAME CLOCK AS macOS, which this promised and did not give.
+            #
+            # It returned dwTime as it stood: milliseconds since the machine
+            # booted. Gaps between consecutive calls come out right, which is
+            # all the scoring uses, so nothing was visibly wrong — and the
+            # number meant something different on Windows from what it meant
+            # on a Mac, went stale every 49.7 days at the counter's wrap, and
+            # sat under a docstring promising when the input happened. Caught
+            # by running this on a real Windows machine, which answered 49734
+            # — the runner had been up for fifty seconds.
+            return int(time.time() * 1000) - ticks_ago_ms(
+                ctypes.windll.kernel32.GetTickCount(), info.dwTime)
     except Exception:
         return None
     return None

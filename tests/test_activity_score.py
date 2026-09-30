@@ -279,6 +279,26 @@ finally:
     (tracker_mod.read_counters, tracker_mod.last_input_ms,
      tracker_mod.foreground_window) = real
 
+print("\nWindows tick counters, which roll over every 49.7 days")
+
+from client.core.win_ticks import ticks_ago_ms, TICK_WRAP                    # noqa: E402
+
+check("an ordinary difference is just the difference",
+      ticks_ago_ms(50_000, 20_000) == 30_000, str(ticks_ago_ms(50_000, 20_000)))
+# THE WRAP. GetTickCount has rolled over to 100ms since boot; the last input
+# was 296ms before the roll. Taken plainly this is -4,294,966,904 — and a
+# negative "seconds since last input" is below every idle threshold, so a
+# Windows machine up for seven weeks stops reporting anybody as idle.
+check("and across the roll-over it is still the time that passed",
+      ticks_ago_ms(100, TICK_WRAP - 296) == 396,
+      str(ticks_ago_ms(100, TICK_WRAP - 296)))
+check("never negative, which is what silenced the idle tracker",
+      all(ticks_ago_ms(now, last) >= 0
+          for now, last in ((0, TICK_WRAP - 1), (5, 4_294_967_290), (0, 0))),
+      "a negative difference got through")
+check("and the same input twice is no time at all",
+      ticks_ago_ms(123_456, 123_456) == 0)
+
 print("\nThe owner's own machine is not scored")
 
 SessionManager.role = "super_admin"
