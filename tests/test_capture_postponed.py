@@ -159,6 +159,77 @@ try:
 finally:
     sm._win_session_state, sm._win_input_desktop_name = real_state, real_name
 
+print("\nAnd what macOS is asked, which it was not before")
+
+# THE SAME QUESTION, THE OTHER PLATFORM. A locked Mac was photographed anyway
+# and the result — the lock screen, or a black frame — was filed as an
+# ordinary screenshot against the day's allowance. Blank pictures are also
+# what a missing Screen Recording permission produces, so the two could not be
+# told apart in the one place somebody looks.
+real_session = sm._mac_session_info
+try:
+    sm._mac_session_info = lambda: {"CGSSessionScreenIsLocked": 0,
+                                    "kCGSSessionOnConsoleKey": 1}
+    ready, why = sm._macos_desktop_ready()
+    check("an unlocked Mac at its own screen is ready", ready and why == "",
+          f"{ready} {why}")
+
+    sm._mac_session_info = lambda: {"CGSSessionScreenIsLocked": 1,
+                                    "kCGSSessionOnConsoleKey": 1}
+    ready, why = sm._macos_desktop_ready()
+    check("a locked Mac is not", not ready, str(ready))
+    check("and the reason says locked, not 'failed'", "locked" in why.lower(), why)
+
+    # Fast user switching: our session is still running, somebody else's
+    # desktop is in front of it.
+    sm._mac_session_info = lambda: {"CGSSessionScreenIsLocked": 0,
+                                    "kCGSSessionOnConsoleKey": 0}
+    ready, why = sm._macos_desktop_ready()
+    check("nor is one where another user is at the screen", not ready, str(ready))
+    check("and that is what it says", "another user" in why.lower(), why)
+
+    # NEVER BLOCK A CAPTURE BECAUSE THE QUESTION COULD NOT BE ASKED. On a Mac
+    # without Quartz, or outside a window session, this answers nothing.
+    sm._mac_session_info = lambda: None
+    ready, why = sm._macos_desktop_ready()
+    check("and if macOS will not say, the capture still goes ahead",
+          ready and why == "", f"{ready} {why}")
+
+    sm._mac_session_info = lambda: (_ for _ in ()).throw(RuntimeError("no session"))
+    ready, why = sm._macos_desktop_ready()
+    check("the same if the question itself breaks", ready, f"{ready} {why}")
+finally:
+    sm._mac_session_info = real_session
+
+# AND THE QUESTION CAN ACTUALLY BE ASKED ON A MAC — checked WITHOUT the stub.
+#
+# Everything above replaces _mac_session_info, so it proves the logic and
+# nothing about the call itself. Written the obvious way, that call named a
+# module-level `Quartz` this file does not have: NameError on every real Mac,
+# swallowed by the caller, the lock check silently never firing, and the tests
+# above passing throughout. Only running it finds that.
+if sys.platform == "darwin":
+    live = sm._mac_session_info()
+    check("on a real Mac the session can be read at all",
+          isinstance(live, dict) and "kCGSSessionOnConsoleKey" in live,
+          str(live)[:120])
+    ready, why = sm._desktop_ready()
+    check("and the capture's check answers from it, in the right shape",
+          isinstance(ready, bool) and isinstance(why, str), f"{ready!r} {why!r}")
+
+# AND IT IS WIRED IN, not merely written. _desktop_ready is what the capture
+# calls, and on a Mac it used to answer "yes, always".
+real_platform, real_mac = sm.sys.platform, sm._mac_session_info
+try:
+    sm.sys = types.SimpleNamespace(platform="darwin")
+    sm._mac_session_info = lambda: {"CGSSessionScreenIsLocked": 1}
+    ready, why = sm._desktop_ready()
+    check("the capture's own question reaches that answer on a Mac",
+          not ready and "locked" in why.lower(), f"{ready} {why}")
+finally:
+    sm.sys = real_platform if not isinstance(real_platform, str) else sys
+    sm._mac_session_info = real_mac
+
 check("on this machine, which is not Windows, nothing is in the way",
       sm._desktop_ready() == (True, ""), str(sm._desktop_ready()))
 

@@ -327,6 +327,59 @@ def _win_session_state():
         wtsapi.WTSFreeMemory(buffer)
 
 
+def _mac_session_info():
+    """What macOS says about this login session, or None if it cannot say.
+
+    A SEAM, like the two Windows calls above: it is the only part of the check
+    below that cannot run anywhere but a Mac with a window server, so it is
+    the only part a test has to stand in for.
+    """
+    try:
+        # IMPORTED HERE, like every other use of Quartz in this file — there
+        # is no module-level `Quartz` to test against, and written that way
+        # this raised NameError on every real Mac while the test, which
+        # replaces this function, went on passing. The caller swallows the
+        # error and falls back to "go ahead", so the lock check would simply
+        # never have fired: silent, and only findable by running it.
+        import Quartz
+        return dict(Quartz.CGSessionCopyCurrentDictionary() or {})
+    except Exception:
+        return None
+
+
+def _macos_desktop_ready():
+    """(can macOS copy the screen now, and if not, why not).
+
+    WHY THIS EXISTS. Windows was asked this and macOS was not, so a locked Mac
+    was photographed anyway — and what came back was the lock screen or a
+    black frame, recorded as an ordinary screenshot and counted against the
+    day's allowance. Blank pictures are also exactly what a missing Screen
+    Recording permission produces, so the two were indistinguishable in the
+    one place somebody looks to tell them apart.
+
+    Postponed rather than failed, the same as Windows: the slot is kept and
+    the capture is taken when there is something on the screen to take.
+    """
+    try:
+        info = _mac_session_info()
+        if not info:
+            # Cannot tell — never block a capture that might have worked.
+            return True, ""
+        if info.get("CGSSessionScreenIsLocked"):
+            return False, "the screen is locked"
+        # Fast user switching: this session is still running, but somebody
+        # else's desktop is in front of it and there is nothing of ours to
+        # photograph.
+        if "kCGSSessionOnConsoleKey" in info and not info.get("kCGSSessionOnConsoleKey"):
+            return False, ("another user is signed in at the screen at the "
+                           "moment")
+    except Exception as error:
+        LoggerService.log_verbose(
+            f"ScreenshotManager: could not read the session state — {error}")
+        return True, ""
+    return True, ""
+
+
 def _windows_desktop_ready():
     """(can Windows copy the screen now, and if not, why not)."""
     try:
@@ -351,14 +404,20 @@ def _windows_desktop_ready():
 
 
 def _desktop_ready():
-    """Whether the screen can be read at all. Windows only; elsewhere, yes.
+    """Whether the screen can be read at all, on either platform.
 
-    macOS has its own answer already — see the permission note in
-    capture_screenshot — and on Linux there is nothing equivalent to ask.
+    macOS is asked about the lock screen and fast user switching; Windows
+    about the lock screen, the secure desktop and a disconnected Remote
+    Desktop session. Both answers mean the same thing to the caller: there is
+    nothing on the screen worth copying, so keep the slot and come back.
+
+    On Linux there is nothing equivalent to ask.
     """
-    if sys.platform != "win32":
-        return True, ""
-    return _windows_desktop_ready()
+    if sys.platform == "win32":
+        return _windows_desktop_ready()
+    if sys.platform == "darwin":
+        return _macos_desktop_ready()
+    return True, ""
 
 
 def _capture_failure_hint(error, platform, permission_missing):
