@@ -17,6 +17,8 @@
 
 const pool = require("../config/db");
 const rules = require("../utils/alert_rules");
+const { DEFAULT_CONFIG } = require("./config.controller");
+const DEFAULT_SHOTS_PER_DAY = Number(DEFAULT_CONFIG.screenshots_per_day) || 0;
 const { istDate, istToday } = require("../utils/ist_sql");
 
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
@@ -209,8 +211,14 @@ async function collectAlerts() {
     // global one, which is the row with a NULL employee_id.
     const capture = await pool.query(
         `SELECT e.employee_id,
-                COALESCE(own.screenshots_per_day, global.screenshots_per_day, 0)
-                    AS per_day,
+                -- THE SAME DEFAULT THE CLIENTS ARE GIVEN. A missing config
+                -- row means "use the default" everywhere else in this product
+                -- (see config.controller), and that is 10 a day — not zero.
+                -- Zero here reads as "switched off for this person", so on a
+                -- database with no global row, which production is, this rule
+                -- quietly never fired: a watchdog that was itself silent.
+                COALESCE(own.screenshots_per_day, global.screenshots_per_day,
+                         $1::int) AS per_day,
                 COALESCE((SELECT ROUND(SUM(EXTRACT(EPOCH FROM (
                              COALESCE(a.logout_time, (NOW() AT TIME ZONE 'UTC'))
                              - a.login_time))) / 60)
@@ -232,7 +240,7 @@ async function collectAlerts() {
                   ON own.employee_id = e.employee_id
            LEFT JOIN employee_configs global
                   ON global.employee_id IS NULL
-          WHERE e.role = 'employee'`);
+          WHERE e.role = 'employee'`, [DEFAULT_SHOTS_PER_DAY]);
     const captureBy = new Map(capture.rows.map((r) => [r.employee_id, {
         per_day: Number(r.per_day) || 0,
         minutes_today: Number(r.minutes_today) || 0,

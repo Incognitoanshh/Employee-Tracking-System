@@ -270,6 +270,32 @@ async function main() {
             JSON.stringify(res.body.alerts.map((a) => `${a.employee_id}:${a.type}`)));
         psql(DB, `UPDATE employee_configs SET screenshots_per_day = 10
                    WHERE employee_id IS NULL`);
+
+        // ── AND WITH NO CONFIG ROW AT ALL ────────────────────────────────
+        //
+        // Production has no global row: screenshots_per_day comes from
+        // DEFAULT_CONFIG in config.controller, which is ten a day. This rule
+        // fell back to ZERO instead, which it reads as "switched off for this
+        // person, not a fault" — so on that database the watchdog for
+        // screenshots never arriving was itself silent, which is the exact
+        // failure it exists to prevent. Found by looking at production, not
+        // by reading the code.
+        psql(DB, `DELETE FROM employee_configs WHERE employee_id IS NULL`);
+        // Clear the machine's own report first, so this reads the plain
+        // branch — the one that has to name how many were expected.
+        psql(DB, `DELETE FROM activity_logs WHERE employee_id='E003'
+                    AND activity ILIKE '%SCREEN RECORDING%'`);
+        res = await api("GET", "/admin/alerts", { token: admin });
+        blind = find(res.body.alerts, "E003", "SCREENSHOTS_NOT_ARRIVING");
+        check("with no config row anywhere, the default still says screenshots are expected",
+            Boolean(blind), JSON.stringify(res.body.alerts.map((a) => a.type)));
+        check("and the row says how many were meant to arrive",
+            blind && /10 a day/.test(blind.detail), (blind || {}).detail);
+        psql(DB, `INSERT INTO employee_configs (employee_id, shift_start, shift_end,
+                                                late_grace_minutes, weekly_offs,
+                                                screenshots_per_day)
+                  VALUES (NULL, '09:00', '18:00', 10, '7', 10)`);
+
         psql(DB, `DELETE FROM attendance WHERE employee_id = 'E003'`);
         psql(DB, `DELETE FROM activity_logs WHERE employee_id = 'E003'`);
 

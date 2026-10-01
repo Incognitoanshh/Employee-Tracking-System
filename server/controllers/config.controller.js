@@ -195,3 +195,12 @@ exports.syncConfig = async (req, res) => {
         return res.status(500).json({ success: false, message: "Internal server error" });
     }
 };
+
+// SHARED, because something else now has to know what this is.
+//
+// The alert that watches for screenshots not arriving has to answer "how many
+// were meant to arrive", and it answered 0 when no config row existed — which
+// it reads as "switched off for this person, not a fault". On a database with
+// no global row (production is one) that silenced the watchdog entirely.
+// Exported so there is one answer to the question rather than two.
+exports.DEFAULT_CONFIG = DEFAULT_CONFIG;
