@@ -86,7 +86,11 @@ def main():
 
     from client.presentation.windows import profile_page as pp
     from client.presentation.windows.profile_page import ProfilePage
+    from client.application.managers.session_manager import SessionManager
 
+    # AN ADMINISTRATOR'S PROFILE FIRST — the whole page, every card. What an
+    # employee's copy leaves out is checked at the end.
+    SessionManager.role = "admin"
     page = ProfilePage(panel=None)
 
     print("It builds with no network at all")
@@ -420,6 +424,37 @@ def main():
           page._rows["department"].text())
 
     page.hide()
+
+    print("\nAn employee's copy leaves out what was exposed")
+    # THE OWNER: "profile me v bahut kuch exposed hai joki necessary nahi hai".
+    # Idle and active time, the screenshot count, the three seven-day graphs,
+    # the device card and the sign-in history are the company's figures about
+    # the employee, for administrators to read.
+    SessionManager.role = "employee"
+    mine = ProfilePage(panel=None)
+    for key in ("today_active", "today_idle", "today_shots",
+                "device_name", "device_status"):
+        check(f"no {key} row", key not in mine._rows)
+    check("no seven-day graphs", mine._charts == {}, str(list(mine._charts)))
+    check("no sign-in history or device list",
+          not hasattr(mine, "_history_box") and not hasattr(mine, "_sessions_box"))
+    check("what is theirs is still there",
+          all(k in mine._rows for k in ("today_login", "today_worked",
+                                        "week_hours", "month_attendance",
+                                        "employee_id")))
+    crashed = None
+    try:
+        mine._on_summary(dict(SUMMARY))
+    except Exception as error:
+        crashed = error
+    check("and the week's figures still fill in without the missing rows",
+          crashed is None and mine._rows["today_worked"].text() == "2h 00m",
+          str(crashed or mine._rows["today_worked"].text()))
+    called = []
+    mine._run = lambda fn, *a, **k: called.append(getattr(fn, "__name__", ""))
+    mine.refresh()
+    check("and it does not even ask the server for the device list",
+          "_fetch_sessions" not in called, str(called))
 
     print("all profile page checks passed")
     sys.stdout.flush()

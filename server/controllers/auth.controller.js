@@ -1,6 +1,7 @@
 const pool = require("../config/db");
 const crypto = require("crypto");
 const { endSession, endSessionForToken, markLoggedIn } = require("../utils/session");
+const { closeShiftNow } = require("../utils/attendance_cleanup");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { validatePassword } = require("../utils/password_policy");
@@ -34,7 +35,23 @@ exports.logout = async (req, res) => {
             // session that sent it — see utils/session.js. Matching on the
             // employee alone let a stale instance end a session opened
             // afterwards, on another machine.
-            await endSessionForToken(pool, decoded.employee_id, token);
+            const ended = await endSessionForToken(pool, decoded.employee_id, token);
+
+            // SIGNING OUT ENDS THE SHIFT, HERE, IN THE SAME REQUEST.
+            //
+            // The shift was only ever closed by the client's own
+            // /attendance/logout — and every client sent it AFTER this
+            // request, with the token this line has just cleared. It was
+            // refused with a 401 that nobody looked at, so every sign-out
+            // left the day's row open: "Incomplete" beside somebody who had
+            // pressed Logout. Reported by the owner from the attendance page.
+            //
+            // Only when THIS token's session was the one ended. A stale
+            // instance signing out ends nothing, and must not close the shift
+            // of the session that replaced it.
+            if (ended) {
+                await closeShiftNow(pool, decoded.employee_id);
+            }
         } catch (dbError) {
             // DB issue — client-side session already clear ho chuki hogi,
             // logout request ko fail mat karo iske liye.

@@ -207,6 +207,55 @@ try:
     check("while a scheduled one says nothing about requests",
           posted and not (posted[-1].get("data") or {}),
           str(posted[-1].get("data") if posted else "nothing uploaded"))
+    print("\nA requested capture while the screen cannot be read")
+    # REPORTED FROM THE ADMIN'S LOG: six "SCREENSHOT POSTPONED : screen grab
+    # failed" rows inside thirty seconds for ONE press of the button, then
+    # the picture. The request comes back on every five-second sync until a
+    # picture answers it, and each attempt wrote the same line to the record.
+    recorded, quiet = [], []
+    real_log, real_verbose = sm.LoggerService.log, sm.LoggerService.log_verbose
+    sm.LoggerService.log = lambda m, *a, **k: recorded.append(str(m))
+    sm.LoggerService.log_verbose = lambda m, *a, **k: quiet.append(str(m))
+    real_ready = sm._desktop_ready
+    sm._desktop_ready = lambda: (False, "the workstation is locked")
+    try:
+        before = rows_now()
+        for _sync in range(6):            # six syncs, five seconds apart
+            ScreenshotManager.capture_screenshot(request_id=91)
+        said = [m for m in recorded if "POSTPONED" in m]
+        check("it is written to the record once, not once per sync",
+              len(said) == 1, f"{len(said)} lines: {said[:2]}")
+        check("and says it will keep trying",
+              said and "tried again" in said[0], str(said)[:160])
+        check("without saying anybody asked for it",
+              not any("REQUEST" in m.upper() for m in recorded + quiet),
+              str(said)[:160])
+        check("the other attempts still happen, quietly",
+              sum("POSTPONED" in m for m in quiet) == 5, str(len(quiet)))
+        check("nothing was stored while the screen was unreadable",
+              rows_now() == before)
+
+        sm._desktop_ready = real_ready
+        posted.clear()
+        taken = ScreenshotManager.capture_screenshot(request_id=91)
+        check("and the picture is taken the moment the screen comes back",
+              taken is not None
+              and (posted[-1].get("data") or {}).get("request_id") == "91",
+              str(posted[-1].get("data") if posted else "nothing uploaded"))
+
+        sm._desktop_ready = lambda: (False, "the workstation is locked")
+        recorded.clear()
+        ScreenshotManager.capture_screenshot(request_id=92)
+        check("a NEW request is written down again — it is a new question",
+              sum("POSTPONED" in m for m in recorded) == 1, str(recorded)[:160])
+        recorded.clear()
+        ScreenshotManager.capture_screenshot()
+        ScreenshotManager.capture_screenshot()
+        check("scheduled postponements are still each written down",
+              sum("POSTPONED" in m for m in recorded) == 2, str(recorded)[:160])
+    finally:
+        sm._desktop_ready = real_ready
+        sm.LoggerService.log, sm.LoggerService.log_verbose = real_log, real_verbose
 finally:
     sm._grab_via_quartz, sm.pyautogui.screenshot = real_quartz, real_auto
     sm._http.post = real_http

@@ -266,7 +266,23 @@ def main():
             except Exception:
                 time.sleep(0.2)
 
+        # The failed first try put the next one an hour out — the owner's
+        # rule, so a dead server is not asked once a minute all day. Nothing
+        # goes before then; at the hour it is sent.
+        import client.application.managers.sync_manager as sync_mod
         SyncManager.retry_uploads()
+        with Database.get_connection() as conn:
+            early = conn.execute(
+                "SELECT COUNT(*) c FROM screenshots WHERE uploaded=0").fetchone()["c"]
+        check("it is not retried before its hour is up", early == 1,
+              f"{early} pending")
+        real_now = sync_mod.now_ist
+        later = real_now() + sync_mod.timedelta(minutes=61)
+        sync_mod.now_ist = lambda: later
+        try:
+            SyncManager.retry_uploads()
+        finally:
+            sync_mod.now_ist = real_now
         with Database.get_connection() as conn:
             still = conn.execute(
                 "SELECT COUNT(*) c FROM screenshots WHERE uploaded=0").fetchone()["c"]

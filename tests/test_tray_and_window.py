@@ -79,7 +79,13 @@ check("it is a system tray icon, not something drawn inside the window",
 
 menu = tray.contextMenu()
 items = [action.text() for action in (menu.actions() if menu else []) if action.text()]
-check("with a menu on it", bool(menu) and len(items) >= 4, str(items))
+check("with a menu on it", bool(menu) and len(items) >= 2, str(items))
+# NOT "View Logs" OR "Settings". Both opened windows showing the employee
+# their activity log, the monitoring settings and the folder captures are
+# kept in — the details the owner had taken out of the panel. The menu must
+# not be a side door back to them.
+check("and no way into the logs or the monitoring settings from it",
+      not any(t in ("View Logs", "Settings") for t in items), str(items))
 # THE WAY OUT HAS TO BE THERE. A tray icon with no Exit is an application
 # somebody has to kill from Activity Monitor.
 check("and a way to leave the application in it",
@@ -94,7 +100,7 @@ check("each item is named in words, not in an icon alone",
 # slot, same consequence. An item that silently does nothing is an item nobody
 # presses twice — and the tray is used precisely when the window is hidden, so
 # each one has to be able to bring something up from nothing.
-for wanted in ("Open Dashboard", "View Logs", "Settings"):
+for wanted in ("Open Dashboard",):
     action = next((a for a in menu.actions() if wanted in a.text()), None)
     if action is None:
         check(f"the tray offers {wanted!r}", False, str(items))

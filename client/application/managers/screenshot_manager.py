@@ -469,6 +469,37 @@ class ScreenshotManager:
         "captured", "postponed", "failed", "skipped")
     last_outcome = SKIPPED
 
+    # REQUESTS ALREADY TOLD ABOUT. See _say_postponed.
+    _postponed_requests: set = set()
+
+    @classmethod
+    def _say_postponed(cls, request_id, line: str):
+        """Write a postponement down — once per administrator's request.
+
+        A requested capture is handed to this client on EVERY config sync,
+        five seconds apart, until a picture answers it (the server closes the
+        request on the upload, not on hand-over — see config.controller). So
+        while the screen cannot be read, the same request comes back every
+        five seconds, and each one wrote the same line. Reported from the
+        admin's log: six "SCREENSHOT POSTPONED : screen grab failed" rows
+        inside thirty seconds for one button press, and then the picture.
+
+        Trying again on each sync is right — the picture arrives the moment
+        the screen can be read. Saying so each time is not. The first is
+        written to the record; the rest only to the verbose log.
+        """
+        if request_id is None:
+            LoggerService.log(line)
+            return
+        if request_id in cls._postponed_requests:
+            LoggerService.log_verbose(line)
+            return
+        cls._postponed_requests.add(request_id)
+        # No "requested" in the words: these lines are the employee's own
+        # record, and being looked at must not announce itself there.
+        LoggerService.log(line + "  [tried again on each sync until the "
+                                 "screen can be read; written once]")
+
     @classmethod
     def should_try_again(cls) -> bool:
         """True when the last capture did not happen for a passing reason."""
@@ -696,7 +727,8 @@ class ScreenshotManager:
         ready, why = _desktop_ready()
         if not ready:
             cls.last_outcome = cls.POSTPONED
-            LoggerService.log(
+            cls._say_postponed(
+                request_id,
                 f"SCREENSHOT POSTPONED : {why} — this capture will be taken "
                 f"later, and the day's count still stands at {taken}/{allowed}"
             )
@@ -785,6 +817,13 @@ class ScreenshotManager:
             )
             connection.commit()
             connection.close()
+            # The sync tick must not send this one again while the upload
+            # below is still on its way. Not worth failing a capture that is
+            # already saved over: at worst it is sent twice.
+            try:
+                SyncManager.hold_for_first_upload(screenshot_id)
+            except Exception:
+                pass
         except Exception as error:
             # What the failure MEANS, and whether it is worth trying again —
             # see _capture_failure_hint.
@@ -801,7 +840,8 @@ class ScreenshotManager:
                 # not a failure of ours, and it must not cost the day a
                 # capture. Same treatment as a locked screen above.
                 cls.last_outcome = cls.POSTPONED
-                LoggerService.log(
+                cls._say_postponed(
+                    request_id,
                     f"SCREENSHOT POSTPONED : {error} — this capture will be "
                     f"taken later.{hint}")
             else:
@@ -832,20 +872,19 @@ class ScreenshotManager:
             if response.status_code == 200:
                 SyncManager.mark_uploaded(screenshot_id)
             else:
-                # BUG FIX: pehle yahan kuch log nahi hota tha — non-200 response
-                # silently ignore ho jata tha. Row uploaded=0 hi rahegi,
-                # retry_uploads() isko baad mein retry karega.
-                LoggerService.log(
-                    f"ScreenshotManager: upload failed, will retry — "
-                    f"HTTP {response.status_code} {response.text[:200]}"
-                )
+                # The first of the day's three tries. Row uploaded=0 rehti
+                # hai; retry_uploads() ek ghante baad dobara bhejega — see
+                # SyncManager.record_upload_failure for the whole rule.
+                SyncManager.record_upload_failure(
+                    screenshot_id,
+                    f"HTTP {response.status_code} {response.text[:200]}")
 
         except Exception as error:
-            # BUG FIX: pehle exception silently swallow ho jata tha bina kisi
-            # log ke. Ab log hota hai taaki debugging possible ho.
-            LoggerService.log(
-                f"ScreenshotManager: upload error, will retry — {error}"
-            )
+            try:
+                SyncManager.record_upload_failure(screenshot_id, str(error))
+            except Exception:
+                LoggerService.log(
+                    f"ScreenshotManager: upload error, will retry — {error}")
 
         cls.last_outcome = cls.CAPTURED
         return {

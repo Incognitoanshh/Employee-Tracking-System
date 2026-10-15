@@ -13219,12 +13219,6 @@ class AdminConfigPanel(QMainWindow):
         from client.application.managers.session_log_manager import SessionLogManager
         from client.presentation.windows.login_window import LoginWindow
 
-        # The server first, while the token still works — see the note in
-        # employee_panel.logout. Not when the server ended it itself.
-        if not reason:
-            from client.application.services.auth_service import AuthService
-            AuthService.sign_out_on_server()
-
         self._stop_background_services()
 
         # BUG FIX: admin panel se logout karne par LOGOUT kabhi log nahi hota
@@ -13247,6 +13241,15 @@ class AdminConfigPanel(QMainWindow):
             ShiftManager.end_shift()
         except Exception as e:
             pass
+
+        # The server, while the token still works — and AFTER the shift is
+        # closed, never before: signing out clears the token, and the
+        # /attendance/logout sent after it was refused, leaving the row open.
+        # See the note in employee_panel._do_logout. Not when the server
+        # ended it itself.
+        if not reason:
+            from client.application.services.auth_service import AuthService
+            AuthService.sign_out_on_server()
 
         # Tray hata do — warna logout ke baad bhi icon padha rehta hai aur
         # uska menu ek band ho chuke panel ko point karta hai.

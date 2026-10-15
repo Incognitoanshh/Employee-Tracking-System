@@ -46,6 +46,33 @@ def check(label, ok, detail=""):
     sys.stdout.flush()
 
 
+def _drive_employee_panel(module):
+    """Run the real EmployeePanel._do_logout with the window parts stubbed."""
+    panel = module.EmployeePanel.__new__(module.EmployeePanel)
+    panel._stop_everything = lambda: None
+    panel.close = lambda: None
+    panel.deleteLater = lambda: None
+    real_log = module.LoggerService.log
+    module.LoggerService.log = lambda *a, **k: None
+    try:
+        module.EmployeePanel._do_logout(panel)
+    finally:
+        module.LoggerService.log = real_log
+
+
+def _drive_admin_panel(module):
+    """Run the real AdminConfigPanel._do_logout with the window parts stubbed."""
+    panel = module.AdminConfigPanel.__new__(module.AdminConfigPanel)
+    panel._stop_background_services = lambda: None
+    panel.tray = None
+    real_log = module.LoggerService.log
+    module.LoggerService.log = lambda *a, **k: None
+    try:
+        module.AdminConfigPanel._do_logout(panel)
+    finally:
+        module.LoggerService.log = real_log
+
+
 def main():
     from client.application.services import auth_service
     from client.application.services.auth_service import AuthService
@@ -266,6 +293,73 @@ def main():
                   len(boom) == 2, f"{len(boom)} attempt(s)")
         finally:
             module.LoggerService.log = real_log
+
+    print("\nThe shift is closed BEFORE the token is")
+    # REPORTED BY THE OWNER: "logout krne ke baad v ye incomplete kyu show kr
+    # rha hai". Every path signed out on the server first — which clears the
+    # token — and then sent /attendance/logout with it. That was refused, the
+    # refusal was swallowed, and the day's row stayed open as "Incomplete".
+    # Driven for real, all three paths, recording the order things happen in.
+    from client.application.managers.shift_manager import ShiftManager
+    from client.application.managers.session_log_manager import SessionLogManager
+    from client.presentation.windows import login_window as lw
+    from client.presentation.tray import system_tray as st
+
+    order = []
+    saved = {
+        "end_shift": ShiftManager.end_shift,
+        "end_session": SessionLogManager.end_session,
+        "sign_out": AuthService.sign_out_on_server,
+        "clear": SessionManager.clear_session,
+        "login_window": lw.LoginWindow,
+        "acp_qmain": acp2.QMainWindow,
+        "tray_post": st._http.post,
+        "tray_app": st.QApplication,
+        "tray_log": st.LoggerService.log,
+    }
+
+    class _Quiet:
+        def __init__(self, *a, **k): pass
+        def show(self): pass
+        @staticmethod
+        def close(*a, **k): pass
+        @staticmethod
+        def quit(): pass
+
+    ShiftManager.end_shift = staticmethod(lambda: order.append("shift"))
+    SessionLogManager.end_session = staticmethod(lambda: order.append("session-log"))
+    AuthService.sign_out_on_server = staticmethod(lambda: order.append("token") or True)
+    SessionManager.clear_session = staticmethod(lambda: order.append("clear"))
+    lw.LoginWindow = _Quiet
+    acp2.QMainWindow = _Quiet
+    st._http.post = lambda url, **k: order.append(
+        "token" if url.endswith("/auth/logout") else url)
+    st.QApplication = _Quiet
+    st.LoggerService.log = lambda *a, **k: None
+    try:
+        for label, run in (
+            ("employee panel Logout", lambda: _drive_employee_panel(ep2)),
+            ("admin panel Logout", lambda: _drive_admin_panel(acp2)),
+            ("tray Exit", lambda: st.SystemTray.exit_application(
+                st.SystemTray.__new__(st.SystemTray))),
+        ):
+            order.clear()
+            run()
+            check(f"{label}: closes the shift, then signs out",
+                  "shift" in order and "token" in order
+                  and order.index("shift") < order.index("token"),
+                  f"order was {order} — /attendance/logout goes out with a "
+                  f"dead token and the row stays Incomplete")
+    finally:
+        ShiftManager.end_shift = saved["end_shift"]
+        SessionLogManager.end_session = saved["end_session"]
+        AuthService.sign_out_on_server = saved["sign_out"]
+        SessionManager.clear_session = saved["clear"]
+        lw.LoginWindow = saved["login_window"]
+        acp2.QMainWindow = saved["acp_qmain"]
+        st._http.post = saved["tray_post"]
+        st.QApplication = saved["tray_app"]
+        st.LoggerService.log = saved["tray_log"]
 
     print("\nBoth panels use it")
     # One helper, called from both, because a third sign-out path added later

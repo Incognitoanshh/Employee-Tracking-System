@@ -6,7 +6,8 @@ Bugs fixed:
     2. Double-click on macOS (DoubleClick + Trigger both handled)
     3. showMessage() proper args (title, msg, icon, msecs)
     4. Dynamic tooltip reflects current state
-    5. "View Logs" + "Settings" menu items added
+    5. "View Logs" + "Settings" were added here, and later taken out again —
+       see the note in __init__
     """
 
 from __future__ import annotations
@@ -83,13 +84,12 @@ class SystemTray(QSystemTrayIcon):
         open_action.triggered.connect(self.show_dashboard)
         tray_menu.addAction(open_action)
 
-        logs_action = QAction("View Logs", tray_menu)
-        logs_action.triggered.connect(self._open_logs)
-        tray_menu.addAction(logs_action)
-
-        settings_action = QAction("Settings", tray_menu)
-        settings_action.triggered.connect(self._open_settings)
-        tray_menu.addAction(settings_action)
+        # NO "View Logs" OR "Settings" HERE ANY MORE. Both opened windows of
+        # their own showing the employee their activity log, the monitoring
+        # settings, the server address and the folder the captures are kept
+        # in — the very details the owner had taken out of the panel ("Logs
+        # ... hata do ya hide kr do"). A menu that still opened them would
+        # have been the same page through a side door.
 
         tray_menu.addSeparator()
 
@@ -144,27 +144,16 @@ class SystemTray(QSystemTrayIcon):
             self.parent_window.raise_()
             self.parent_window.activateWindow()
 
-    def _open_logs(self):
-        try:
-            from client.presentation.windows.logs_window import LogsWindow
-            if not hasattr(self, "_logs_win") or not self._logs_win.isVisible():
-                self._logs_win = LogsWindow()
-            self._logs_win.show()
-            self._logs_win.raise_()
-        except Exception as e:
-            print("[TRAY LOGS ERROR]", e)
-
-    def _open_settings(self):
-        try:
-            from client.presentation.windows.settings_window import SettingsWindow
-            if not hasattr(self, "_settings_win") or not self._settings_win.isVisible():
-                self._settings_win = SettingsWindow()
-            self._settings_win.show()
-            self._settings_win.raise_()
-        except Exception as e:
-            print("[TRAY SETTINGS ERROR]", e)
-
     def exit_application(self):
+        # Named: see employee_panel._do_logout. A bare "LOGOUT" from four
+        # different paths cannot be told apart on the server.
+        LoggerService.log("LOGOUT : the app was quit from the menu bar")
+        SessionLogManager.end_session()
+        ShiftManager.end_shift()
+
+        # AFTER the shift is closed. Signing out clears the token, and the
+        # /attendance/logout that end_shift sends was refused when it came
+        # second — the row stayed open as "Incomplete".
         try:
             _http.post(
                 f"{API_BASE_URL}/auth/logout",
@@ -174,11 +163,6 @@ class SystemTray(QSystemTrayIcon):
         except Exception as error:
             print("[LOGOUT API FAILED]", error)
 
-        # Named: see employee_panel._do_logout. A bare "LOGOUT" from four
-        # different paths cannot be told apart on the server.
-        LoggerService.log("LOGOUT : the app was quit from the menu bar")
-        SessionLogManager.end_session()
-        ShiftManager.end_shift()
         SessionManager.clear_session()
         print("[EXIT] QApplication.quit()")
         QApplication.quit()

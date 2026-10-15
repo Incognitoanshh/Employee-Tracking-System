@@ -114,6 +114,19 @@ class Database:
             )
             """)
 
+            # UPLOAD RETRY BOOKKEEPING — see SyncManager.record_upload_failure.
+            # Added, not declared above: an installed machine already has the
+            # table, and whatever it is still holding must survive the update.
+            cursor.execute("PRAGMA table_info(screenshots)")
+            shot_cols = {row[1] for row in cursor.fetchall()}
+            for column, ddl in (
+                ("attempts",        "attempts INTEGER DEFAULT 0"),
+                ("attempt_day",     "attempt_day TEXT"),
+                ("next_attempt_at", "next_attempt_at TEXT"),
+            ):
+                if column not in shot_cols:
+                    cursor.execute(f"ALTER TABLE screenshots ADD COLUMN {ddl}")
+
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS idle_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

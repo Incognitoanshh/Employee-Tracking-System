@@ -5,6 +5,8 @@ from client.core import http as _http
 from client.application.managers.session_manager import SessionManager
 from client.core.config import API_BASE_URL
 from client.infrastructure.database.database import Database
+from client.core.time_ist import end_of_ist_day, ist_day_str, now_ist
+from datetime import timedelta
 
 
 class SyncManager:
@@ -14,20 +16,131 @@ class SyncManager:
             return None
         return {"Authorization": f"Bearer {SessionManager.auth_token}"}
 
+    # THE RETRY RULE, as the owner put it: "1 baar try kro, nahi hoga to 1 hr
+    # baad. 3 try krega, nahi hua to phir next day hoga."
+    #
+    # It used to retry every pending screenshot on every sync tick — once a
+    # minute, all day — and write a log line each time. One picture the server
+    # would not take became sixty audit-log rows an hour, uploaded from every
+    # machine, about nothing that anybody could act on.
+    UPLOAD_RETRY_GAP = timedelta(hours=1)
+    UPLOAD_TRIES_PER_DAY = 3
+
     @staticmethod
-    def get_pending_screenshots():
+    def get_pending_screenshots(due_only: bool = False):
+        """This person's screenshots that have not reached the server.
+
+        ONLY THIS PERSON'S. The query used to take every pending row on the
+        machine and upload it with whoever was signed in now — so on a shared
+        laptop, one employee's unsent pictures went up under the next
+        person's account, and the server filed them as theirs.
+
+        `due_only` leaves out the ones whose next try is still in the future.
+        """
+        employee_id = getattr(SessionManager, "employee_id", None)
+        if not employee_id:
+            return []
         connection = Database.connect()
         cursor = connection.cursor()
-        cursor.execute(
-            """
-            SELECT *
-            FROM screenshots
-            WHERE uploaded = 0
-            """
-        )
+        if due_only:
+            cursor.execute(
+                """
+                SELECT *
+                FROM screenshots
+                WHERE uploaded = 0 AND employee_id = ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                ORDER BY timestamp
+                """,
+                (employee_id, now_ist().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT *
+                FROM screenshots
+                WHERE uploaded = 0 AND employee_id = ?
+                """,
+                (employee_id,),
+            )
         data = cursor.fetchall()
         connection.close()
         return data
+
+    @staticmethod
+    def hold_for_first_upload(screenshot_id):
+        """Keep the retry loop off a screenshot whose first upload is running.
+
+        A newly captured row has no next try yet, so it would be "due" — and
+        the sync tick could send it a second time while the capture path is
+        still sending it the first. Parking it an hour ahead is exactly where
+        a failed first try would put it anyway; success clears it.
+        """
+        connection = Database.connect()
+        cursor = connection.cursor()
+        cursor.execute(
+            "UPDATE screenshots SET next_attempt_at = ? WHERE id = ?",
+            ((now_ist() + SyncManager.UPLOAD_RETRY_GAP).strftime("%Y-%m-%d %H:%M:%S"),
+             screenshot_id),
+        )
+        connection.commit()
+        connection.close()
+
+    @staticmethod
+    def record_upload_failure(screenshot_id, reason: str):
+        """Count a failed upload and decide when to try again.
+
+        Up to three tries in an IST day, an hour apart. After the third the
+        next one is tomorrow morning, and the count starts again then. The
+        line written says which try this was and when the next will be — at
+        most three lines a day per picture, each of them one that means
+        something.
+
+        Returns the time of the next try, as written.
+        """
+        from client.services.logger_service import LoggerService
+
+        now = now_ist()
+        today = ist_day_str(now)
+        connection = Database.connect()
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT attempts, attempt_day FROM screenshots WHERE id = ?",
+            (screenshot_id,),
+        )
+        row = cursor.fetchone()
+        tries = 0
+        if row and row["attempt_day"] == today:
+            tries = int(row["attempts"] or 0)
+        tries += 1
+
+        if tries >= SyncManager.UPLOAD_TRIES_PER_DAY:
+            # The first moment of the next IST day.
+            next_try = end_of_ist_day(now) + timedelta(seconds=1)
+            when = "tomorrow"
+        else:
+            next_try = now + SyncManager.UPLOAD_RETRY_GAP
+            when = f"at {next_try.strftime('%H:%M')}"
+
+        cursor.execute(
+            """
+            UPDATE screenshots
+               SET attempts = ?, attempt_day = ?, next_attempt_at = ?
+             WHERE id = ?
+            """,
+            (tries, today, next_try.strftime("%Y-%m-%d %H:%M:%S"), screenshot_id),
+        )
+        connection.commit()
+        connection.close()
+
+        try:
+            LoggerService.log(
+                f"SCREENSHOT UPLOAD FAILED : try {tries} of "
+                f"{SyncManager.UPLOAD_TRIES_PER_DAY} today — {reason} — "
+                f"next try {when}"
+            )
+        except Exception:
+            pass
+        return next_try
 
     @staticmethod
     def mark_uploaded(screenshot_id):
@@ -80,6 +193,7 @@ class SyncManager:
             except Exception as error:
                 # Delete fail hona upload ko fail nahi karta — file agli
                 # cleanup pass me hat jayegi.
+                from client.services.logger_service import LoggerService
                 LoggerService.log_verbose(
                     f"SyncManager: uploaded file delete nahi hui {file_path} — {error}"
                 )
@@ -123,7 +237,9 @@ class SyncManager:
         # Lazy import to avoid circular import at module load time.
         from client.services.logger_service import LoggerService
 
-        pending = SyncManager.get_pending_screenshots()
+        # Only the ones whose next try has come round — see
+        # record_upload_failure. Everything else waits its turn quietly.
+        pending = SyncManager.get_pending_screenshots(due_only=True)
 
         for screenshot in pending[:max_retries]:
             try:
@@ -166,15 +282,17 @@ class SyncManager:
                 if response.status_code == 200:
                     SyncManager.mark_uploaded(screenshot_id)
                 else:
-                    LoggerService.log(
-                        f"SyncManager: retry upload failed for {screenshot_id} — "
-                        f"HTTP {response.status_code} {response.text[:200]}"
-                    )
+                    SyncManager.record_upload_failure(
+                        screenshot_id,
+                        f"HTTP {response.status_code} {response.text[:200]}")
 
             except Exception as error:
-                # BUG FIX: pehle silently pass ho jaata tha, debugging
-                # impossible thi. Ab file log mein likha jaata hai.
-                LoggerService.log(f"SyncManager: retry_uploads error — {error}")
+                # Never silent — but counted, so it is said at most three
+                # times a day rather than once a minute.
+                try:
+                    SyncManager.record_upload_failure(screenshot["id"], str(error))
+                except Exception:
+                    LoggerService.log(f"SyncManager: retry_uploads error — {error}")
 
     @staticmethod
     def cleanup_old_orphans(days=7):

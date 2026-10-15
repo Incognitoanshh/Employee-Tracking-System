@@ -105,6 +105,17 @@ class ProfilePage(QWidget):
         self._rows: dict[str, QLabel] = {}
         self._workers: list[_Worker] = []
         self._profile: dict = {}
+        # THE SAME PAGE IS "MY PROFILE" IN BOTH PANELS, BUT NOT THE SAME PAGE.
+        #
+        # An employee's copy leaves out what the owner called exposed and
+        # unnecessary ("profile me v bahut kuch exposed hai joki necessary
+        # nahi hai"): their idle and active time, their screenshot count, the
+        # three seven-day graphs, the device card and the sign-in history
+        # that Attendance already shows. Those are figures the company keeps
+        # about them, for administrators to read. An administrator's own
+        # profile is unchanged.
+        self._full = getattr(SessionManager, "role", None) in ("admin", "super_admin")
+        self._charts: dict[str, Sparkline] = {}
         self._build()
 
         # Jo dikh raha hai wo taaza rahe — dusre panel me liya gaya
@@ -169,7 +180,7 @@ class ProfilePage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
-        root.addWidget(PageHeader("My Profile", "Your account, your devices and your week."))
+        root.addWidget(PageHeader("My Profile", "Your account and your week."))
 
         self._status = QLabel("")
         self._status.setVisible(False)
@@ -200,6 +211,8 @@ class ProfilePage(QWidget):
         body.addWidget(self._work_card())
 
         self._columns = CardColumns(spacing=14)
+        extra = ((self._devices_card(),) if self._full else ())
+        history = ((self._history_card(),) if self._full else ())
         self._columns.add(
             self._section("Personal Information", [
                 ("Employee ID", "employee_id"), ("Username", "username"),
@@ -210,10 +223,10 @@ class ProfilePage(QWidget):
                     "including your phone and both email addresses — is set by "
                     "your administrator."),
             self._pay_card(),
-            self._devices_card(),
+            *extra,
             self._security_card(),
             self._preferences_card(),
-            self._history_card(),
+            *history,
         )
         body.addWidget(self._columns)
         body.addStretch()
@@ -367,24 +380,26 @@ class ProfilePage(QWidget):
         return card
 
     def _work_card(self) -> Card:
+        monitored = (("Active today", "today_active"),
+                     ("Idle today", "today_idle"),
+                     ("Screenshots today", "today_shots"))
         card = self._section("Work Summary", [
             ("Signed in today", "today_login"),
             ("Worked today", "today_worked"),
-            ("Active today", "today_active"),
-            ("Idle today", "today_idle"),
-            ("Screenshots today", "today_shots"),
+            *(monitored if self._full else ()),
             ("This week", "week_hours"),
             ("Days present this week", "week_days"),
             ("This month", "month_hours"),
             ("Average day this month", "month_avg"),
             ("Attendance this month", "month_attendance"),
         ])
+        if not self._full:
+            return card
         layout = card.layout()
 
         charts = QGridLayout()
         charts.setHorizontalSpacing(18)
         charts.setVerticalSpacing(6)
-        self._charts: dict[str, Sparkline] = {}
         for column, (key, caption, colour) in enumerate((
                 ("worked", "Hours worked  ·  last 7 days", C.GREEN),
                 ("idle", "Idle  ·  last 7 days", C.AMBER),
@@ -544,7 +559,8 @@ class ProfilePage(QWidget):
     def refresh(self):
         self._run(self._fetch_profile, self._on_profile)
         self._run(self._fetch_summary, self._on_summary)
-        self._run(self._fetch_sessions, self._on_sessions)
+        if self._full:
+            self._run(self._fetch_sessions, self._on_sessions)
         # QUIET ON FAILURE, unlike the others. Payroll may simply not be set
         # up yet, and a red banner saying "could not load your pay" every time
         # somebody opens their profile would be alarming and wrong. The fields
@@ -655,15 +671,20 @@ class ProfilePage(QWidget):
         login = str(today.get("login_time") or "")
         self._rows["today_login"].setText(login[11:16] if len(login) > 15 else "—")
         self._rows["today_worked"].setText(_seconds_as_hours(today.get("worked_seconds")))
-        self._rows["today_active"].setText(_seconds_as_hours(today.get("active_seconds")))
-        self._rows["today_idle"].setText(_seconds_as_hours(today.get("idle_seconds")))
-        self._rows["today_shots"].setText(str(today.get("screenshots", 0)))
+        if self._full:
+            self._rows["today_active"].setText(
+                _seconds_as_hours(today.get("active_seconds")))
+            self._rows["today_idle"].setText(
+                _seconds_as_hours(today.get("idle_seconds")))
+            self._rows["today_shots"].setText(str(today.get("screenshots", 0)))
         self._rows["week_hours"].setText(_seconds_as_hours(week.get("worked_seconds")))
         self._rows["week_days"].setText(f"{week.get('days_present', 0)} of 7")
         self._rows["month_hours"].setText(_seconds_as_hours(month.get("worked_seconds")))
         self._rows["month_avg"].setText(_seconds_as_hours(month.get("average_daily_seconds")))
         self._rows["month_attendance"].setText(f"{month.get('attendance_percent', 0)}%")
 
+        if not self._charts:
+            return
         series = data.get("last_7_days") or []
         self._charts["worked"].set_series([d.get("worked_seconds", 0) / 3600 for d in series])
         self._charts["idle"].set_series([d.get("idle_seconds", 0) / 3600 for d in series])

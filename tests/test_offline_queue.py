@@ -139,6 +139,114 @@ def main():
     finally:
         sync_mod._http.post = real_post
 
+    print("\nThe retry rule: an hour apart, three a day, then tomorrow")
+    # THE OWNER'S RULE: "1 baar try kro, nahi hoga to 1 hr baad. 3 try krega
+    # nahi hua to phir next day hoga." It used to retry every minute, all
+    # day, and write a line each time — "isse logs v banega bina matlab ka".
+    # Driven against a clock this test controls, through the real loop.
+    from datetime import datetime, timedelta
+    clock = {"now": datetime(2026, 10, 8, 10, 0, 0)}
+    real_now = sync_mod.now_ist
+    sync_mod.now_ist = lambda: clock["now"]
+    posts = []
+
+    def dead_post(*args, **kwargs):
+        posts.append(kwargs.get("headers"))
+        raise ConnectionError("network is unreachable")
+
+    sync_mod._http.post = dead_post
+    try:
+        with Database.get_connection() as conn:
+            conn.execute("DELETE FROM screenshots")
+        queue_shot("stuck")
+
+        def tick(at):
+            clock["now"] = at
+            SyncManager.retry_uploads()
+
+        def fails():
+            return [m for m in logged if "SCREENSHOT UPLOAD FAILED" in m]
+
+        logged.clear()
+        start = clock["now"]
+        tick(start)
+        check("the first try happens", len(posts) == 1, f"{len(posts)} tries")
+        check("and says which try it was and when the next is",
+              len(fails()) == 1 and "try 1 of 3" in fails()[0]
+              and "at 11:00" in fails()[0], str(fails()))
+
+        for minute in range(1, 60):           # a sync tick every minute
+            tick(start + timedelta(minutes=minute))
+        check("nothing is retried inside the hour",
+              len(posts) == 1, f"{len(posts)} tries in the first hour")
+        check("and nothing more is written", len(fails()) == 1,
+              f"{len(fails())} lines")
+
+        tick(start + timedelta(hours=1))
+        check("an hour later, the second try", len(posts) == 2, f"{len(posts)}")
+        tick(start + timedelta(hours=2))
+        check("another hour, the third", len(posts) == 3, f"{len(posts)}")
+        check("the third says the next one is tomorrow",
+              "try 3 of 3" in fails()[-1] and "tomorrow" in fails()[-1],
+              fails()[-1])
+
+        for hour in range(3, 14):             # the rest of the day, to 23:00
+            tick(start + timedelta(hours=hour))
+        check("no fourth try on the same day", len(posts) == 3, f"{len(posts)}")
+        check("so a whole day of failure is three lines, not hundreds",
+              len(fails()) == 3, f"{len(fails())} lines")
+
+        tick(datetime(2026, 10, 9, 0, 0, 1))
+        check("the next day it tries again", len(posts) == 4, f"{len(posts)}")
+        check("and counts from one again",
+              "try 1 of 3" in fails()[-1], fails()[-1])
+
+        print("\nOnly the signed-in person's own screenshots")
+        # The pending query took every row on the machine and sent it with
+        # whoever was signed in — one employee's pictures filed under
+        # another's account on a shared laptop.
+        with Database.get_connection() as conn:
+            conn.execute("DELETE FROM screenshots")
+        mine = queue_shot("mine")
+        with Database.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO screenshots (id, employee_id, file_path, timestamp,"
+                " uploaded) VALUES ('someone-else','E002',?,'2026-10-09 09:00:00',0)",
+                (mine,))
+        posts.clear()
+        tick(datetime(2026, 10, 9, 9, 30, 0))
+        check("only one upload is attempted — this person's",
+              len(posts) == 1, f"{len(posts)} uploads")
+        with Database.get_connection() as conn:
+            other = conn.execute(
+                "SELECT attempts FROM screenshots WHERE id='someone-else'").fetchone()
+        check("the other person's row is not touched",
+              not other["attempts"], str(dict(other)))
+
+        print("\nA picture whose first upload is still running")
+        with Database.get_connection() as conn:
+            conn.execute("DELETE FROM screenshots")
+        queue_shot("in-flight")
+        SyncManager.hold_for_first_upload("in-flight")
+        posts.clear()
+        tick(datetime(2026, 10, 9, 9, 31, 0))
+        check("the sync tick does not send it a second time",
+              posts == [], f"{len(posts)} duplicate upload(s)")
+
+        print("\nWhen the server comes back")
+        class _Ok:
+            status_code = 200
+            text = "ok"
+        sync_mod._http.post = lambda *a, **k: _Ok()
+        tick(datetime(2026, 10, 9, 10, 31, 0))
+        with Database.get_connection() as conn:
+            done = conn.execute(
+                "SELECT uploaded FROM screenshots WHERE id='in-flight'").fetchone()
+        check("its due try delivers it", done["uploaded"] == 1)
+    finally:
+        sync_mod.now_ist = real_now
+        sync_mod._http.post = real_post
+
     print("\nOld entries nobody can ever send")
     with Database.get_connection() as conn:
         conn.execute("DELETE FROM screenshots")

@@ -125,4 +125,28 @@ async function closeShiftFor(db, employeeId) {
     return result.rowCount;
 }
 
-module.exports = { closeAbandonedShifts, closeShiftFor };
+/**
+ * Close ONE person's open shift at this moment — a sign-out they made
+ * themselves.
+ *
+ * Unlike closeShiftFor this is NOW, not the last evidence: somebody pressing
+ * Logout is the evidence, and the moment they pressed it is when they
+ * stopped. Shared by /attendance/logout and /auth/logout so the two cannot
+ * write different times for the same act.
+ */
+async function closeShiftNow(db, employeeId) {
+    const result = await db.query(
+        `UPDATE attendance
+         SET logout_time = (NOW() AT TIME ZONE 'UTC'), total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
+         WHERE id = (
+             SELECT id FROM attendance
+             WHERE employee_id = $1 AND logout_time IS NULL
+             ORDER BY id DESC LIMIT 1
+         )
+         RETURNING id`,
+        [employeeId]
+    );
+    return result.rows.length;
+}
+
+module.exports = { closeAbandonedShifts, closeShiftFor, closeShiftNow };

@@ -4,6 +4,7 @@ const { istDate, istToday, isTodayIST } = require("../utils/ist_sql");
 // The same grace the employee list uses, so "working" cannot mean two things.
 const { HEARTBEAT_GRACE_MINUTES, MAX_SHIFT_HOURS } = require("../utils/presence");
 const { attendanceState, shiftState } = require("../utils/attendance_state");
+const { closeShiftNow } = require("../utils/attendance_cleanup");
 // The single hierarchy rule, so attendance cannot disagree with the rest of
 // the panel about who may act on whom.
 const { canManage } = require("../middleware/admin.middleware");
@@ -612,19 +613,9 @@ exports.logoutAttendance = async (req, res) => {
         // ghanton lambi thi. Server khud NOW() - login_time se authoritative
         // total_hours compute karta hai — dono values USI row se aate hain,
         // isliye kabhi mismatch nahi ho sakta.
-        const result = await pool.query(
-            `UPDATE attendance
-             SET logout_time = (NOW() AT TIME ZONE 'UTC'), total_hours = (NOW() AT TIME ZONE 'UTC') - login_time
-             WHERE id = (
-                 SELECT id FROM attendance
-                 WHERE employee_id = $1 AND logout_time IS NULL
-                 ORDER BY id DESC LIMIT 1
-             )
-             RETURNING id`,
-            [employee_id]
-        );
+        const closed = await closeShiftNow(pool, employee_id);
 
-        if (result.rows.length === 0) {
+        if (closed === 0) {
             return res.status(404).json({ success: false, error: "No open attendance session found" });
         }
 

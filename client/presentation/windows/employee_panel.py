@@ -17,21 +17,20 @@ freeze nahi hoti, chahe server slow ho ya down.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 from client.core import http as _http
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, QDate, QSize
 from PySide6.QtGui import QCursor, QColor
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDateEdit, QFileDialog, QFrame, QGridLayout,
+    QApplication, QDateEdit, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget, QAbstractItemView, QDialog,
 )
 
 from client.core.config import (
-    API_BASE_URL, STORAGE_DIR, APP_VERSION, server_label)
+    API_BASE_URL, APP_VERSION, server_label)
 from client.presentation.theme import (
     C, R, R_SM, Radius, Space, Type, Weight,
     app_style, button, table_style, scrollbar,
@@ -44,7 +43,7 @@ from client.presentation.windows.payroll_page import PayrollPage
 from client.presentation.windows.profile_page import ProfilePage
 from client.presentation.widgets.avatar import ClickableAvatar
 from client.presentation.widgets.panel_widgets import (
-    ActivityRow, Card, NavButton, PageHeader, StatCard,
+    Card, NavButton, PageHeader, StatCard,
 )
 from client.application.managers.session_manager import SessionManager
 from client.application.services import notifier
@@ -59,7 +58,6 @@ from client.infrastructure.database.database import Database
 from client.services.logger_service import LoggerService
 from client.services.settings_service import SettingsService
 from client.presentation.tray.system_tray import SystemTray
-from client.presentation.windows.screenshot_preview_window import ScreenshotPreviewWindow
 from client.presentation.windows.team_page import TeamPage
 from client.application.managers.chat_manager import ChatManager
 
@@ -107,41 +105,6 @@ def fmt_time(value) -> str:
 def fmt_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 3600:02}:{(seconds % 3600) // 60:02}:{seconds % 60:02}"
-
-
-# Activity ko human-readable banane ki ek hi jagah — pehle ye mapping
-# dashboard aur logs window me alag-alag (aur adhoori) thi.
-ACTIVITY_MAP = {
-    "SCREENSHOT CAPTURED": ("Screenshot Captured", "Screen captured and encrypted", C.BLUE),
-    "USER IDLE":           ("User Became Idle",    "No activity detected",          C.AMBER),
-    "USER ACTIVE":         ("User Active",         "Keyboard & mouse activity",     C.GREEN),
-    "LOGIN SUCCESS":       ("Signed In",           "Session started",               C.PRIMARY),
-    "LOGIN FAILED":        ("Sign-in Failed",      "Invalid credentials",           C.RED),
-    "LOGOUT":              ("Signed Out",          "Session ended",                 C.TEXT_MUTED),
-    "UPLOAD SUCCESS":      ("Upload Complete",     "Data synced to server",         C.GREEN),
-    "UPLOAD FAILED":       ("Upload Failed",       "Will retry automatically",      C.RED),
-}
-
-INTERNAL_PREFIXES = (
-    "CONFIGSYNCMANAGER", "SCHEDULERSERVICE", "SCREENSHOTMANAGER", "SYNCMANAGER",
-    "CONFIGSYNC", "STARTUPMANAGER", "AUTOLOGINMANAGER", "CRYPTOENGINE",
-    "APISERVICE", "IDLETRACKER", "LOGGERSERVICE",
-)
-
-
-def is_user_facing(activity: str) -> bool:
-    text = str(activity or "").upper().strip()
-    if not text:
-        return False
-    return not any(text.startswith(p) or f"{p}:" in text for p in INTERNAL_PREFIXES)
-
-
-def describe(activity: str) -> tuple[str, str, str]:
-    text = str(activity or "").upper()
-    for key, (title, sub, color) in ACTIVITY_MAP.items():
-        if key in text:
-            return title, sub, color
-    return str(activity)[:60], "Activity recorded", C.TEXT_MUTED
 
 
 class Worker(QThread):
@@ -222,60 +185,31 @@ class DashboardPage(QWidget):
         self.c_upload   = StatCard("cloud-upload", "Upload Status", C.PURPLE, C.PURPLE_BG)
         self.c_session  = StatCard("timer", "Session Duration", C.AMBER, C.AMBER_BG,
                                    sparkline=False)
-        self.c_shots    = StatCard("camera", "Screenshots Today", C.AMBER, C.AMBER_BG)
-        for i, card in enumerate((self.c_tracking, self.c_activity, self.c_internet,
-                                  self.c_upload, self.c_session, self.c_shots)):
-            grid.addWidget(card, i // 3, i % 3)
-        for col in range(3):
+        # FIVE CARDS, NOT SIX — and no activity feed under them.
+        #
+        # The owner, looking at this page: "screenshot taken krke ek graph
+        # hai wo v" — hata do. "Screenshots Today" with its own little graph
+        # told the employee exactly when each capture landed, and the Recent
+        # Activity feed below listed "Screenshot Captured" with the time, a
+        # line at a time. Captures are for administrators to look at (the
+        # Screenshots page went for the same reason); the employee's own
+        # dashboard is about their day, not about the camera.
+        #
+        # Six columns so three cards fill the first row and two the second,
+        # each row edge to edge.
+        cards = ((self.c_tracking, 0, 0, 2), (self.c_activity, 0, 2, 2),
+                 (self.c_internet, 0, 4, 2),
+                 (self.c_session, 1, 0, 3), (self.c_upload, 1, 3, 3))
+        for card, row, col, span in cards:
+            grid.addWidget(card, row, col, 1, span)
+        for col in range(6):
             grid.setColumnStretch(col, 1)
         root.addLayout(grid)
-
-        # ── Recent Activity ──
-        card = Card()
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(0)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(18, 15, 14, 12)
-        title = QLabel("Recent Activity")
-        title.setStyleSheet(f"color:{C.TEXT};font-size:16px;font-weight:700;border:none;")
-        self._count = QLabel("")
-        self._count.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
-        view_all = QPushButton("View All")
-        view_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        view_all.setStyleSheet(
-            f"QPushButton{{background:transparent;border:none;color:{C.PRIMARY};"
-            f"font-size:13px;font-weight:600;}}"
-            f"QPushButton:hover{{color:{C.BLUE};}}"
-        )
-        view_all.clicked.connect(lambda: self._panel.go("logs"))
-        head.addWidget(title)
-        head.addWidget(self._count)
-        head.addStretch()
-        head.addWidget(view_all)
-        cl.addLayout(head)
-
-        self._feed_area = QScrollArea()
-        self._feed_area.setWidgetResizable(True)
-        self._feed_area.setFrameShape(QFrame.Shape.NoFrame)
-        self._feed_area.setStyleSheet(
-            "QScrollArea{background:transparent;border:none;}" + scrollbar(C.CARD)
-        )
-        self._feed_host = QWidget()
-        self._feed_host.setStyleSheet("background:transparent;")
-        self._feed = QVBoxLayout(self._feed_host)
-        self._feed.setContentsMargins(0, 0, 0, 0)
-        self._feed.setSpacing(0)
-        self._feed.addStretch()
-        self._feed_area.setWidget(self._feed_host)
-        cl.addWidget(self._feed_area, 1)
-        root.addWidget(card, 1)
+        root.addStretch(1)
 
     # ── data ────────────────────────────────────────────────────────────
     def refresh(self):
         self._load_summary()
-        self._load_feed()
 
     def _run(self, fn, on_done, on_fail=None):
         worker = Worker(fn)
@@ -289,83 +223,13 @@ class DashboardPage(QWidget):
                   lambda e: self._on_summary_offline())
 
     def _on_summary(self, payload):
-        d = (payload or {}).get("data", {})
-        shots = d.get("screenshots_today", 0)
-        self.c_shots.set_value(str(shots))
-        self.c_shots.set_subtitle("Captured today")
-        self.c_shots.push_point(shots)
+        # Asked for whether the server answers, which the Upload card and the
+        # status chip show. The screenshot count in it is no longer drawn.
         self._panel.mark_server(True)
 
     def _on_summary_offline(self):
-        try:
-            conn = Database.connect()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COUNT(*) FROM screenshots WHERE employee_id = ? "
-                "AND date(timestamp) = date('now','localtime')",
-                (SessionManager.employee_id,),
-            )
-            count = cur.fetchone()[0]
-            conn.close()
-            self.c_shots.set_value(str(count))
-            self.c_shots.set_subtitle("Captured today (local)")
-        except Exception:
-            self.c_shots.set_subtitle("Unavailable")
         self._panel.mark_server(False)
 
-    def _load_feed(self):
-        self._run(lambda: api_get("/logs/all"), self._on_feed,
-                  lambda e: self._on_feed_local())
-
-    def _on_feed(self, payload):
-        rows = [r for r in (payload or {}).get("data", [])
-                if is_user_facing(r.get("activity"))][:20]
-        if not rows:
-            self._on_feed_local()
-            return
-        self._render_feed([(r.get("activity"), r.get("created_at")) for r in rows])
-
-    def _on_feed_local(self):
-        try:
-            conn = Database.connect()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT activity, timestamp FROM pending_logs WHERE employee_id = ? "
-                "ORDER BY id DESC LIMIT 200",
-                (SessionManager.employee_id,),
-            )
-            rows = [r for r in cur.fetchall() if is_user_facing(r[0])][:20]
-            conn.close()
-            self._render_feed(list(rows), local_time=True)
-        except Exception:
-            self._render_feed([])
-
-    def _render_feed(self, entries, local_time: bool = False):
-        while self._feed.count() > 1:
-            item = self._feed.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        if not entries:
-            empty = QLabel("  No activity recorded yet.")
-            empty.setStyleSheet(f"color:{C.TEXT_DIM};font-size:13px;padding:24px;border:none;")
-            self._feed.insertWidget(0, empty)
-            self._count.setText("")
-            return
-
-        for activity, stamp in entries:
-            title, subtitle, color = describe(activity)
-            if local_time:
-                try:
-                    when = datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S") \
-                        .strftime("%I:%M:%S %p")
-                except Exception:
-                    when = str(stamp)[:19]
-            else:
-                when = fmt_time(stamp)
-            self._feed.insertWidget(self._feed.count() - 1,
-                                    ActivityRow(color, title, subtitle, when))
-        self._count.setText(f"· {len(entries)} events")
 
 
 class _TablePage(QWidget):
@@ -632,151 +496,6 @@ class AttendancePage(_TablePage):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  PAGE 3 — Activity Logs
-# ──────────────────────────────────────────────────────────────────────────────
-
-class LogsPage(_TablePage):
-    ENDPOINT = "/logs/all"
-    CSV_NAME = "my_activity_logs.csv"
-    PAGE_SIZE = 100          # /logs/all LIMIT 100 deta hai
-
-    def __init__(self, panel):
-        super().__init__(panel, "Activity Logs",
-                         "Everything recorded for your account.",
-                         ["Event", "Details", "Time"])
-
-    def _extra_controls(self, layout):
-        self._type = QComboBox()
-        self._type.addItems(["All events", "Screenshots", "Idle", "Active", "Sessions"])
-        self._type.setFixedWidth(150)
-        self._type.currentIndexChanged.connect(lambda _: self._populate())
-        layout.addWidget(self._type)
-
-    def _params(self):
-        # /logs/all pagination support nahi karta — server hamesha latest 100
-        # deta hai. Filter client-side hai; `total` phir bhi asli count hai.
-        return {}
-
-    def _on_loaded(self, payload):
-        self._rows = [r for r in (payload or {}).get("data", [])
-                      if is_user_facing(r.get("activity"))]
-        self._total = (payload or {}).get("total", len(self._rows))
-        self._prev.setEnabled(False)
-        self._next.setEnabled(False)
-        self._page_label.setText(
-            f"Showing latest {len(self._rows)} of {self._total} total events"
-        )
-        self._panel.mark_server(True)
-        self._populate()
-
-    def _filter_rows(self):
-        choice = self._type.currentText() if hasattr(self, "_type") else "All events"
-        needle = {
-            "Screenshots": "SCREENSHOT",
-            "Idle": "USER IDLE",
-            "Active": "USER ACTIVE",
-            "Sessions": "LOGIN",
-        }.get(choice)
-        rows = self._rows
-        if needle:
-            rows = [r for r in rows
-                    if needle in str(r.get("activity", "")).upper()
-                    or (needle == "LOGIN" and "LOGOUT" in str(r.get("activity", "")).upper())]
-        if self._filtered:
-            target = self._date.date().toString("yyyy-MM-dd")
-            rows = [r for r in rows
-                    if (parse_ts(r.get("created_at")) or datetime.now(timezone.utc))
-                    .astimezone(IST).strftime("%Y-%m-%d") == target]
-        return rows
-
-    def _populate(self):
-        rows = self._filter_rows()
-        self._table.setRowCount(len(rows))
-        for i, row in enumerate(rows):
-            title, subtitle, color = describe(row.get("activity"))
-            event = QTableWidgetItem(title)
-            event.setForeground(QColor(color))
-            self._table.setItem(i, 0, event)
-            self._table.setItem(i, 1, QTableWidgetItem(subtitle))
-            self._table.setItem(i, 2, QTableWidgetItem(fmt_ist(row.get("created_at"))))
-
-    def csv_shape(self, rows):
-        rows = [r for r in rows if is_user_facing(r.get("activity"))]
-        return (
-            ["Event", "Details", "Raw Activity", "Time (IST)"],
-            [[*describe(r.get("activity"))[:2], r.get("activity", ""),
-              fmt_ist(r.get("created_at"))] for r in rows],
-        )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  PAGE 4 — Screenshots
-# ──────────────────────────────────────────────────────────────────────────────
-
-class ScreenshotsPage(_TablePage):
-    ENDPOINT = "/screenshots/all"
-    CSV_NAME = "my_screenshots.csv"
-    PAGE_SIZE = 100
-
-    def __init__(self, panel):
-        super().__init__(panel, "Screenshots",
-                         "Captures taken during your shifts — encrypted on this device.",
-                         ["Captured At", "File", "Status", ""])
-        self._preview = None
-
-    def _params(self):
-        return {}
-
-    def _on_loaded(self, payload):
-        self._rows = (payload or {}).get("data", [])
-        self._total = len(self._rows)
-        self._prev.setEnabled(False)
-        self._next.setEnabled(False)
-        self._page_label.setText(f"{self._total} screenshots")
-        self._panel.mark_server(True)
-        self._populate()
-
-    def _populate(self):
-        rows = self._rows
-        if self._filtered:
-            target = self._date.date().toString("yyyy-MM-dd")
-            rows = [r for r in rows
-                    if fmt_ist(r.get("created_at"), "%Y-%m-%d", "") == target]
-
-        self._table.setRowCount(len(rows))
-        self._table.setColumnWidth(3, 110)
-        for i, row in enumerate(rows):
-            self._table.setItem(i, 0, QTableWidgetItem(fmt_ist(row.get("created_at"))))
-            self._table.setItem(i, 1, QTableWidgetItem(str(row.get("file_name", ""))[:44]))
-            # The mark is an ICON on the cell, not a character in its text:
-            # a table item's font is the table's, so "●" was drawn at whatever
-            # size the row happened to use.
-            status = QTableWidgetItem("  Encrypted")
-            status.setIcon(_icons.icon("dot", 10, C.GREEN))
-            status.setForeground(QColor(C.GREEN))
-            self._table.setItem(i, 2, status)
-
-            view = QPushButton("View")
-            view.setStyleSheet(button("secondary"))
-            view.setCursor(Qt.CursorShape.PointingHandCursor)
-            view.clicked.connect(lambda _=False, r=row: self._open(r))
-            self._table.setCellWidget(i, 3, view)
-
-    def _open(self, row):
-        self._preview = ScreenshotPreviewWindow(
-            screenshot_id=str(row.get("id")),
-            employee_id=str(row.get("employee_id", "")),
-            timestamp=fmt_ist(row.get("created_at")),
-            filename=str(row.get("file_name", "")),
-        )
-        self._preview.show()
-
-    def csv_shape(self, rows):
-        return (["Captured At (IST)", "File"],
-                [[fmt_ist(r.get("created_at")), r.get("file_name", "")] for r in rows])
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 #  PAGE 5 — Settings   (read-only; sab admin panel se control hota hai)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -792,8 +511,7 @@ class SettingsPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
-        root.addWidget(PageHeader("Settings",
-                                  "Your account and monitoring configuration."))
+        root.addWidget(PageHeader("Settings", "Your account."))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -812,25 +530,22 @@ class SettingsPage(QWidget):
             ("Designation", "desig"), ("Role", "role"),
             ("Shift", "shift"), ("Timezone", "tz"),
         ]))
-        body.addWidget(self._section("Monitoring  ·  set by your administrator", [
-            ("Screenshots per day", "m_count"),
-            ("Capture interval", "m_interval"),
-            ("Idle threshold", "m_idle"),
-            ("Detailed logging", "m_verbose"),
-            ("Settings synced", "m_synced"),
-        ], note="Controlled by your administrator. Changes apply automatically — "
-                "no restart needed."))
-        body.addWidget(self._section("Sync & Storage", [
-            ("Server", "server"), ("Pending screenshots", "pending_ss"),
-            ("Pending logs", "pending_logs"), ("Last screenshot", "last_ss"),
-            ("Data folder", "folder"), ("Space used", "size"),
-        ], button_text="Open Data Folder", button_slot=self._open_folder))
+        # WHAT WAS HERE AND WENT.
+        #
+        # "Monitoring" listed the screenshots per day, the capture interval
+        # and the idle threshold — which is a recipe for working around them:
+        # knowing a capture comes every 20–40 minutes and idle starts at 300
+        # seconds is knowing exactly how little to do. "Sync & Storage" gave
+        # the server address, the count of unsent screenshots and logs, the
+        # time of the last capture, and a button that opened the folder the
+        # encrypted captures sit in. None of it is anything an employee acts
+        # on, and the owner asked for exactly this kind of detail to go:
+        # "Employee panel me jo v details unnecessary lag rha usko hata do".
+        # Administrators still see and set all of it in the console.
         body.addWidget(self._section("Security", [
-            ("Encryption", "enc"), ("Client version", "ver"), ("Platform", "plat"),
+            ("Client version", "ver"),
         ], button_text="Change Password", button_slot=self._change_password,
-           note="Screenshots are encrypted on this device before upload — they are "
-                "never stored or transmitted as plain images. Changing your password "
-                "signs you out on every other device."))
+           note="Changing your password signs you out on every other device."))
         body.addStretch()
 
     def _section(self, title, fields, note="", button_text="", button_slot=None):
@@ -893,18 +608,6 @@ class SettingsPage(QWidget):
                 "Any other device you were signed in on has been signed out.",
             )
 
-    def _open_folder(self):
-        import subprocess, sys as _sys
-        try:
-            if _sys.platform == "darwin":
-                subprocess.Popen(["open", STORAGE_DIR])
-            elif os.name == "nt":
-                os.startfile(STORAGE_DIR)          # type: ignore[attr-defined]
-            else:
-                subprocess.Popen(["xdg-open", STORAGE_DIR])
-        except Exception as error:
-            QMessageBox.warning(self, "Could not open folder", str(error))
-
     def refresh(self):
         def put(key, text, color=None):
             label = self._rows.get(key)
@@ -915,8 +618,6 @@ class SettingsPage(QWidget):
                 f"color:{color or C.TEXT};font-size:13px;font-weight:600;border:none;"
             )
 
-        setting = lambda k, d="—": (SettingsService.get_setting(k) or d)
-
         put("emp", SessionManager.employee_id or "—")
         put("name", getattr(SessionManager, "full_name", None) or "—")
         put("desig", getattr(SessionManager, "designation", None) or "—")
@@ -925,83 +626,9 @@ class SettingsPage(QWidget):
         put("shift", self._panel.shift_text())
         put("tz", "IST (Asia/Kolkata)")
 
-        put("m_count", setting("screenshots_per_day"))
-        mn, mx = setting("screenshot_min_minutes"), setting("screenshot_max_minutes")
-        put("m_interval", f"{mn} – {mx} min" if mn != "—" and mx != "—" else "—")
-        idle = setting("idle_threshold_seconds")
-        put("m_idle", f"{idle} sec" if idle != "—" else "—")
-        verbose = str(setting("verbose_logging", "false")).lower() == "true"
-        put("m_verbose", "On" if verbose else "Off", C.AMBER if verbose else C.TEXT_MUTED)
-
-        synced = setting("config_last_synced", "")
-        if synced and synced != "—":
-            try:
-                delta = (datetime.now() - datetime.fromisoformat(synced)).total_seconds()
-                put("m_synced",
-                    "just now" if delta < 90 else
-                    f"{int(delta // 60)} min ago" if delta < 3600 else
-                    datetime.fromisoformat(synced).strftime("%d %b, %I:%M %p"),
-                    C.GREEN if delta < 3600 else C.AMBER)
-            except Exception:
-                put("m_synced", synced)
-        else:
-            put("m_synced", "waiting for first sync…", C.AMBER)
-
-        put("server", API_BASE_URL)
-        stats = self._local_stats()
-        put("pending_ss", stats["pending_ss"],
-            C.AMBER if stats["pending_ss"] else C.GREEN)
-        put("pending_logs", stats["pending_logs"],
-            C.AMBER if stats["pending_logs"] else C.GREEN)
-        put("last_ss", stats["last_ss"] or "none yet")
-        put("folder", STORAGE_DIR)
-        put("size", stats["size"])
-
-        try:
-            from client.security.crypto_engine import CryptoEngine  # noqa: F401
-            put("enc", "AES-256-GCM · active", C.GREEN)
-        except Exception as error:
-            put("enc", f"unavailable — {error}", C.RED)
-
-        import platform
         put("ver", f"ETS Client v{APP_VERSION}")
-        put("plat", f"{platform.system()} {platform.release()}")
 
         self._flash()
-
-    def _local_stats(self):
-        out = {"pending_ss": 0, "pending_logs": 0, "last_ss": None, "size": "—"}
-        try:
-            conn = Database.connect()
-            cur = conn.cursor()
-            emp = SessionManager.employee_id
-            cur.execute("SELECT COUNT(*) FROM screenshots WHERE employee_id=? AND uploaded=0", (emp,))
-            out["pending_ss"] = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM pending_logs WHERE employee_id=? AND uploaded=0", (emp,))
-            out["pending_logs"] = cur.fetchone()[0]
-            cur.execute("SELECT timestamp FROM screenshots WHERE employee_id=? "
-                        "ORDER BY timestamp DESC LIMIT 1", (emp,))
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                out["last_ss"] = str(row[0])
-        except Exception:
-            pass
-        try:
-            total = sum(
-                os.path.getsize(os.path.join(root, f))
-                for root, _d, files in os.walk(STORAGE_DIR) for f in files
-                if os.path.exists(os.path.join(root, f))
-            )
-            value = float(total)
-            for unit in ("B", "KB", "MB", "GB"):
-                if value < 1024 or unit == "GB":
-                    out["size"] = f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-                    break
-                value /= 1024
-        except Exception:
-            pass
-        return out
 
     def _flash(self):
         """Admin ne kuch badla to employee ko dikhe — 2.5s green highlight."""
@@ -1189,8 +816,8 @@ class EmployeePanel(QWidget):
             "dashboard": DashboardPage(self),
             "team": TeamPage(self, self.chat),
             "attendance": AttendancePage(self),
-            "logs": LogsPage(self),
-            # "screenshots" ab nahi bhi — upar nav wala note dekhiye.
+            # "logs" and "screenshots" are not built at all — see the note
+            # in the menu below.
 
             "leave": LeavePage(self),
             "payroll": PayrollPage(self),
@@ -1249,16 +876,14 @@ class EmployeePanel(QWidget):
                 ("leave", "umbrella", "My Leave"),
                 ("payroll", "wallet", "My Payroll"),
             )),
-            ("MY ACTIVITY", (
-                ("logs", "clipboard-list", "Activity Logs"),
-                # SCREENSHOTS YAHAN SE HATA DIYE GAYE.
-                #
-                # Company ka niyam: captures sabke liye hote hain, par unhe
-                # DEKHNA sirf admin aur super admin ka kaam hai. Wo page
-                # employee ko apni hi tasveerein dikhata tha, jo is niyam ke
-                # khilaf hai — isliye nav se bhi gaya aur banaya bhi nahi
-                # jaata (neeche self.pages dekhiye).
-            )),
+            # NO "MY ACTIVITY" SECTION ANY MORE.
+            #
+            # It held Activity Logs, and before that Screenshots. Both are
+            # gone from the employee panel for the same reason: the company
+            # records them for administrators to read, and showing them back
+            # to the employee — every capture, every idle line, with its time
+            # — was the owner's own complaint ("Logs ... hata do ya hide kr
+            # do"). Administrators still see all of it in the console.
             ("TEAM", (
                 ("team", "messages-square", "Team"),
             )),
@@ -1310,19 +935,19 @@ class EmployeePanel(QWidget):
         fl.setSpacing(7)
         ver = QLabel(f"ETS Client v{APP_VERSION}")
         ver.setStyleSheet(f"color:{C.TEXT};font-size:12px;font-weight:700;border:none;")
-        # THE HOST, NOT A REASSURANCE. This said "Connected to Server"
-        # whatever it was connected to; an employee on a test build and one
-        # on production read the same line. Shared with the admin console so
-        # the two cannot describe the same setup differently.
-        self._srv_label = QLabel(server_label())
-        self._srv_label.setToolTip(API_BASE_URL)
+        # CONNECTED OR NOT, IN WORDS — THE HOST ONLY ON HOVER.
+        #
+        # This printed the server's address under the version, and an
+        # encryption line under that. Neither is anything an employee acts
+        # on, and the owner asked for that kind of detail to go. The host is
+        # still one hover away, which is all a support call needs to tell a
+        # test build from production.
+        self._srv_label = QLabel("Connected")
+        self._srv_label.setToolTip(f"{server_label()}\n{API_BASE_URL}")
         self._srv_label.setStyleSheet(
             f"color:{C.GREEN};font-size:{Type.MICRO}px;border:none;")
-        enc = QLabel(" AES-256 GCM Encrypted")
-        enc.setStyleSheet(f"color:{C.TEXT_DIM};font-size:12px;border:none;")
         fl.addWidget(ver)
         fl.addWidget(self._srv_label)
-        fl.addWidget(enc)
         # KITNI JAGAH CHAHIYE — YE LAYOUT SE POOCHHA GAYA HAI, TAY NAHI KIYA.
         #
         # Pehle yahan koi minimum tha hi nahi aur Qt card ko kuchal deta tha.
@@ -1708,9 +1333,7 @@ class EmployeePanel(QWidget):
 
     def _capture(self):
         result = ScreenshotManager.capture_screenshot()
-        if result:
-            self.pages["dashboard"].c_shots.push_point(1)
-        elif ScreenshotManager.should_try_again():
+        if not result and ScreenshotManager.should_try_again():
             # The screen could not be read — locked, or a remote session with
             # nothing on it. The day's count was not spent, so ask for this
             # one again instead of losing it.
@@ -1814,8 +1437,7 @@ class EmployeePanel(QWidget):
         # which server — and "● Server unreachable" left somebody unable to
         # tell whether the wrong address had been configured or the right one
         # was down.
-        self._srv_label.setText(
-            server_label() if ok else f"{server_label()}  ·  unreachable")
+        self._srv_label.setText("Connected" if ok else "Server unreachable")
         self._srv_label.setStyleSheet(
             f"color:{C.GREEN if ok else C.RED};font-size:{Type.MICRO}px;border:none;")
         card = self.pages["dashboard"].c_upload
@@ -2008,18 +1630,6 @@ class EmployeePanel(QWidget):
                 QMessageBox.warning(self, "Signed out", reason)
             except Exception:
                 pass
-        # TELL THE SERVER FIRST, while the token is still valid.
-        #
-        # Nothing did. /auth/logout was reached only from the tray's Exit, so
-        # this button cleared the session locally and left it open on the
-        # server — and once one login at a time became strict, signing out and
-        # straight back in was refused for two minutes.
-        #
-        # Skipped when the server is the one that ended it: force logout and
-        # suspension have already cleared the row, and the token is dead.
-        if not reason:
-            AuthService.sign_out_on_server()
-
         # LOGOUT clear_session() se PEHLE log hota hai — warna employee_id
         # None ho jaata hai aur LoggerService chup-chaap drop kar deta hai.
         #
@@ -2045,6 +1655,24 @@ class EmployeePanel(QWidget):
                 fn()
             except Exception as error:
                 print("[PANEL] logout step failed:", error)
+
+        # TELL THE SERVER, while the token is still valid — and only AFTER
+        # the shift is closed above.
+        #
+        # Nothing did at first. /auth/logout was reached only from the tray's
+        # Exit, so this button cleared the session locally and left it open on
+        # the server — and once one login at a time became strict, signing out
+        # and straight back in was refused for two minutes.
+        #
+        # THE ORDER MATTERS. This used to run first, which cleared the token,
+        # and end_shift's /attendance/logout then went out with a dead token
+        # and was refused. Every sign-out left the day's attendance row open:
+        # "Incomplete" beside somebody who had pressed Logout.
+        #
+        # Skipped when the server is the one that ended it: force logout and
+        # suspension have already cleared the row, and the token is dead.
+        if not reason:
+            AuthService.sign_out_on_server()
 
         self._stop_everything()
         SessionManager.clear_session()
