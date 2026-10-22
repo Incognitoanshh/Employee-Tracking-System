@@ -4,13 +4,13 @@ name: Build Cross-Platform Desktop Apps
 # the app reports about itself (client/core/config APP_VERSION) — otherwise
 # "which build is this?" has two answers.
 #
-# 1.0.2 carries the tracker board, the on-demand screenshot, per-minute
-# activity scoring, and the Employees list that no longer cuts its own buttons
-# off. THE SERVER MUST BE DEPLOYED FIRST: the tracker, the screenshot request
-# and the activity minutes are all new routes, and against an older server
-# they simply are not there. Still no tag, so the release job below does not
-# run and nothing is published.
-run-name: v1.0.2
+# 1.0.3 carries the sign-out that closes the day's attendance row, the
+# screenshot upload retried an hour apart and three times a day rather than
+# every minute, one POSTPONED line per requested capture instead of one per
+# sync, and the employee panel without its logs, capture graph and monitoring
+# settings. The server side (997eb5b, 5dbd219) is already deployed. Released
+# under the tag v1.0.3, so the release job below publishes it.
+run-name: v1.0.3
 # THE ARTIFACT NAMES NO LONGER CARRY A LABEL, deliberately.
 #
 # They used to ("test-5-Windows-Installer"), and twice a run was renamed
